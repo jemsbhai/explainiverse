@@ -1,10 +1,12 @@
 [tool.poetry]
 name = "explainiverse"
-version = "0.1.0"
-description = "Unified Explainability Framework"
+version = "0.1.0a1"
+description = "Unified, extensible explainability framework supporting LIME, SHAP, and custom adapters"
 authors = ["Muntaser Syed <jemsbhai@gmail.com>"]
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/jemsbhai/explainiverse"
+homepage = "https://github.com/jemsbhai/explainiverse"
 packages = [{ include = "explainiverse", from = "src" }]
 
 [tool.poetry.dependencies]
@@ -18,3 +20,7 @@ shap = "^0.48.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[project.urls]
+"Bug Tracker" = "https://github.com/jemsbhai/explainiverse/issues"
+"Documentation" = "https://github.com/jemsbhai/explainiverse#readme"
