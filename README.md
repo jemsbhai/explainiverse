@@ -25,7 +25,7 @@ This package will soon be available on PyPI.
 For development use:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/explainiverse.git
+git clone https://github.com/jemsbhai/explainiverse.git
 cd explainiverse
 poetry install
 ```
