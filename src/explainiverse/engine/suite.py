@@ -3,7 +3,9 @@
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 from explainiverse.explainers.attribution.shap_wrapper import ShapExplainer
-
+from explainiverse.evaluation.metrics import compute_roar
+from sklearn.metrics import accuracy_score
+from sklearn.linear_model import LogisticRegression
 
 class ExplanationSuite:
     """
@@ -88,3 +90,54 @@ class ExplanationSuite:
             return ShapExplainer(model=self.model, **kwargs)
         else:
             raise ValueError(f"Unknown explainer: {name}")
+        
+
+
+    def evaluate_roar(
+        self,
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        top_k: int = 2,
+        model_class=None,
+        model_kwargs: dict = None
+    ):
+        """
+        Evaluate each explainer using ROAR (Remove And Retrain).
+        
+        Args:
+            X_train, y_train: training data
+            X_test, y_test: test data
+            top_k: number of features to mask
+            model_class: model constructor with .fit() and .predict() (default: same as current model)
+            model_kwargs: optional keyword args for new model instance
+
+        Returns:
+            Dict of {explainer_name: accuracy drop (baseline - retrained)}
+        """
+        from explainiverse.evaluation.metrics import compute_roar
+
+        model_kwargs = model_kwargs or {}
+
+        # Default to type(self.model.model) if not provided
+        if model_class is None:
+            model_class = type(self.model.model)
+
+        roar_scores = {}
+
+        for name, explanation in self.explanations.items():
+            print(f"[ROAR] Evaluating explainer: {name}")
+            roar = compute_roar(
+                model_class=model_class,
+                X_train=X_train,
+                y_train=y_train,
+                X_test=X_test,
+                y_test=y_test,
+                explanations=[explanation],  # single-instance for now
+                top_k=top_k,
+                model_kwargs=model_kwargs
+            )
+            roar_scores[name] = roar
+
+        return roar_scores
