@@ -1,7 +1,7 @@
 # Explainiverse
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI).  
-It provides a standardized interface for model-agnostic explainability with 10 state-of-the-art XAI methods, evaluation metrics, and a plugin registry for easy extensibility.
+It provides a standardized interface for model-agnostic explainability with 11 state-of-the-art XAI methods, evaluation metrics, and a plugin registry for easy extensibility.
 
 ---
 
@@ -14,6 +14,7 @@ It provides a standardized interface for model-agnostic explainability with 10 s
 - **SHAP** - SHapley Additive exPlanations via KernelSHAP ([Lundberg & Lee, 2017](https://arxiv.org/abs/1705.07874))
 - **TreeSHAP** - Exact SHAP values for tree models, 10x+ faster ([Lundberg et al., 2018](https://arxiv.org/abs/1802.03888))
 - **Integrated Gradients** - Axiomatic attributions for neural networks ([Sundararajan et al., 2017](https://arxiv.org/abs/1703.01365))
+- **GradCAM/GradCAM++** - Visual explanations for CNNs ([Selvaraju et al., 2017](https://arxiv.org/abs/1610.02391))
 - **Anchors** - High-precision rule-based explanations ([Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491))
 - **Counterfactual** - DiCE-style diverse counterfactual explanations ([Mothilal et al., 2020](https://arxiv.org/abs/1905.07697))
 
@@ -80,7 +81,7 @@ adapter = SklearnAdapter(model, class_names=iris.target_names.tolist())
 
 # List available explainers
 print(default_registry.list_explainers())
-# ['lime', 'shap', 'treeshap', 'integrated_gradients', 'anchors', 'counterfactual', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
+# ['lime', 'shap', 'treeshap', 'integrated_gradients', 'gradcam', 'anchors', 'counterfactual', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
 
 # Create and use an explainer
 explainer = default_registry.create(
@@ -101,9 +102,9 @@ print(explanation.explanation_data["feature_attributions"])
 local_tabular = default_registry.filter(scope="local", data_type="tabular")
 print(local_tabular)  # ['lime', 'shap', 'treeshap', 'integrated_gradients', 'anchors', 'counterfactual']
 
-# Find explainers optimized for tree models
-tree_explainers = default_registry.filter(model_type="tree")
-print(tree_explainers)  # ['treeshap']
+# Find explainers for images/CNNs
+image_explainers = default_registry.filter(data_type="image")
+print(image_explainers)  # ['lime', 'integrated_gradients', 'gradcam']
 
 # Get recommendations
 recommendations = default_registry.recommend(
@@ -195,6 +196,35 @@ print(explanation.explanation_data["feature_attributions"])
 # Check convergence (sum of attributions ≈ F(x) - F(baseline))
 explanation = explainer.explain(X_test[0], return_convergence_delta=True)
 print(f"Convergence delta: {explanation.explanation_data['convergence_delta']}")
+```
+
+### GradCAM for CNN Visual Explanations
+
+```python
+from explainiverse.explainers import GradCAMExplainer
+from explainiverse import PyTorchAdapter
+
+# Wrap your CNN model
+adapter = PyTorchAdapter(cnn_model, task="classification", class_names=class_names)
+
+# Find the last convolutional layer
+layers = adapter.list_layers()
+target_layer = "layer4"  # Adjust based on your model architecture
+
+# Create GradCAM explainer
+explainer = GradCAMExplainer(
+    model=adapter,
+    target_layer=target_layer,
+    class_names=class_names,
+    method="gradcam"  # or "gradcam++" for improved version
+)
+
+# Explain an image prediction
+explanation = explainer.explain(image)  # image shape: (C, H, W) or (N, C, H, W)
+heatmap = explanation.explanation_data["heatmap"]
+
+# Create overlay visualization
+overlay = explainer.get_overlay(original_image, heatmap, alpha=0.5)
 ```
 
 ### Using Specific Explainers
@@ -302,8 +332,8 @@ poetry run pytest tests/test_new_explainers.py -v
 - [x] Permutation Importance, PDP, ALE, SAGE
 - [x] Explainer Registry with filtering
 - [x] PyTorch Adapter ✅
-- [x] Integrated Gradients ✅ NEW
-- [ ] GradCAM for CNNs
+- [x] Integrated Gradients ✅
+- [x] GradCAM/GradCAM++ for CNNs ✅ NEW
 - [ ] TensorFlow adapter
 - [ ] Interactive visualization dashboard
 

@@ -7,5 +7,6 @@ typically via the PyTorchAdapter.
 """
 
 from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
+from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
 
-__all__ = ["IntegratedGradientsExplainer"]
+__all__ = ["IntegratedGradientsExplainer", "GradCAMExplainer"]

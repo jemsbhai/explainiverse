@@ -370,6 +370,7 @@ def _create_default_registry() -> ExplainerRegistry:
     from explainiverse.explainers.global_explainers.sage import SAGEExplainer
     from explainiverse.explainers.counterfactual.dice_wrapper import CounterfactualExplainer
     from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
+    from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
     
     registry = ExplainerRegistry()
     
@@ -474,6 +475,23 @@ def _create_default_registry() -> ExplainerRegistry:
             description="Integrated Gradients - axiomatic attributions for neural networks (requires PyTorch)",
             paper_reference="Sundararajan et al., 2017 - 'Axiomatic Attribution for Deep Networks' (ICML)",
             complexity="O(n_steps * forward_pass)",
+            requires_training_data=False,
+            supports_batching=True
+        )
+    )
+    
+    # Register GradCAM (for CNNs)
+    registry.register(
+        name="gradcam",
+        explainer_class=GradCAMExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["neural"],
+            data_types=["image"],
+            task_types=["classification"],
+            description="GradCAM/GradCAM++ - visual explanations for CNNs via gradient-weighted activations (requires PyTorch)",
+            paper_reference="Selvaraju et al., 2017 - 'Grad-CAM: Visual Explanations from Deep Networks' (ICCV)",
+            complexity="O(forward_pass + backward_pass)",
             requires_training_data=False,
             supports_batching=True
         )

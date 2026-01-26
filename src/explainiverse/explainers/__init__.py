@@ -27,6 +27,7 @@ from explainiverse.explainers.global_explainers.partial_dependence import Partia
 from explainiverse.explainers.global_explainers.ale import ALEExplainer
 from explainiverse.explainers.global_explainers.sage import SAGEExplainer
 from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
+from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
 
 __all__ = [
     # Local explainers
@@ -36,6 +37,7 @@ __all__ = [
     "AnchorsExplainer",
     "CounterfactualExplainer",
     "IntegratedGradientsExplainer",
+    "GradCAMExplainer",
     # Global explainers
     "PermutationImportanceExplainer",
     "PartialDependenceExplainer",
