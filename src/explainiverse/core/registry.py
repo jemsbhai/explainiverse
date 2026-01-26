@@ -371,6 +371,7 @@ def _create_default_registry() -> ExplainerRegistry:
     from explainiverse.explainers.counterfactual.dice_wrapper import CounterfactualExplainer
     from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
     from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
+    from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
     
     registry = ExplainerRegistry()
     
@@ -493,6 +494,40 @@ def _create_default_registry() -> ExplainerRegistry:
             paper_reference="Selvaraju et al., 2017 - 'Grad-CAM: Visual Explanations from Deep Networks' (ICCV)",
             complexity="O(forward_pass + backward_pass)",
             requires_training_data=False,
+            supports_batching=True
+        )
+    )
+    
+    # Register DeepLIFT (for neural networks)
+    registry.register(
+        name="deeplift",
+        explainer_class=DeepLIFTExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["neural"],
+            data_types=["tabular", "image"],
+            task_types=["classification", "regression"],
+            description="DeepLIFT - reference-based attributions via activation differences (requires PyTorch)",
+            paper_reference="Shrikumar et al., 2017 - 'Learning Important Features Through Propagating Activation Differences' (ICML)",
+            complexity="O(forward_pass + backward_pass)",
+            requires_training_data=False,
+            supports_batching=True
+        )
+    )
+    
+    # Register DeepSHAP (DeepLIFT + SHAP)
+    registry.register(
+        name="deepshap",
+        explainer_class=DeepLIFTShapExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["neural"],
+            data_types=["tabular", "image"],
+            task_types=["classification", "regression"],
+            description="DeepSHAP - DeepLIFT averaged over background samples for SHAP values (requires PyTorch)",
+            paper_reference="Lundberg & Lee, 2017 - combines DeepLIFT with SHAP",
+            complexity="O(n_background * forward_pass)",
+            requires_training_data=True,
             supports_batching=True
         )
     )

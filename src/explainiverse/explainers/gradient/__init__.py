@@ -8,5 +8,11 @@ typically via the PyTorchAdapter.
 
 from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
 from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
+from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
 
-__all__ = ["IntegratedGradientsExplainer", "GradCAMExplainer"]
+__all__ = [
+    "IntegratedGradientsExplainer", 
+    "GradCAMExplainer",
+    "DeepLIFTExplainer",
+    "DeepLIFTShapExplainer",
+]

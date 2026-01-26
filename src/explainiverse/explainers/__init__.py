@@ -28,6 +28,7 @@ from explainiverse.explainers.global_explainers.ale import ALEExplainer
 from explainiverse.explainers.global_explainers.sage import SAGEExplainer
 from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
 from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
+from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
 
 __all__ = [
     # Local explainers
@@ -38,6 +39,8 @@ __all__ = [
     "CounterfactualExplainer",
     "IntegratedGradientsExplainer",
     "GradCAMExplainer",
+    "DeepLIFTExplainer",
+    "DeepLIFTShapExplainer",
     # Global explainers
     "PermutationImportanceExplainer",
     "PartialDependenceExplainer",
