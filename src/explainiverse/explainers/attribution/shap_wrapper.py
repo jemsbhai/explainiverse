@@ -1,4 +1,14 @@
 # src/explainiverse/explainers/attribution/shap_wrapper.py
+"""
+SHAP Explainer - SHapley Additive exPlanations.
+
+SHAP values provide a unified measure of feature importance based on
+game-theoretic Shapley values, offering both local and global interpretability.
+
+Reference:
+    Lundberg, S.M. & Lee, S.I. (2017). A Unified Approach to Interpreting 
+    Model Predictions. NeurIPS 2017.
+"""
 
 import shap
 import numpy as np
@@ -10,21 +20,33 @@ from explainiverse.core.explanation import Explanation
 class ShapExplainer(BaseExplainer):
     """
     SHAP explainer (KernelSHAP-based) for model-agnostic explanations.
+    
+    KernelSHAP is a model-agnostic method that approximates SHAP values
+    using a weighted linear regression. It works with any model that
+    provides predictions.
+    
+    Attributes:
+        model: Model adapter with .predict() method
+        feature_names: List of feature names
+        class_names: List of class labels
+        explainer: The underlying SHAP KernelExplainer
     """
 
     def __init__(self, model, background_data, feature_names, class_names):
         """
+        Initialize the SHAP explainer.
+        
         Args:
             model: A model adapter with a .predict method.
             background_data: A 2D numpy array used as SHAP background distribution.
+                            Typically a representative sample of training data.
             feature_names: List of feature names.
             class_names: List of class labels.
         """
         super().__init__(model)
-        self.feature_names = feature_names
-        self.class_names = class_names
+        self.feature_names = list(feature_names)
+        self.class_names = list(class_names)
         self.explainer = shap.KernelExplainer(model.predict, background_data)
-
 
     def explain(self, instance, top_labels=1):
         """
@@ -35,7 +57,7 @@ class ShapExplainer(BaseExplainer):
             top_labels: Number of top classes to explain (default: 1)
 
         Returns:
-            Explanation object
+            Explanation object with feature attributions
         """
         instance = np.array(instance).reshape(1, -1)  # Ensure 2D
         shap_values = self.explainer.shap_values(instance)
@@ -53,11 +75,12 @@ class ShapExplainer(BaseExplainer):
             label_name = self.class_names[0] if self.class_names else "class_0"
             class_shap = shap_values[0]
 
-            flat_shap = np.array(class_shap).flatten()
-            attributions = {
-                fname: float(flat_shap[i])
-                for i, fname in enumerate(self.feature_names)
-            }
+        # Build attributions dict
+        flat_shap = np.array(class_shap).flatten()
+        attributions = {
+            fname: float(flat_shap[i])
+            for i, fname in enumerate(self.feature_names)
+        }
 
         return Explanation(
             explainer_name="SHAP",
