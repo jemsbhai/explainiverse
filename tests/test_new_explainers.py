@@ -512,26 +512,240 @@ class TestSAGE:
 
 
 # =============================================================================
-# TreeSHAP Tests (SKIPPED - Not yet implemented)
+# TreeSHAP Tests
 # =============================================================================
 
 class TestTreeSHAP:
     """Tests for TreeSHAP (optimized SHAP for tree models)."""
     
-    @pytest.mark.skip(reason="TreeSHAP not yet implemented - planned for v0.2")
-    def test_treeshap_basic(self, iris_setup):
-        """TreeSHAP works with tree-based models."""
-        pass
+    @pytest.fixture
+    def rf_setup(self):
+        """Setup with RandomForest for TreeSHAP tests."""
+        iris = load_iris()
+        X, y = iris.data, iris.target
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42, stratify=y
+        )
+        model = RandomForestClassifier(n_estimators=50, random_state=42)
+        model.fit(X_train, y_train)
+        
+        return {
+            "X_train": X_train,
+            "X_test": X_test,
+            "y_train": y_train,
+            "y_test": y_test,
+            "feature_names": list(iris.feature_names),
+            "class_names": iris.target_names.tolist(),
+            "model": model
+        }
     
-    @pytest.mark.skip(reason="TreeSHAP not yet implemented - planned for v0.2")
-    def test_treeshap_faster_than_kernelshap(self, iris_setup):
-        """TreeSHAP should be significantly faster than KernelSHAP."""
-        pass
+    def test_treeshap_basic(self, rf_setup):
+        """TreeSHAP works with RandomForest."""
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        
+        explainer = TreeShapExplainer(
+            model=rf_setup["model"],
+            feature_names=rf_setup["feature_names"],
+            class_names=rf_setup["class_names"]
+        )
+        
+        explanation = explainer.explain(rf_setup["X_test"][0])
+        
+        assert isinstance(explanation, Explanation)
+        assert explanation.explainer_name == "TreeSHAP"
+        assert "feature_attributions" in explanation.explanation_data
+        assert "base_value" in explanation.explanation_data
+        
+        attributions = explanation.explanation_data["feature_attributions"]
+        assert len(attributions) == len(rf_setup["feature_names"])
     
-    @pytest.mark.skip(reason="TreeSHAP not yet implemented - planned for v0.2")
+    def test_treeshap_with_xgboost(self):
+        """TreeSHAP works with XGBoost."""
+        from xgboost import XGBClassifier
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        
+        iris = load_iris()
+        X, y = iris.data, iris.target
+        X_train, X_test, _, _ = train_test_split(X, y, test_size=0.3, random_state=42)
+        
+        model = XGBClassifier(n_estimators=50, random_state=42, use_label_encoder=False, eval_metric='mlogloss')
+        model.fit(X_train, y[:len(X_train)])
+        
+        explainer = TreeShapExplainer(
+            model=model,
+            feature_names=list(iris.feature_names),
+            class_names=iris.target_names.tolist()
+        )
+        
+        explanation = explainer.explain(X_test[0])
+        
+        assert isinstance(explanation, Explanation)
+        assert explanation.explainer_name == "TreeSHAP"
+        assert "feature_attributions" in explanation.explanation_data
+    
+    def test_treeshap_with_gradient_boosting(self):
+        """TreeSHAP works with GradientBoosting (binary classification)."""
+        from sklearn.ensemble import GradientBoostingClassifier
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        
+        # GradientBoosting only supports binary in SHAP TreeExplainer
+        X, y = make_classification(
+            n_samples=200, n_features=10, n_informative=5,
+            n_classes=2, random_state=42
+        )
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42
+        )
+        feature_names = [f"feature_{i}" for i in range(X.shape[1])]
+        
+        model = GradientBoostingClassifier(n_estimators=50, random_state=42)
+        model.fit(X_train, y_train)
+        
+        explainer = TreeShapExplainer(
+            model=model,
+            feature_names=feature_names,
+            class_names=["class_0", "class_1"]
+        )
+        
+        explanation = explainer.explain(X_test[0])
+        
+        assert isinstance(explanation, Explanation)
+        assert "feature_attributions" in explanation.explanation_data
+    
+    def test_treeshap_rejects_non_tree_models(self):
+        """TreeSHAP raises error for non-tree models."""
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        
+        iris = load_iris()
+        X, y = iris.data, iris.target
+        
+        model = LogisticRegression(max_iter=200)
+        model.fit(X, y)
+        
+        with pytest.raises(ValueError, match="tree-based model"):
+            TreeShapExplainer(
+                model=model,
+                feature_names=list(iris.feature_names),
+                class_names=iris.target_names.tolist()
+            )
+    
+    def test_treeshap_batch_explain(self, rf_setup):
+        """TreeSHAP can efficiently explain batches."""
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        
+        explainer = TreeShapExplainer(
+            model=rf_setup["model"],
+            feature_names=rf_setup["feature_names"],
+            class_names=rf_setup["class_names"]
+        )
+        
+        # Explain 5 instances at once
+        explanations = explainer.explain_batch(rf_setup["X_test"][:5])
+        
+        assert len(explanations) == 5
+        for exp in explanations:
+            assert isinstance(exp, Explanation)
+            assert "feature_attributions" in exp.explanation_data
+    
+    def test_treeshap_interactions(self, rf_setup):
+        """TreeSHAP can compute interaction values."""
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        
+        explainer = TreeShapExplainer(
+            model=rf_setup["model"],
+            feature_names=rf_setup["feature_names"],
+            class_names=rf_setup["class_names"]
+        )
+        
+        explanation = explainer.explain_interactions(rf_setup["X_test"][0])
+        
+        assert isinstance(explanation, Explanation)
+        assert explanation.explainer_name == "TreeSHAP_Interactions"
+        assert "interaction_matrix" in explanation.explanation_data
+        assert "feature_attributions" in explanation.explanation_data  # Main effects
+        
+        # Interaction matrix should be n_features x n_features
+        matrix = explanation.explanation_data["interaction_matrix"]
+        n_features = len(rf_setup["feature_names"])
+        assert len(matrix) == n_features
+        assert len(matrix[0]) == n_features
+    
+    def test_treeshap_faster_than_kernelshap(self, rf_setup):
+        """TreeSHAP should be faster than KernelSHAP for tree models."""
+        import time
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        from explainiverse.explainers.attribution.shap_wrapper import ShapExplainer
+        from explainiverse.adapters.sklearn_adapter import SklearnAdapter
+        
+        # TreeSHAP timing
+        tree_explainer = TreeShapExplainer(
+            model=rf_setup["model"],
+            feature_names=rf_setup["feature_names"],
+            class_names=rf_setup["class_names"]
+        )
+        
+        start = time.time()
+        for i in range(10):
+            tree_explainer.explain(rf_setup["X_test"][i])
+        treeshap_time = time.time() - start
+        
+        # KernelSHAP timing (with adapter)
+        adapter = SklearnAdapter(rf_setup["model"], class_names=rf_setup["class_names"])
+        kernel_explainer = ShapExplainer(
+            model=adapter,
+            background_data=rf_setup["X_train"][:50],
+            feature_names=rf_setup["feature_names"],
+            class_names=rf_setup["class_names"]
+        )
+        
+        start = time.time()
+        for i in range(10):
+            kernel_explainer.explain(rf_setup["X_test"][i])
+        kernelshap_time = time.time() - start
+        
+        # TreeSHAP should be faster (at least 2x, usually 10x+)
+        print(f"\nTreeSHAP: {treeshap_time:.3f}s, KernelSHAP: {kernelshap_time:.3f}s")
+        assert treeshap_time < kernelshap_time
+    
     def test_treeshap_registered(self):
         """TreeSHAP is registered in default registry."""
-        pass
+        from explainiverse.core.registry import default_registry
+        
+        assert "treeshap" in default_registry.list_explainers()
+        meta = default_registry.get_meta("treeshap")
+        assert meta.scope == "local"
+        assert "tree" in meta.model_types
+    
+    def test_treeshap_via_registry(self, rf_setup):
+        """TreeSHAP can be created via the registry."""
+        from explainiverse.core.registry import default_registry
+        
+        explainer = default_registry.create(
+            "treeshap",
+            model=rf_setup["model"],
+            feature_names=rf_setup["feature_names"],
+            class_names=rf_setup["class_names"]
+        )
+        
+        explanation = explainer.explain(rf_setup["X_test"][0])
+        assert explanation.explainer_name == "TreeSHAP"
+    
+    def test_treeshap_accepts_adapter(self, rf_setup):
+        """TreeSHAP can extract model from adapter."""
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
+        from explainiverse.adapters.sklearn_adapter import SklearnAdapter
+        
+        adapter = SklearnAdapter(rf_setup["model"], class_names=rf_setup["class_names"])
+        
+        # Should work - extracts model from adapter
+        explainer = TreeShapExplainer(
+            model=adapter,
+            feature_names=rf_setup["feature_names"],
+            class_names=rf_setup["class_names"]
+        )
+        
+        explanation = explainer.explain(rf_setup["X_test"][0])
+        assert explanation.explainer_name == "TreeSHAP"
 
 
 # =============================================================================

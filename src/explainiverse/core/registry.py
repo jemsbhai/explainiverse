@@ -362,6 +362,7 @@ def _create_default_registry() -> ExplainerRegistry:
     """Create and populate the default global registry."""
     from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
     from explainiverse.explainers.attribution.shap_wrapper import ShapExplainer
+    from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
     from explainiverse.explainers.rule_based.anchors_wrapper import AnchorsExplainer
     from explainiverse.explainers.global_explainers.permutation_importance import PermutationImportanceExplainer
     from explainiverse.explainers.global_explainers.partial_dependence import PartialDependenceExplainer
@@ -405,6 +406,23 @@ def _create_default_registry() -> ExplainerRegistry:
             paper_reference="Lundberg & Lee, 2017 - 'A Unified Approach to Interpreting Model Predictions'",
             complexity="O(2^n_features) approximated",
             requires_training_data=True,
+            supports_batching=True
+        )
+    )
+    
+    # Register TreeSHAP (optimized for tree models)
+    registry.register(
+        name="treeshap",
+        explainer_class=TreeShapExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["tree", "ensemble"],
+            data_types=["tabular"],
+            task_types=["classification", "regression"],
+            description="TreeSHAP - exact SHAP values for tree-based models (RandomForest, XGBoost, etc.)",
+            paper_reference="Lundberg et al., 2018 - 'Consistent Individualized Feature Attribution for Tree Ensembles'",
+            complexity="O(TLD^2) - polynomial in tree depth",
+            requires_training_data=False,
             supports_batching=True
         )
     )

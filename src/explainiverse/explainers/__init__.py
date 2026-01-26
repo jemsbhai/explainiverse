@@ -4,7 +4,8 @@ Explainiverse Explainers - comprehensive XAI method implementations.
 
 Local Explainers (instance-level):
 - LIME: Local Interpretable Model-agnostic Explanations
-- SHAP: SHapley Additive exPlanations
+- SHAP: SHapley Additive exPlanations (KernelSHAP - model-agnostic)
+- TreeSHAP: Optimized exact SHAP for tree-based models
 - Anchors: High-precision rule-based explanations
 - Counterfactual: Diverse counterfactual explanations
 
@@ -17,6 +18,7 @@ Global Explainers (model-level):
 
 from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 from explainiverse.explainers.attribution.shap_wrapper import ShapExplainer
+from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 from explainiverse.explainers.rule_based.anchors_wrapper import AnchorsExplainer
 from explainiverse.explainers.counterfactual.dice_wrapper import CounterfactualExplainer
 from explainiverse.explainers.global_explainers.permutation_importance import PermutationImportanceExplainer
@@ -28,6 +30,7 @@ __all__ = [
     # Local explainers
     "LimeExplainer",
     "ShapExplainer",
+    "TreeShapExplainer",
     "AnchorsExplainer",
     "CounterfactualExplainer",
     # Global explainers
