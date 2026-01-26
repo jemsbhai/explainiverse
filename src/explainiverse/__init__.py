@@ -27,7 +27,7 @@ from explainiverse.core.registry import (
 from explainiverse.adapters.sklearn_adapter import SklearnAdapter
 from explainiverse.engine.suite import ExplanationSuite
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     # Core
