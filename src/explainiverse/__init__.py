@@ -2,8 +2,9 @@
 """
 Explainiverse - A unified, extensible explainability framework.
 
-Supports multiple XAI methods including LIME, SHAP, Anchors, Counterfactuals,
-Permutation Importance, PDP, ALE, and SAGE through a consistent interface.
+Supports multiple XAI methods including LIME, SHAP, TreeSHAP, Anchors, 
+Counterfactuals, Permutation Importance, PDP, ALE, and SAGE through a 
+consistent interface.
 
 Quick Start:
     from explainiverse import default_registry
@@ -14,6 +15,10 @@ Quick Start:
     # Create an explainer
     explainer = default_registry.create("lime", model=adapter, training_data=X, ...)
     explanation = explainer.explain(instance)
+    
+For PyTorch models:
+    from explainiverse import PyTorchAdapter  # Requires torch
+    adapter = PyTorchAdapter(model, task="classification")
 """
 
 from explainiverse.core.explainer import BaseExplainer
@@ -25,9 +30,10 @@ from explainiverse.core.registry import (
     get_default_registry,
 )
 from explainiverse.adapters.sklearn_adapter import SklearnAdapter
+from explainiverse.adapters import TORCH_AVAILABLE
 from explainiverse.engine.suite import ExplanationSuite
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     # Core
@@ -40,6 +46,12 @@ __all__ = [
     "get_default_registry",
     # Adapters
     "SklearnAdapter",
+    "TORCH_AVAILABLE",
     # Engine
     "ExplanationSuite",
 ]
+
+# Conditionally export PyTorchAdapter if torch is available
+if TORCH_AVAILABLE:
+    from explainiverse.adapters import PyTorchAdapter
+    __all__.append("PyTorchAdapter")

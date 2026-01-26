@@ -1,7 +1,7 @@
 # Explainiverse
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI).  
-It provides a standardized interface for model-agnostic explainability with 8 state-of-the-art XAI methods, evaluation metrics, and a plugin registry for easy extensibility.
+It provides a standardized interface for model-agnostic explainability with 9 state-of-the-art XAI methods, evaluation metrics, and a plugin registry for easy extensibility.
 
 ---
 
@@ -12,6 +12,7 @@ It provides a standardized interface for model-agnostic explainability with 8 st
 **Local Explainers** (instance-level explanations):
 - **LIME** - Local Interpretable Model-agnostic Explanations ([Ribeiro et al., 2016](https://arxiv.org/abs/1602.04938))
 - **SHAP** - SHapley Additive exPlanations via KernelSHAP ([Lundberg & Lee, 2017](https://arxiv.org/abs/1705.07874))
+- **TreeSHAP** - Exact SHAP values for tree models, 10x+ faster ([Lundberg et al., 2018](https://arxiv.org/abs/1802.03888))
 - **Anchors** - High-precision rule-based explanations ([Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491))
 - **Counterfactual** - DiCE-style diverse counterfactual explanations ([Mothilal et al., 2020](https://arxiv.org/abs/1905.07697))
 
@@ -34,7 +35,7 @@ It provides a standardized interface for model-agnostic explainability with 8 st
 ### 🧪 Standardized Interface
 - Consistent `BaseExplainer` API
 - Unified `Explanation` output format
-- Model adapters for sklearn and more
+- Model adapters for sklearn and PyTorch
 
 ---
 
@@ -44,6 +45,12 @@ From PyPI:
 
 ```bash
 pip install explainiverse
+```
+
+With PyTorch support (for neural network explanations):
+
+```bash
+pip install explainiverse[torch]
 ```
 
 For development:
@@ -72,7 +79,7 @@ adapter = SklearnAdapter(model, class_names=iris.target_names.tolist())
 
 # List available explainers
 print(default_registry.list_explainers())
-# ['lime', 'shap', 'anchors', 'counterfactual', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
+# ['lime', 'shap', 'treeshap', 'anchors', 'counterfactual', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
 
 # Create and use an explainer
 explainer = default_registry.create(
@@ -91,11 +98,11 @@ print(explanation.explanation_data["feature_attributions"])
 ```python
 # Find local explainers for tabular data
 local_tabular = default_registry.filter(scope="local", data_type="tabular")
-print(local_tabular)  # ['lime', 'shap', 'anchors', 'counterfactual']
+print(local_tabular)  # ['lime', 'shap', 'treeshap', 'anchors', 'counterfactual']
 
-# Find global explainers
-global_explainers = default_registry.filter(scope="global")
-print(global_explainers)  # ['permutation_importance', 'partial_dependence', 'ale', 'sage']
+# Find explainers optimized for tree models
+tree_explainers = default_registry.filter(model_type="tree")
+print(tree_explainers)  # ['treeshap']
 
 # Get recommendations
 recommendations = default_registry.recommend(
@@ -103,6 +110,64 @@ recommendations = default_registry.recommend(
     data_type="tabular",
     scope_preference="local"
 )
+```
+
+### TreeSHAP for Tree Models (10x+ Faster)
+
+```python
+from explainiverse.explainers import TreeShapExplainer
+from sklearn.ensemble import RandomForestClassifier
+
+# Train a tree-based model
+model = RandomForestClassifier(n_estimators=100).fit(X_train, y_train)
+
+# TreeSHAP works directly with the model (no adapter needed)
+explainer = TreeShapExplainer(
+    model=model,
+    feature_names=feature_names,
+    class_names=class_names
+)
+
+# Single instance explanation
+explanation = explainer.explain(X_test[0])
+print(explanation.explanation_data["feature_attributions"])
+
+# Batch explanations (efficient)
+explanations = explainer.explain_batch(X_test[:10])
+
+# Feature interactions
+interactions = explainer.explain_interactions(X_test[0])
+print(interactions.explanation_data["interaction_matrix"])
+```
+
+### PyTorch Adapter for Neural Networks
+
+```python
+from explainiverse import PyTorchAdapter
+import torch.nn as nn
+
+# Define a PyTorch model
+model = nn.Sequential(
+    nn.Linear(10, 64),
+    nn.ReLU(),
+    nn.Linear(64, 3)
+)
+
+# Wrap with adapter
+adapter = PyTorchAdapter(
+    model,
+    task="classification",
+    class_names=["cat", "dog", "bird"]
+)
+
+# Use with any explainer
+predictions = adapter.predict(X)  # Returns numpy array
+
+# Get gradients for attribution methods
+predictions, gradients = adapter.predict_with_gradients(X)
+
+# Access intermediate layers
+activations = adapter.get_layer_output(X, layer_name="0")
 ```
 
 ### Using Specific Explainers
@@ -205,12 +270,14 @@ poetry run pytest tests/test_new_explainers.py -v
 ## Roadmap
 
 - [x] LIME, SHAP (KernelSHAP)
+- [x] TreeSHAP (optimized for tree models) ✅ NEW
 - [x] Anchors, Counterfactuals
 - [x] Permutation Importance, PDP, ALE, SAGE
 - [x] Explainer Registry with filtering
-- [ ] TreeSHAP (optimized for tree models)
+- [x] PyTorch Adapter ✅ NEW
 - [ ] Integrated Gradients (gradient-based for neural nets)
-- [ ] PyTorch/TensorFlow adapters
+- [ ] GradCAM for CNNs
+- [ ] TensorFlow adapter
 - [ ] Interactive visualization dashboard
 
 ---
