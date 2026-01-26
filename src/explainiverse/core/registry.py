@@ -369,6 +369,7 @@ def _create_default_registry() -> ExplainerRegistry:
     from explainiverse.explainers.global_explainers.ale import ALEExplainer
     from explainiverse.explainers.global_explainers.sage import SAGEExplainer
     from explainiverse.explainers.counterfactual.dice_wrapper import CounterfactualExplainer
+    from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
     
     registry = ExplainerRegistry()
     
@@ -458,6 +459,23 @@ def _create_default_registry() -> ExplainerRegistry:
             complexity="O(n_counterfactuals * optimization_steps)",
             requires_training_data=True,
             supports_batching=False
+        )
+    )
+    
+    # Register Integrated Gradients (for neural networks)
+    registry.register(
+        name="integrated_gradients",
+        explainer_class=IntegratedGradientsExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["neural"],
+            data_types=["tabular", "image"],
+            task_types=["classification", "regression"],
+            description="Integrated Gradients - axiomatic attributions for neural networks (requires PyTorch)",
+            paper_reference="Sundararajan et al., 2017 - 'Axiomatic Attribution for Deep Networks' (ICML)",
+            complexity="O(n_steps * forward_pass)",
+            requires_training_data=False,
+            supports_batching=True
         )
     )
     

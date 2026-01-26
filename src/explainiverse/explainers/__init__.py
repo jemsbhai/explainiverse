@@ -8,6 +8,7 @@ Local Explainers (instance-level):
 - TreeSHAP: Optimized exact SHAP for tree-based models
 - Anchors: High-precision rule-based explanations
 - Counterfactual: Diverse counterfactual explanations
+- Integrated Gradients: Gradient-based attributions for neural networks
 
 Global Explainers (model-level):
 - Permutation Importance: Feature importance via permutation
@@ -25,6 +26,7 @@ from explainiverse.explainers.global_explainers.permutation_importance import Pe
 from explainiverse.explainers.global_explainers.partial_dependence import PartialDependenceExplainer
 from explainiverse.explainers.global_explainers.ale import ALEExplainer
 from explainiverse.explainers.global_explainers.sage import SAGEExplainer
+from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
 
 __all__ = [
     # Local explainers
@@ -33,6 +35,7 @@ __all__ = [
     "TreeShapExplainer",
     "AnchorsExplainer",
     "CounterfactualExplainer",
+    "IntegratedGradientsExplainer",
     # Global explainers
     "PermutationImportanceExplainer",
     "PartialDependenceExplainer",

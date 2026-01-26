@@ -1,7 +1,7 @@
 # Explainiverse
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI).  
-It provides a standardized interface for model-agnostic explainability with 9 state-of-the-art XAI methods, evaluation metrics, and a plugin registry for easy extensibility.
+It provides a standardized interface for model-agnostic explainability with 10 state-of-the-art XAI methods, evaluation metrics, and a plugin registry for easy extensibility.
 
 ---
 
@@ -13,6 +13,7 @@ It provides a standardized interface for model-agnostic explainability with 9 st
 - **LIME** - Local Interpretable Model-agnostic Explanations ([Ribeiro et al., 2016](https://arxiv.org/abs/1602.04938))
 - **SHAP** - SHapley Additive exPlanations via KernelSHAP ([Lundberg & Lee, 2017](https://arxiv.org/abs/1705.07874))
 - **TreeSHAP** - Exact SHAP values for tree models, 10x+ faster ([Lundberg et al., 2018](https://arxiv.org/abs/1802.03888))
+- **Integrated Gradients** - Axiomatic attributions for neural networks ([Sundararajan et al., 2017](https://arxiv.org/abs/1703.01365))
 - **Anchors** - High-precision rule-based explanations ([Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491))
 - **Counterfactual** - DiCE-style diverse counterfactual explanations ([Mothilal et al., 2020](https://arxiv.org/abs/1905.07697))
 
@@ -79,7 +80,7 @@ adapter = SklearnAdapter(model, class_names=iris.target_names.tolist())
 
 # List available explainers
 print(default_registry.list_explainers())
-# ['lime', 'shap', 'treeshap', 'anchors', 'counterfactual', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
+# ['lime', 'shap', 'treeshap', 'integrated_gradients', 'anchors', 'counterfactual', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
 
 # Create and use an explainer
 explainer = default_registry.create(
@@ -98,7 +99,7 @@ print(explanation.explanation_data["feature_attributions"])
 ```python
 # Find local explainers for tabular data
 local_tabular = default_registry.filter(scope="local", data_type="tabular")
-print(local_tabular)  # ['lime', 'shap', 'treeshap', 'anchors', 'counterfactual']
+print(local_tabular)  # ['lime', 'shap', 'treeshap', 'integrated_gradients', 'anchors', 'counterfactual']
 
 # Find explainers optimized for tree models
 tree_explainers = default_registry.filter(model_type="tree")
@@ -168,6 +169,32 @@ predictions, gradients = adapter.predict_with_gradients(X)
 
 # Access intermediate layers
 activations = adapter.get_layer_output(X, layer_name="0")
+```
+
+### Integrated Gradients for Neural Networks
+
+```python
+from explainiverse.explainers import IntegratedGradientsExplainer
+from explainiverse import PyTorchAdapter
+
+# Wrap your PyTorch model
+adapter = PyTorchAdapter(model, task="classification", class_names=class_names)
+
+# Create IG explainer
+explainer = IntegratedGradientsExplainer(
+    model=adapter,
+    feature_names=feature_names,
+    class_names=class_names,
+    n_steps=50  # More steps = more accurate
+)
+
+# Explain a prediction
+explanation = explainer.explain(X_test[0])
+print(explanation.explanation_data["feature_attributions"])
+
+# Check convergence (sum of attributions ≈ F(x) - F(baseline))
+explanation = explainer.explain(X_test[0], return_convergence_delta=True)
+print(f"Convergence delta: {explanation.explanation_data['convergence_delta']}")
 ```
 
 ### Using Specific Explainers
@@ -270,12 +297,12 @@ poetry run pytest tests/test_new_explainers.py -v
 ## Roadmap
 
 - [x] LIME, SHAP (KernelSHAP)
-- [x] TreeSHAP (optimized for tree models) ✅ NEW
+- [x] TreeSHAP (optimized for tree models) ✅
 - [x] Anchors, Counterfactuals
 - [x] Permutation Importance, PDP, ALE, SAGE
 - [x] Explainer Registry with filtering
-- [x] PyTorch Adapter ✅ NEW
-- [ ] Integrated Gradients (gradient-based for neural nets)
+- [x] PyTorch Adapter ✅
+- [x] Integrated Gradients ✅ NEW
 - [ ] GradCAM for CNNs
 - [ ] TensorFlow adapter
 - [ ] Interactive visualization dashboard
