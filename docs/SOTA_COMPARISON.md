@@ -28,9 +28,10 @@
 | TreeSHAP | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
 | Integrated Gradients | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
 | GradCAM/GradCAM++ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| DeepLIFT | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Saliency Maps | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| SmoothGrad | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| DeepLIFT | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| DeepSHAP | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Saliency Maps | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| SmoothGrad | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Guided Backprop | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | LRP | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | Occlusion | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
@@ -49,7 +50,7 @@
 | **Concept-Based** |
 | TCAV | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | **Example-Based** |
-| ProtoDash | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| ProtoDash | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Influence Functions | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | **Glass-Box Models** |
 | EBM (Explainable Boosting) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
@@ -61,7 +62,7 @@
 | Data Type | Explainiverse | OmniXAI | Captum | Alibi | InterpretML | AIX360 |
 |-----------|:-------------:|:-------:|:------:|:-----:|:-----------:|:------:|
 | Tabular | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Images | ✅ (basic) | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Images | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Text/NLP | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Time Series | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 
@@ -78,10 +79,19 @@
 
 | Metric Type | Explainiverse | OmniXAI | Captum | Alibi | OpenXAI | AIX360 |
 |-------------|:-------------:|:-------:|:------:|:-----:|:-------:|:------:|
-| Faithfulness | ❌ | ❌ | ❌ | ❌ | ✅ (8) | ✅ (2) |
-| Stability/Robustness | ❌ | ❌ | ❌ | ❌ | ✅ (3) | ❌ |
-| Fairness | ❌ | ❌ | ❌ | ❌ | ✅ (11) | ❌ |
-| Ground-truth comparison | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Faithfulness** |
+| PGI (Prediction Gap Important) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| PGU (Prediction Gap Unimportant) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Comprehensiveness | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Sufficiency | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Faithfulness Correlation | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Stability** |
+| RIS (Relative Input Stability) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| ROS (Relative Output Stability) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Lipschitz Estimate | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Other** |
+| Fairness Metrics | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Ground-truth Comparison | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
 
 ### 5. INFRASTRUCTURE & TOOLING
 
@@ -90,201 +100,141 @@
 | GUI Dashboard | ❌ | ✅ | ✅ | ❌ | ✅ |
 | Jupyter Integration | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Plugin Registry | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Explainer Filtering | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Multi-Explainer Suite | ✅ | ✅ | ❌ | ❌ | ✅ |
 | BentoML Deployment | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Comparison Tools | ❌ | ✅ | ❌ | ❌ | ✅ |
 | GPT/LLM Explainer | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Data Analysis Tools | ❌ | ✅ | ❌ | ❌ | ✅ |
 
 ---
 
-## Gap Analysis: What Explainiverse is Missing
+## Explainiverse Current Strengths
 
-### CRITICAL GAPS (High Priority)
+### Competitive Advantages
 
-#### 1. **Gradient-Based Methods (Neural Networks)**
-Missing methods that Captum has:
-- **DeepLIFT** - Reference-based attribution
-- **SmoothGrad** - Noise-averaged gradients
-- **Saliency Maps** - Simple gradient visualization
-- **Guided Backprop** - Gradient filtering
-- **LRP (Layer-wise Relevance Propagation)** - Conservation-based attribution
-- **Occlusion** - Perturbation-based for images
-- **Feature Ablation** - Systematic feature removal
+| Strength | Description |
+|----------|-------------|
+| **Unified Registry** | Plugin architecture with rich metadata, filtering by scope/model/data type |
+| **Evaluation Metrics** | 8 built-in metrics (most frameworks have 0) - only OpenXAI competes here |
+| **SAGE** | Global Shapley importance - rare in other frameworks |
+| **ALE** | Accumulated Local Effects - only Alibi also has this |
+| **TreeSHAP** | Optimized exact SHAP for tree models |
+| **Anchors** | Rule-based explanations - only Alibi has this |
+| **ProtoDash** | Example-based with importance weights - only AIX360 has this |
+| **Clean API** | Consistent BaseExplainer interface across all methods |
+| **Gradient Family** | Complete set: IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM |
 
-#### 2. **Evaluation Metrics** (OpenXAI has 22 metrics)
-- **Faithfulness metrics**: PGI, PGU, Feature Agreement, Rank Agreement, Sign Agreement
-- **Stability metrics**: RIS, RRS, ROS (Relative Input/Representation/Output Stability)
-- **Fairness metrics**: Group-based disparities in explanation quality
+### Current Implementation (v0.6.0)
 
-#### 3. **Concept-Based Explanations**
-- **TCAV** - Testing with Concept Activation Vectors
-- **ACE** - Automatic Concept Extraction
-- **Concept Bottleneck Models**
+**16 Explainers:**
+- Local Perturbation: LIME, KernelSHAP, TreeSHAP
+- Local Gradient: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++
+- Rule-Based: Anchors
+- Counterfactual: DiCE-style
+- Example-Based: ProtoDash
+- Global: Permutation Importance, PDP, ALE, SAGE
 
-#### 4. **Text/NLP Support**
-- Text-specific LIME
-- Token importance visualization
-- Transformer attention analysis
-- Text counterfactuals (Polyjuice-style)
-
-### MEDIUM PRIORITY GAPS
-
-#### 5. **Time Series Support**
-- Time series SHAP
-- Temporal saliency maps
-- Time series counterfactuals
-
-#### 6. **Example-Based Explanations**
-- **ProtoDash** - Prototype selection with importance weights
-- **Influence Functions** - Training data attribution
-- **MMD-Critic** - Prototypes + criticisms
-
-#### 7. **Contrastive Explanations**
-- **CEM** - Contrastive Explanations Method (pertinent positives/negatives)
-- **CEM-MAF** - CEM with Monotonic Attribute Functions (for images)
-
-#### 8. **Glass-Box Models**
-- **EBM** - Explainable Boosting Machine (Microsoft's flagship)
-- **GLRM** - Generalized Linear Rule Models
-- **BRCG** - Boolean Rules via Column Generation
-
-### LOWER PRIORITY GAPS
-
-#### 9. **Visualization Dashboard**
-- Interactive web-based dashboard
-- Multi-explainer comparison views
-- What-if analysis tools
-
-#### 10. **TensorFlow Adapter**
-- Support for Keras/TF2 models
-- TF-specific gradient methods
-
-#### 11. **Production Features**
-- Model deployment integration (BentoML)
-- Explanation caching
-- Batch explanation APIs
-
-#### 12. **Data Analysis Tools**
-- Feature correlation analysis
-- Data imbalance detection
-- Feature selection tools
+**8 Evaluation Metrics:**
+- Faithfulness: PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
+- Stability: RIS, ROS, Lipschitz Estimate
 
 ---
 
-## Unique Strengths of Explainiverse
+## Gap Analysis: Remaining Opportunities
 
-### What We Do Well (Competitive Advantages)
+### HIGH PRIORITY (For Publication Impact)
 
-1. **Unified Registry System** - Plugin architecture with rich metadata
-2. **SAGE Implementation** - Few frameworks have global Shapley importance
-3. **ALE Support** - Not common in other frameworks
-4. **TreeSHAP Integration** - Optimized tree model support
-5. **Anchors** - Rule-based explanations (only Alibi has this)
-6. **Clean API Design** - Consistent interface across all explainers
-7. **Extensibility** - Easy to add new explainers via registry
+| Gap | Competitor Has It | Priority | Notes |
+|-----|-------------------|----------|-------|
+| **TCAV** | Captum | 🔴 Critical | Concept-based explanations - major differentiator |
+| **LRP** | Captum | 🟡 High | Layer-wise Relevance Propagation |
+| **Influence Functions** | Captum | 🟡 High | Training data attribution |
 
----
+### MEDIUM PRIORITY
 
-## Recommended Roadmap
+| Gap | Competitor Has It | Priority | Notes |
+|-----|-------------------|----------|-------|
+| Text/NLP Support | OmniXAI, Captum, Alibi | 🟡 Medium | Token importance, attention |
+| Time Series | OmniXAI, Captum | 🟡 Medium | Temporal explanations |
+| TensorFlow Adapter | OmniXAI, Alibi | 🟡 Medium | Keras/TF2 support |
+| CEM (Contrastive) | OmniXAI, Alibi, AIX360 | 🟡 Medium | Pertinent positives/negatives |
+| Occlusion | OmniXAI, Captum | 🟢 Low | Image perturbation method |
 
-### Phase 1: Core Neural Network Methods (v0.3.x)
-Priority: Fill critical gradient-based gaps
+### LOWER PRIORITY
 
-1. **DeepLIFT** - Most requested after IG
-2. **SmoothGrad** - Simple addition, high value
-3. **Saliency Maps** - Basic gradient visualization
-4. **Occlusion** - Important for image explanations
-5. **LRP** - Conservation-based (different from IG)
-
-### Phase 2: Evaluation Framework (v0.4.x)
-Priority: Enable explanation quality assessment
-
-1. **Faithfulness metrics** (PGI, PGU)
-2. **Stability metrics** (RIS, ROS)
-3. **Comparison tools** - Side-by-side explainer evaluation
-4. **Benchmark datasets** - Standard evaluation suite
-
-### Phase 3: Concept & Example-Based (v0.5.x)
-Priority: Higher-level explanations
-
-1. **TCAV** - Concept-based testing
-2. **ProtoDash** - Example selection
-3. **Influence Functions** - Training data attribution
-4. **CEM** - Contrastive explanations
-
-### Phase 4: Multi-Modal & Production (v0.6.x)
-Priority: Expand data type support
-
-1. **Text/NLP explainers**
-2. **Time series support**
-3. **TensorFlow adapter**
-4. **Visualization dashboard**
-
-### Phase 5: Glass-Box & Advanced (v0.7.x)
-Priority: Interpretable models
-
-1. **EBM wrapper** - InterpretML integration
-2. **Rule extraction** - BRCG/GLRM style
-3. **Production deployment tools**
-
----
-
-## Competitive Positioning
-
-### Target Differentiation
-
-| Use Case | Best Current Option | Explainiverse Target |
-|----------|---------------------|---------------------|
-| PyTorch deep learning | Captum | Match + unified interface |
-| Production ML | Alibi | Add deployment features |
-| Research benchmarking | OpenXAI | Add evaluation metrics |
-| Glass-box models | InterpretML | Integrate or wrap |
-| Multi-modal | OmniXAI | Focus on quality over breadth |
-
-### Strategic Focus
-1. **Quality over quantity** - Fewer methods, better implementations
-2. **Unified interface** - One API for all explainers
-3. **Evaluation-first** - Built-in quality metrics
-4. **Extensibility** - Easy plugin development
+| Gap | Competitor Has It | Priority | Notes |
+|-----|-------------------|----------|-------|
+| Guided Backprop | OmniXAI, Captum | 🟢 Low | Gradient filtering |
+| GUI Dashboard | OmniXAI, Captum, InterpretML | 🟢 Low | Interactive visualization |
+| Glass-Box (EBM) | InterpretML | 🟢 Low | Wrapper for InterpretML |
+| Fairness Metrics | OpenXAI | 🟢 Low | Group disparity measures |
 
 ---
 
 ## Summary Statistics
 
-| Metric | Explainiverse | OmniXAI | Captum | Alibi |
-|--------|---------------|---------|--------|-------|
-| Total Methods | 11 | ~25 | ~20 | ~15 |
-| Data Types | 2 | 4 | 4 | 3 |
-| Evaluation Metrics | 0 | 0 | 0 | 0 |
-| ML Frameworks | 2 | 3 | 1 | 3 |
+| Metric | Explainiverse | OmniXAI | Captum | Alibi | OpenXAI |
+|--------|:-------------:|:-------:|:------:|:-----:|:-------:|
+| **Explanation Methods** | 16 | ~25 | ~20 | ~15 | ~10 |
+| **Evaluation Metrics** | 8 | 0 | 0 | 0 | 22 |
+| **Data Types** | 2 | 4 | 4 | 3 | 1 |
+| **ML Frameworks** | 2 | 3 | 1 | 3 | 1 |
 
-### Gap Count by Category
-- Gradient methods: **7 missing**
-- Evaluation metrics: **22 missing**
-- Concept-based: **3 missing**
-- Text/NLP: **4 missing**
-- Time series: **3 missing**
-- Example-based: **3 missing**
-- Glass-box: **3 missing**
-- Infrastructure: **5 missing**
+### Explainiverse Position
 
-**Total significant gaps: ~50 features/methods**
+```
+                    Methods Coverage
+                         ↑
+                    High │  OmniXAI    Captum
+                         │      
+                         │  Explainiverse ←── Good balance
+                         │      
+                    Low  │  OpenXAI
+                         └────────────────────→
+                         Low              High
+                              Evaluation Metrics
+```
 
----
-
-## Gaps in SOTA That We Could Fill
-
-### Opportunities for Differentiation
-
-1. **Better Evaluation Metrics** - Most frameworks (except OpenXAI) lack built-in evaluation
-2. **Unified Multi-Framework Support** - No framework does Scikit+PyTorch+TensorFlow equally well
-3. **Registry + Evaluation Integration** - Recommend explainers based on evaluation results
-4. **Explanation Ensembles** - Combine multiple methods for robust explanations
-5. **Automatic Explainer Selection** - Use model type to auto-select best methods
-6. **Explanation Caching** - Production-ready caching layer
-7. **Cross-Method Comparison** - Built-in tools to compare explanations
+**Key Insight:** Explainiverse occupies a unique position with strong evaluation metrics (rivaling OpenXAI) combined with comprehensive explanation methods (approaching OmniXAI/Captum). Adding TCAV would further strengthen the method coverage while maintaining evaluation leadership.
 
 ---
 
-*Analysis completed: January 2026*
-*Next review: After Phase 1 completion*
+## Strategic Roadmap
+
+### Phase 1: Concept-Based (v0.7.0) - NEXT
+- **TCAV** - Testing with Concept Activation Vectors
+- High publication impact, differentiator from most frameworks
+
+### Phase 2: Propagation Methods (v0.8.0)
+- **LRP** - Layer-wise Relevance Propagation
+- Completes the gradient method family
+
+### Phase 3: Multi-Modal (v0.9.0)
+- Text/NLP support
+- TensorFlow adapter
+
+### Phase 4: Production & Polish (v1.0.0)
+- Visualization dashboard
+- Performance optimization
+- Documentation for publication
+
+---
+
+## References
+
+### Frameworks
+- OmniXAI: https://github.com/salesforce/OmniXAI
+- Captum: https://captum.ai/
+- Alibi: https://github.com/SeldonIO/alibi
+- InterpretML: https://github.com/interpretml/interpret
+- AIX360: https://github.com/Trusted-AI/AIX360
+- OpenXAI: https://github.com/AI4LIFE-GROUP/OpenXAI
+
+### Key Papers
+- TCAV: Kim et al., 2018 - "Interpretability Beyond Feature Attribution" (ICML)
+- LRP: Bach et al., 2015 - "On Pixel-Wise Explanations" (PLOS ONE)
+- Evaluation: Petsiuk et al., 2018; DeYoung et al., 2020; Agarwal et al., 2022
+
+---
+
+*Last updated: January 2026 (v0.6.0)*
+*Next review: After TCAV implementation*
