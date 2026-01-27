@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "explainiverse"
-version = "0.7.1"
-description = "Unified, extensible explainability framework supporting LIME, SHAP, Anchors, Counterfactuals, PDP, ALE, SAGE, and more"
+version = "0.8.0"
+description = "Unified, extensible explainability framework supporting 18 XAI methods including LIME, SHAP, LRP, TCAV, GradCAM, and more"
 authors = ["Muntaser Syed <jemsbhai@gmail.com>"]
 license = "MIT"
 readme = "README.md"

@@ -13,6 +13,7 @@ Explainers:
     - SmoothGradExplainer: Noise-averaged gradients
     - SaliencyExplainer: Basic gradient attribution
     - TCAVExplainer: Concept-based explanations (TCAV)
+    - LRPExplainer: Layer-wise Relevance Propagation
 """
 
 from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
@@ -21,6 +22,7 @@ from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLI
 from explainiverse.explainers.gradient.smoothgrad import SmoothGradExplainer
 from explainiverse.explainers.gradient.saliency import SaliencyExplainer
 from explainiverse.explainers.gradient.tcav import TCAVExplainer, ConceptActivationVector
+from explainiverse.explainers.gradient.lrp import LRPExplainer
 
 __all__ = [
     "IntegratedGradientsExplainer", 
@@ -31,4 +33,5 @@ __all__ = [
     "SaliencyExplainer",
     "TCAVExplainer",
     "ConceptActivationVector",
+    "LRPExplainer",
 ]

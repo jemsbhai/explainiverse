@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **17 state-of-the-art explanation methods** across local, global, gradient-based, concept-based, and example-based paradigms, along with **comprehensive evaluation metrics** for assessing explanation quality.
+**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **18 state-of-the-art explanation methods** across local, global, gradient-based, concept-based, and example-based paradigms, along with **comprehensive evaluation metrics** for assessing explanation quality.
 
 ---
 
@@ -12,7 +12,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **17 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
+| **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
 | **8 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation) and Stability (RIS, ROS, Lipschitz) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
@@ -35,6 +35,7 @@
 | **SmoothGrad** | Gradient | [Smilkov et al., 2017](https://arxiv.org/abs/1706.03825) |
 | **Saliency Maps** | Gradient | [Simonyan et al., 2014](https://arxiv.org/abs/1312.6034) |
 | **GradCAM / GradCAM++** | Gradient (CNN) | [Selvaraju et al., 2017](https://arxiv.org/abs/1610.02391) |
+| **LRP** | Decomposition | [Bach et al., 2015](https://doi.org/10.1371/journal.pone.0130140) |
 | **TCAV** | Concept-Based | [Kim et al., 2018](https://arxiv.org/abs/1711.11279) |
 | **Anchors** | Rule-Based | [Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491) |
 | **Counterfactual** | Contrastive | [Mothilal et al., 2020](https://arxiv.org/abs/1905.07697) |
@@ -112,7 +113,7 @@ adapter = SklearnAdapter(model, class_names=iris.target_names.tolist())
 # List all available explainers
 print(default_registry.list_explainers())
 # ['lime', 'shap', 'treeshap', 'integrated_gradients', 'deeplift', 'deepshap', 
-#  'smoothgrad', 'saliency', 'gradcam', 'tcav', 'anchors', 'counterfactual', 
+#  'smoothgrad', 'saliency', 'gradcam', 'lrp', 'tcav', 'anchors', 'counterfactual', 
 #  'protodash', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
 
 # Create an explainer via registry
@@ -179,6 +180,70 @@ explanation = explainer.explain(X[0], return_convergence_delta=True)
 print(f"Attributions: {explanation.explanation_data['feature_attributions']}")
 print(f"Convergence δ: {explanation.explanation_data['convergence_delta']:.6f}")
 ```
+
+### Layer-wise Relevance Propagation (LRP)
+
+```python
+from explainiverse.explainers.gradient import LRPExplainer
+
+# LRP - Decomposition-based attribution with conservation property
+explainer = LRPExplainer(
+    model=adapter,
+    feature_names=feature_names,
+    class_names=class_names,
+    rule="epsilon",       # Propagation rule: epsilon, gamma, alpha_beta, z_plus, composite
+    epsilon=1e-6          # Stabilization constant
+)
+
+# Basic explanation
+explanation = explainer.explain(X[0], target_class=0)
+print(explanation.explanation_data["feature_attributions"])
+
+# Verify conservation property (sum of attributions ≈ target output)
+explanation = explainer.explain(X[0], return_convergence_delta=True)
+print(f"Conservation delta: {explanation.explanation_data['convergence_delta']:.6f}")
+
+# Compare different LRP rules
+comparison = explainer.compare_rules(X[0], rules=["epsilon", "gamma", "z_plus"])
+for rule, result in comparison.items():
+    print(f"{rule}: top feature = {result['top_feature']}")
+
+# Layer-wise relevance analysis
+layer_result = explainer.explain_with_layer_relevances(X[0])
+for layer, relevances in layer_result["layer_relevances"].items():
+    print(f"{layer}: sum = {sum(relevances):.4f}")
+
+# Composite rules: different rules for different layers
+explainer_composite = LRPExplainer(
+    model=adapter,
+    feature_names=feature_names,
+    class_names=class_names,
+    rule="composite"
+)
+explainer_composite.set_composite_rule({
+    0: "z_plus",    # Input layer: focus on what's present
+    2: "epsilon",   # Middle layers: balanced
+    4: "epsilon"    # Output layer
+})
+explanation = explainer_composite.explain(X[0])
+```
+
+**LRP Propagation Rules:**
+
+| Rule | Description | Use Case |
+|------|-------------|----------|
+| `epsilon` | Adds stabilization constant | General purpose (default) |
+| `gamma` | Enhances positive contributions | Image classification |
+| `alpha_beta` | Separates pos/neg (α-β=1) | Fine-grained control |
+| `z_plus` | Only positive weights | Input layers, what's present |
+| `composite` | Different rules per layer | Best practice for deep nets |
+
+**Supported Layers:**
+- Linear, Conv2d
+- BatchNorm1d, BatchNorm2d
+- ReLU, LeakyReLU, ELU, Tanh, Sigmoid, GELU
+- MaxPool2d, AvgPool2d, AdaptiveAvgPool2d
+- Flatten, Dropout
 
 ### DeepLIFT and DeepSHAP
 
@@ -571,7 +636,7 @@ explainiverse/
 │   └── pytorch_adapter.py  # With gradient support
 ├── explainers/
 │   ├── attribution/      # LIME, SHAP, TreeSHAP
-│   ├── gradient/         # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, TCAV
+│   ├── gradient/         # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP, TCAV
 │   ├── rule_based/       # Anchors
 │   ├── counterfactual/   # DiCE-style
 │   ├── global_explainers/  # Permutation, PDP, ALE, SAGE
@@ -595,10 +660,10 @@ poetry run pytest
 poetry run pytest --cov=explainiverse --cov-report=html
 
 # Run specific test file
-poetry run pytest tests/test_smoothgrad.py -v
+poetry run pytest tests/test_lrp.py -v
 
 # Run specific test class
-poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
+poetry run pytest tests/test_lrp.py::TestLRPConv2d -v
 ```
 
 ---
@@ -609,6 +674,7 @@ poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
 - [x] Core framework (BaseExplainer, Explanation, Registry)
 - [x] Perturbation methods: LIME, KernelSHAP, TreeSHAP
 - [x] Gradient methods: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++
+- [x] Decomposition methods: Layer-wise Relevance Propagation (LRP) with ε, γ, αβ, z⁺, composite rules
 - [x] Concept-based: TCAV (Testing with Concept Activation Vectors)
 - [x] Rule-based: Anchors
 - [x] Counterfactual: DiCE-style
@@ -617,9 +683,6 @@ poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
 - [x] Evaluation: Faithfulness metrics (PGI, PGU, Comprehensiveness, Sufficiency, Correlation)
 - [x] Evaluation: Stability metrics (RIS, ROS, Lipschitz)
 - [x] PyTorch adapter with gradient support
-
-### In Progress 🚧
-- [ ] Layer-wise Relevance Propagation (LRP)
 
 ### Planned 📋
 - [ ] Attention-based explanations (for Transformers)
@@ -640,7 +703,7 @@ If you use Explainiverse in your research, please cite:
   author = {Syed, Muntaser},
   year = {2025},
   url = {https://github.com/jemsbhai/explainiverse},
-  version = {0.7.1}
+  version = {0.8.0}
 }
 ```
 
@@ -668,4 +731,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-Explainiverse builds upon the foundational work of many researchers in the XAI community. We thank the authors of LIME, SHAP, Integrated Gradients, DeepLIFT, GradCAM, TCAV, Anchors, DiCE, ALE, SAGE, and ProtoDash for their contributions to interpretable machine learning.
+Explainiverse builds upon the foundational work of many researchers in the XAI community. We thank the authors of LIME, SHAP, Integrated Gradients, DeepLIFT, LRP, GradCAM, TCAV, Anchors, DiCE, ALE, SAGE, and ProtoDash for their contributions to interpretable machine learning.

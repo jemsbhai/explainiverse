@@ -2,9 +2,10 @@
 """
 Explainiverse - A unified, extensible explainability framework.
 
-Supports multiple XAI methods including LIME, SHAP, TreeSHAP, Anchors, 
-Counterfactuals, Permutation Importance, PDP, ALE, and SAGE through a 
-consistent interface.
+Supports 18 state-of-the-art XAI methods including LIME, SHAP, TreeSHAP,
+Integrated Gradients, DeepLIFT, DeepSHAP, LRP, GradCAM, TCAV, Anchors,
+Counterfactuals, Permutation Importance, PDP, ALE, SAGE, and ProtoDash
+through a consistent interface.
 
 Quick Start:
     from explainiverse import default_registry
@@ -33,7 +34,7 @@ from explainiverse.adapters.sklearn_adapter import SklearnAdapter
 from explainiverse.adapters import TORCH_AVAILABLE
 from explainiverse.engine.suite import ExplanationSuite
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 __all__ = [
     # Core

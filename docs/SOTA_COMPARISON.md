@@ -32,8 +32,8 @@
 | DeepSHAP | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Saliency Maps | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | SmoothGrad | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| LRP | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | Guided Backprop | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| LRP | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | Occlusion | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Feature Ablation | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | **Rule-Based** |
@@ -121,13 +121,15 @@
 | **Anchors** | Rule-based explanations - only Alibi has this |
 | **ProtoDash** | Example-based with importance weights - only AIX360 has this |
 | **Clean API** | Consistent BaseExplainer interface across all methods |
-| **Gradient Family** | Complete set: IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM |
+| **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
+| **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 
-### Current Implementation (v0.7.1)
+### Current Implementation (v0.8.0)
 
-**17 Explainers:**
+**18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
 - Local Gradient: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++
+- Local Decomposition: LRP (Layer-wise Relevance Propagation)
 - Concept-Based: TCAV
 - Rule-Based: Anchors
 - Counterfactual: DiCE-style
@@ -146,8 +148,8 @@
 
 | Gap | Competitor Has It | Priority | Notes |
 |-----|-------------------|----------|-------|
-| **TCAV** | Captum | ✅ Complete | Concept-based explanations - now implemented in v0.7.0 |
-| **LRP** | Captum | 🔴 Critical | Layer-wise Relevance Propagation - next priority |
+| **TCAV** | Captum | ✅ Complete | Concept-based explanations - implemented in v0.7.0 |
+| **LRP** | Captum | ✅ Complete | Layer-wise Relevance Propagation - implemented in v0.8.0 |
 | **Influence Functions** | Captum | 🟡 High | Training data attribution |
 
 ### MEDIUM PRIORITY
@@ -175,7 +177,7 @@
 
 | Metric | Explainiverse | OmniXAI | Captum | Alibi | OpenXAI |
 |--------|:-------------:|:-------:|:------:|:-----:|:-------:|
-| **Explanation Methods** | 17 | ~25 | ~20 | ~15 | ~10 |
+| **Explanation Methods** | 18 | ~25 | ~20 | ~15 | ~10 |
 | **Evaluation Metrics** | 8 | 0 | 0 | 0 | 22 |
 | **Data Types** | 2 | 4 | 4 | 3 | 1 |
 | **ML Frameworks** | 2 | 3 | 1 | 3 | 1 |
@@ -187,7 +189,7 @@
                          ↑
                     High │  OmniXAI    Captum
                          │      
-                         │  Explainiverse ←── Good balance
+                         │  Explainiverse ←── Good balance + LRP
                          │      
                     Low  │  OpenXAI
                          └────────────────────→
@@ -195,7 +197,7 @@
                               Evaluation Metrics
 ```
 
-**Key Insight:** Explainiverse occupies a unique position with strong evaluation metrics (rivaling OpenXAI) combined with comprehensive explanation methods (approaching OmniXAI/Captum). With TCAV implemented in v0.7.0, Explainiverse now offers concept-based explanations that only Captum previously had among major frameworks.
+**Key Insight:** Explainiverse occupies a unique position with strong evaluation metrics (rivaling OpenXAI) combined with comprehensive explanation methods (approaching OmniXAI/Captum). With TCAV (v0.7.0) and LRP (v0.8.0), Explainiverse now offers both concept-based and decomposition-based explanations that previously only Captum had among major frameworks. The LRP implementation includes all major propagation rules (ε, γ, αβ, z⁺, composite), making it one of the most comprehensive LRP implementations available.
 
 ---
 
@@ -205,15 +207,22 @@
 - **TCAV** - Testing with Concept Activation Vectors
 - High publication impact, differentiator from most frameworks
 
-### Phase 2: Propagation Methods (v0.8.0) - NEXT
+### Phase 2: Propagation Methods (v0.8.0) ✅ COMPLETE
 - **LRP** - Layer-wise Relevance Propagation
-- Completes the gradient method family
+- 5 propagation rules: epsilon, gamma, alpha-beta, z-plus, composite
+- Full layer support: Linear, Conv2d, BatchNorm, pooling, activations
+- Conservation property verification
+- Completes the gradient/decomposition method family
 
-### Phase 3: Multi-Modal (v0.9.0)
+### Phase 3: Attention & Transformers (NEXT)
+- Attention Rollout
+- Attention Flow
+
+### Phase 4: Multi-Modal (v0.9.0)
 - Text/NLP support
 - TensorFlow adapter
 
-### Phase 4: Production & Polish (v1.0.0)
+### Phase 5: Production & Polish (v1.0.0)
 - Visualization dashboard
 - Performance optimization
 - Documentation for publication
@@ -232,10 +241,11 @@
 
 ### Key Papers
 - TCAV: Kim et al., 2018 - "Interpretability Beyond Feature Attribution" (ICML)
-- LRP: Bach et al., 2015 - "On Pixel-Wise Explanations" (PLOS ONE)
+- LRP: Bach et al., 2015 - "On Pixel-Wise Explanations for Non-Linear Classifier Decisions" (PLOS ONE)
+- LRP Rules: Montavon et al., 2019 - "Layer-wise Relevance Propagation: An Overview" (Springer)
 - Evaluation: Petsiuk et al., 2018; DeYoung et al., 2020; Agarwal et al., 2022
 
 ---
 
-*Last updated: January 2026 (v0.7.0)*
-*Next review: After LRP implementation*
+*Last updated: January 2026 (v0.8.0)*
+*Next review: After Attention methods implementation*

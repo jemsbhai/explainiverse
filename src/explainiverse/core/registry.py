@@ -375,6 +375,7 @@ def _create_default_registry() -> ExplainerRegistry:
     from explainiverse.explainers.gradient.smoothgrad import SmoothGradExplainer
     from explainiverse.explainers.gradient.saliency import SaliencyExplainer
     from explainiverse.explainers.gradient.tcav import TCAVExplainer
+    from explainiverse.explainers.gradient.lrp import LRPExplainer
     from explainiverse.explainers.example_based.protodash import ProtoDashExplainer
     
     registry = ExplainerRegistry()
@@ -583,6 +584,23 @@ def _create_default_registry() -> ExplainerRegistry:
             paper_reference="Kim et al., 2018 - 'Interpretability Beyond Feature Attribution: Quantitative Testing with Concept Activation Vectors' (ICML)",
             complexity="O(n_concepts * n_test_inputs * forward_pass)",
             requires_training_data=True,
+            supports_batching=True
+        )
+    )
+    
+    # Register LRP (Layer-wise Relevance Propagation)
+    registry.register(
+        name="lrp",
+        explainer_class=LRPExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["neural"],
+            data_types=["tabular", "image"],
+            task_types=["classification", "regression"],
+            description="LRP - Layer-wise Relevance Propagation for decomposition-based attributions (requires PyTorch)",
+            paper_reference="Bach et al., 2015 - 'On Pixel-wise Explanations for Non-Linear Classifier Decisions by Layer-wise Relevance Propagation' (PLOS ONE)",
+            complexity="O(n_layers * forward_pass)",
+            requires_training_data=False,
             supports_batching=True
         )
     )

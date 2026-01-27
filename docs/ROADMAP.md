@@ -5,7 +5,7 @@
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) targeting publication at top-tier ML venues (NeurIPS/ICML).
 
 - **Location:** `E:\data\code\claudecode\explainiverse`
-- **Current Version:** v0.7.0
+- **Current Version:** v0.8.0
 - **Package Manager:** Poetry
 - **Python:** 3.10+
 
@@ -13,7 +13,7 @@
 
 ## Current Implementation Status
 
-### Explainers (17 total)
+### Explainers (18 total)
 
 | Category | Explainer | Status | Version Added |
 |----------|-----------|--------|---------------|
@@ -26,6 +26,7 @@
 | | GradCAM/GradCAM++ | ✅ Complete | v0.3.0 |
 | | SmoothGrad | ✅ Complete | v0.5.0 |
 | | Saliency Maps | ✅ Complete | v0.6.0 |
+| **Local - Decomposition** | LRP | ✅ Complete | v0.8.0 |
 | **Concept-Based** | TCAV | ✅ Complete | v0.7.0 |
 | **Local - Rule-Based** | Anchors | ✅ Complete | v0.1.0 |
 | **Local - Counterfactual** | DiCE-style | ✅ Complete | v0.2.0 |
@@ -75,18 +76,32 @@
 - Key differentiator for publication - few libraries implement this well
 - Reference: [Kim et al., 2018 - "Interpretability Beyond Feature Attribution"](https://arxiv.org/abs/1711.11279)
 
-### Phase 2: Propagation Methods (NEXT)
+### Phase 2: Propagation Methods ✅ COMPLETE
 
 | Method | Complexity | Value | Status | Reference |
 |--------|------------|-------|--------|-----------|
-| LRP | High | High | 🔜 Next | Bach et al., 2015 |
+| **LRP** | High | High | ✅ Complete | Bach et al., 2015 |
 | Deep Taylor | Medium | Medium | Planned | Montavon et al., 2017 |
 
-### Phase 3: Attention & Transformers
+**LRP (Layer-wise Relevance Propagation)** - v0.8.0
+- Decomposition-based attribution with conservation property
+- Multiple propagation rules: ε, γ, αβ, z⁺, composite
+- Full layer support: Linear, Conv2d, BatchNorm, pooling, activations
+- Reference: [Bach et al., 2015 - "On Pixel-wise Explanations for Non-Linear Classifier Decisions"](https://doi.org/10.1371/journal.pone.0130140)
+
+**Implementation Details:**
+- 5 propagation rules with layer-specific implementations
+- Supports both tabular (MLP) and image (CNN) data
+- Conservation property verification
+- Layer-wise relevance analysis
+- Rule comparison utilities
+- Composite rules for different layers
+
+### Phase 3: Attention & Transformers (NEXT)
 
 | Method | Complexity | Value | Status | Reference |
 |--------|------------|-------|--------|-----------|
-| Attention Rollout | Medium | High | Planned | Abnar & Zuidema, 2020 |
+| Attention Rollout | Medium | High | 🔜 Next | Abnar & Zuidema, 2020 |
 | Attention Flow | Medium | High | Planned | - |
 
 ### Phase 4: Additional Features
@@ -113,7 +128,7 @@ explainiverse/
 │   └── pytorch_adapter.py    # PyTorch with gradient support
 ├── explainers/
 │   ├── attribution/          # LIME, SHAP, TreeSHAP
-│   ├── gradient/             # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, TCAV
+│   ├── gradient/             # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP, TCAV
 │   ├── rule_based/           # Anchors
 │   ├── counterfactual/       # DiCE-style
 │   ├── global_explainers/    # Permutation, PDP, ALE, SAGE
@@ -142,7 +157,7 @@ cd E:\data\code\claudecode\explainiverse
 .\.venv\Scripts\Activate.ps1
 
 # Run tests
-poetry run pytest tests/test_<n>.py -v
+poetry run pytest tests/test_<name>.py -v
 
 # Run all tests
 poetry run pytest
@@ -209,6 +224,7 @@ registry.register(
   - Batch processing
   - Registry integration
   - Edge cases and robustness
+  - Layer/architecture support (for neural network explainers)
 - **All tests must pass before pushing**
 
 ---
@@ -224,7 +240,7 @@ registry.register(
 | v0.5.0 | Jan 2025 | SmoothGrad |
 | v0.6.0 | Jan 2025 | Saliency Maps |
 | v0.7.0 | Jan 2025 | TCAV (Concept-Based Explanations) |
-| v0.8.0 | - | LRP (planned) |
+| v0.8.0 | Jan 2025 | LRP (Layer-wise Relevance Propagation) |
 
 ---
 
@@ -235,6 +251,7 @@ registry.register(
 - SHAP: Lundberg & Lee, 2017 - "A Unified Approach to Interpreting Model Predictions"
 - Integrated Gradients: Sundararajan et al., 2017 - "Axiomatic Attribution for Deep Networks"
 - TCAV: Kim et al., 2018 - "Interpretability Beyond Feature Attribution"
+- LRP: Bach et al., 2015 - "On Pixel-wise Explanations for Non-Linear Classifier Decisions"
 
 ### Evaluation
 - Faithfulness: Petsiuk et al., 2018; DeYoung et al., 2020
