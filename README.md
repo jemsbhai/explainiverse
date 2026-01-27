@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **16 state-of-the-art explanation methods** across local, global, gradient-based, and example-based paradigms, along with **comprehensive evaluation metrics** for assessing explanation quality.
+**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **17 state-of-the-art explanation methods** across local, global, gradient-based, concept-based, and example-based paradigms, along with **comprehensive evaluation metrics** for assessing explanation quality.
 
 ---
 
@@ -12,7 +12,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **16 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
+| **17 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
 | **8 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation) and Stability (RIS, ROS, Lipschitz) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
@@ -35,6 +35,7 @@
 | **SmoothGrad** | Gradient | [Smilkov et al., 2017](https://arxiv.org/abs/1706.03825) |
 | **Saliency Maps** | Gradient | [Simonyan et al., 2014](https://arxiv.org/abs/1312.6034) |
 | **GradCAM / GradCAM++** | Gradient (CNN) | [Selvaraju et al., 2017](https://arxiv.org/abs/1610.02391) |
+| **TCAV** | Concept-Based | [Kim et al., 2018](https://arxiv.org/abs/1711.11279) |
 | **Anchors** | Rule-Based | [Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491) |
 | **Counterfactual** | Contrastive | [Mothilal et al., 2020](https://arxiv.org/abs/1905.07697) |
 | **ProtoDash** | Example-Based | [Gurumoorthy et al., 2019](https://arxiv.org/abs/1707.01212) |
@@ -111,8 +112,8 @@ adapter = SklearnAdapter(model, class_names=iris.target_names.tolist())
 # List all available explainers
 print(default_registry.list_explainers())
 # ['lime', 'shap', 'treeshap', 'integrated_gradients', 'deeplift', 'deepshap', 
-#  'smoothgrad', 'gradcam', 'anchors', 'counterfactual', 'protodash',
-#  'permutation_importance', 'partial_dependence', 'ale', 'sage']
+#  'smoothgrad', 'saliency', 'gradcam', 'tcav', 'anchors', 'counterfactual', 
+#  'protodash', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
 
 # Create an explainer via registry
 explainer = default_registry.create(
@@ -284,6 +285,56 @@ explainer = GradCAMExplainer(
 explanation = explainer.explain(image)
 heatmap = explanation.explanation_data["heatmap"]
 overlay = explainer.get_overlay(original_image, heatmap, alpha=0.5)
+```
+
+### TCAV (Concept-Based Explanations)
+
+```python
+from explainiverse.explainers.gradient import TCAVExplainer
+
+# For neural network models with concept examples
+adapter = PyTorchAdapter(model, task="classification", class_names=class_names)
+
+# Create TCAV explainer targeting a specific layer
+explainer = TCAVExplainer(
+    model=adapter,
+    layer_name="layer3",  # Target layer for concept analysis
+    class_names=class_names
+)
+
+# Learn a concept from examples (e.g., "striped" pattern)
+explainer.learn_concept(
+    concept_name="striped",
+    concept_examples=striped_images,      # Images with stripes
+    negative_examples=random_images,      # Random images without stripes
+    min_accuracy=0.6                      # Minimum CAV classifier accuracy
+)
+
+# Compute TCAV score: fraction of inputs where concept positively influences prediction
+tcav_score = explainer.compute_tcav_score(
+    test_inputs=test_images,
+    target_class=0,           # e.g., "zebra"
+    concept_name="striped"
+)
+print(f"TCAV score: {tcav_score:.3f}")  # >0.5 means concept positively influences class
+
+# Statistical significance testing against random concepts
+result = explainer.statistical_significance_test(
+    test_inputs=test_images,
+    target_class=0,
+    concept_name="striped",
+    n_random=10,
+    negative_examples=random_images
+)
+print(f"p-value: {result['p_value']:.4f}, significant: {result['significant']}")
+
+# Full explanation with multiple concepts
+explanation = explainer.explain(
+    test_inputs=test_images,
+    target_class=0,
+    run_significance_test=True
+)
+print(explanation.explanation_data["tcav_scores"])
 ```
 
 ---
@@ -520,7 +571,7 @@ explainiverse/
 │   └── pytorch_adapter.py  # With gradient support
 ├── explainers/
 │   ├── attribution/      # LIME, SHAP, TreeSHAP
-│   ├── gradient/         # IG, DeepLIFT, DeepSHAP, SmoothGrad, GradCAM
+│   ├── gradient/         # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, TCAV
 │   ├── rule_based/       # Anchors
 │   ├── counterfactual/   # DiCE-style
 │   ├── global_explainers/  # Permutation, PDP, ALE, SAGE
@@ -558,6 +609,7 @@ poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
 - [x] Core framework (BaseExplainer, Explanation, Registry)
 - [x] Perturbation methods: LIME, KernelSHAP, TreeSHAP
 - [x] Gradient methods: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++
+- [x] Concept-based: TCAV (Testing with Concept Activation Vectors)
 - [x] Rule-based: Anchors
 - [x] Counterfactual: DiCE-style
 - [x] Global: Permutation Importance, PDP, ALE, SAGE
@@ -567,7 +619,6 @@ poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
 - [x] PyTorch adapter with gradient support
 
 ### In Progress 🚧
-- [ ] TCAV (Testing with Concept Activation Vectors)
 - [ ] Layer-wise Relevance Propagation (LRP)
 
 ### Planned 📋
@@ -589,7 +640,7 @@ If you use Explainiverse in your research, please cite:
   author = {Syed, Muntaser},
   year = {2025},
   url = {https://github.com/jemsbhai/explainiverse},
-  version = {0.6.0}
+  version = {0.7.0}
 }
 ```
 
@@ -617,4 +668,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-Explainiverse builds upon the foundational work of many researchers in the XAI community. We thank the authors of LIME, SHAP, Integrated Gradients, DeepLIFT, GradCAM, Anchors, DiCE, ALE, SAGE, and ProtoDash for their contributions to interpretable machine learning.
+Explainiverse builds upon the foundational work of many researchers in the XAI community. We thank the authors of LIME, SHAP, Integrated Gradients, DeepLIFT, GradCAM, TCAV, Anchors, DiCE, ALE, SAGE, and ProtoDash for their contributions to interpretable machine learning.

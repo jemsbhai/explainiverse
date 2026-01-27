@@ -5,7 +5,7 @@
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) targeting publication at top-tier ML venues (NeurIPS/ICML).
 
 - **Location:** `E:\data\code\claudecode\explainiverse`
-- **Current Version:** v0.6.0
+- **Current Version:** v0.7.0
 - **Package Manager:** Poetry
 - **Python:** 3.10+
 
@@ -13,7 +13,7 @@
 
 ## Current Implementation Status
 
-### Explainers (16 total)
+### Explainers (17 total)
 
 | Category | Explainer | Status | Version Added |
 |----------|-----------|--------|---------------|
@@ -26,6 +26,7 @@
 | | GradCAM/GradCAM++ | ✅ Complete | v0.3.0 |
 | | SmoothGrad | ✅ Complete | v0.5.0 |
 | | Saliency Maps | ✅ Complete | v0.6.0 |
+| **Concept-Based** | TCAV | ✅ Complete | v0.7.0 |
 | **Local - Rule-Based** | Anchors | ✅ Complete | v0.1.0 |
 | **Local - Counterfactual** | DiCE-style | ✅ Complete | v0.2.0 |
 | **Local - Example-Based** | ProtoDash | ✅ Complete | v0.4.0 |
@@ -62,23 +63,23 @@
 
 ## Roadmap: Upcoming Features
 
-### Phase 1: Concept-Based Explanations (HIGH PRIORITY)
+### Phase 1: Concept-Based Explanations ✅ COMPLETE
 
 | Method | Complexity | Value | Status | Reference |
 |--------|------------|-------|--------|-----------|
-| **TCAV** | High | Very High | 🔜 Next | Kim et al., 2018 |
+| **TCAV** | High | Very High | ✅ Complete | Kim et al., 2018 |
 | CAV Variants | Medium | High | Planned | - |
 
-**TCAV (Testing with Concept Activation Vectors)**
+**TCAV (Testing with Concept Activation Vectors)** - v0.7.0
 - Explains model behavior in terms of high-level concepts
 - Key differentiator for publication - few libraries implement this well
 - Reference: [Kim et al., 2018 - "Interpretability Beyond Feature Attribution"](https://arxiv.org/abs/1711.11279)
 
-### Phase 2: Propagation Methods
+### Phase 2: Propagation Methods (NEXT)
 
 | Method | Complexity | Value | Status | Reference |
 |--------|------------|-------|--------|-----------|
-| LRP | High | High | Planned | Bach et al., 2015 |
+| LRP | High | High | 🔜 Next | Bach et al., 2015 |
 | Deep Taylor | Medium | Medium | Planned | Montavon et al., 2017 |
 
 ### Phase 3: Attention & Transformers
@@ -112,7 +113,7 @@ explainiverse/
 │   └── pytorch_adapter.py    # PyTorch with gradient support
 ├── explainers/
 │   ├── attribution/          # LIME, SHAP, TreeSHAP
-│   ├── gradient/             # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM
+│   ├── gradient/             # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, TCAV
 │   ├── rule_based/           # Anchors
 │   ├── counterfactual/       # DiCE-style
 │   ├── global_explainers/    # Permutation, PDP, ALE, SAGE
@@ -141,7 +142,7 @@ cd E:\data\code\claudecode\explainiverse
 .\.venv\Scripts\Activate.ps1
 
 # Run tests
-poetry run pytest tests/test_<name>.py -v
+poetry run pytest tests/test_<n>.py -v
 
 # Run all tests
 poetry run pytest
@@ -222,7 +223,8 @@ registry.register(
 | v0.4.0 | - | ProtoDash |
 | v0.5.0 | Jan 2025 | SmoothGrad |
 | v0.6.0 | Jan 2025 | Saliency Maps |
-| v0.7.0 | - | TCAV (planned) |
+| v0.7.0 | Jan 2025 | TCAV (Concept-Based Explanations) |
+| v0.8.0 | - | LRP (planned) |
 
 ---
 

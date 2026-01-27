@@ -374,6 +374,7 @@ def _create_default_registry() -> ExplainerRegistry:
     from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
     from explainiverse.explainers.gradient.smoothgrad import SmoothGradExplainer
     from explainiverse.explainers.gradient.saliency import SaliencyExplainer
+    from explainiverse.explainers.gradient.tcav import TCAVExplainer
     from explainiverse.explainers.example_based.protodash import ProtoDashExplainer
     
     registry = ExplainerRegistry()
@@ -565,6 +566,23 @@ def _create_default_registry() -> ExplainerRegistry:
             paper_reference="Simonyan et al., 2014 - 'Deep Inside Convolutional Networks' (ICLR Workshop)",
             complexity="O(forward_pass + backward_pass)",
             requires_training_data=False,
+            supports_batching=True
+        )
+    )
+    
+    # Register TCAV (Concept-based explanations for neural networks)
+    registry.register(
+        name="tcav",
+        explainer_class=TCAVExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["neural"],
+            data_types=["tabular", "image"],
+            task_types=["classification"],
+            description="TCAV - Testing with Concept Activation Vectors for concept-based explanations (requires PyTorch)",
+            paper_reference="Kim et al., 2018 - 'Interpretability Beyond Feature Attribution: Quantitative Testing with Concept Activation Vectors' (ICML)",
+            complexity="O(n_concepts * n_test_inputs * forward_pass)",
+            requires_training_data=True,
             supports_batching=True
         )
     )

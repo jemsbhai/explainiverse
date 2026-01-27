@@ -48,7 +48,7 @@
 | ALE | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
 | SAGE | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Concept-Based** |
-| TCAV | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| TCAV | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | **Example-Based** |
 | ProtoDash | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Influence Functions | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
@@ -123,11 +123,12 @@
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 | **Gradient Family** | Complete set: IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM |
 
-### Current Implementation (v0.6.0)
+### Current Implementation (v0.7.0)
 
-**16 Explainers:**
+**17 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
 - Local Gradient: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++
+- Concept-Based: TCAV
 - Rule-Based: Anchors
 - Counterfactual: DiCE-style
 - Example-Based: ProtoDash
@@ -145,8 +146,8 @@
 
 | Gap | Competitor Has It | Priority | Notes |
 |-----|-------------------|----------|-------|
-| **TCAV** | Captum | 🔴 Critical | Concept-based explanations - major differentiator |
-| **LRP** | Captum | 🟡 High | Layer-wise Relevance Propagation |
+| **TCAV** | Captum | ✅ Complete | Concept-based explanations - now implemented in v0.7.0 |
+| **LRP** | Captum | 🔴 Critical | Layer-wise Relevance Propagation - next priority |
 | **Influence Functions** | Captum | 🟡 High | Training data attribution |
 
 ### MEDIUM PRIORITY
@@ -174,7 +175,7 @@
 
 | Metric | Explainiverse | OmniXAI | Captum | Alibi | OpenXAI |
 |--------|:-------------:|:-------:|:------:|:-----:|:-------:|
-| **Explanation Methods** | 16 | ~25 | ~20 | ~15 | ~10 |
+| **Explanation Methods** | 17 | ~25 | ~20 | ~15 | ~10 |
 | **Evaluation Metrics** | 8 | 0 | 0 | 0 | 22 |
 | **Data Types** | 2 | 4 | 4 | 3 | 1 |
 | **ML Frameworks** | 2 | 3 | 1 | 3 | 1 |
@@ -194,17 +195,17 @@
                               Evaluation Metrics
 ```
 
-**Key Insight:** Explainiverse occupies a unique position with strong evaluation metrics (rivaling OpenXAI) combined with comprehensive explanation methods (approaching OmniXAI/Captum). Adding TCAV would further strengthen the method coverage while maintaining evaluation leadership.
+**Key Insight:** Explainiverse occupies a unique position with strong evaluation metrics (rivaling OpenXAI) combined with comprehensive explanation methods (approaching OmniXAI/Captum). With TCAV implemented in v0.7.0, Explainiverse now offers concept-based explanations that only Captum previously had among major frameworks.
 
 ---
 
 ## Strategic Roadmap
 
-### Phase 1: Concept-Based (v0.7.0) - NEXT
+### Phase 1: Concept-Based (v0.7.0) ✅ COMPLETE
 - **TCAV** - Testing with Concept Activation Vectors
 - High publication impact, differentiator from most frameworks
 
-### Phase 2: Propagation Methods (v0.8.0)
+### Phase 2: Propagation Methods (v0.8.0) - NEXT
 - **LRP** - Layer-wise Relevance Propagation
 - Completes the gradient method family
 
@@ -236,5 +237,5 @@
 
 ---
 
-*Last updated: January 2026 (v0.6.0)*
-*Next review: After TCAV implementation*
+*Last updated: January 2026 (v0.7.0)*
+*Next review: After LRP implementation*
