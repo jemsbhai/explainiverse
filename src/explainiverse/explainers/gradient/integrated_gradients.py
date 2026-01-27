@@ -30,7 +30,7 @@ Example:
 """
 
 import numpy as np
-from typing import List, Optional, Union, Callable
+from typing import List, Optional, Union, Callable, Tuple
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
@@ -44,23 +44,28 @@ class IntegratedGradientsExplainer(BaseExplainer):
     a baseline (default: zero vector) to the input. The integral is
     approximated using the Riemann sum.
     
+    Supports both tabular data (1D/2D) and image data (3D/4D), preserving
+    the original input shape for proper gradient computation.
+    
     Attributes:
         model: Model adapter with predict_with_gradients() method
-        feature_names: List of feature names
+        feature_names: List of feature names (for tabular data)
         class_names: List of class names (for classification)
         n_steps: Number of steps for integral approximation
         baseline: Baseline input (default: zeros)
-        method: Integration method ("riemann_middle", "riemann_left", "riemann_right", "riemann_trapezoid")
+        method: Integration method
+        input_shape: Expected input shape (inferred or specified)
     """
     
     def __init__(
         self,
         model,
-        feature_names: List[str],
+        feature_names: Optional[List[str]] = None,
         class_names: Optional[List[str]] = None,
         n_steps: int = 50,
-        baseline: Optional[np.ndarray] = None,
-        method: str = "riemann_middle"
+        baseline: Optional[Union[np.ndarray, str, Callable]] = None,
+        method: str = "riemann_middle",
+        input_shape: Optional[Tuple[int, ...]] = None
     ):
         """
         Initialize the Integrated Gradients explainer.
@@ -68,17 +73,23 @@ class IntegratedGradientsExplainer(BaseExplainer):
         Args:
             model: A model adapter with predict_with_gradients() method.
                    Use PyTorchAdapter for PyTorch models.
-            feature_names: List of input feature names.
+            feature_names: List of input feature names. Required for tabular
+                          data to create named attributions.
             class_names: List of class names (for classification tasks).
             n_steps: Number of steps for approximating the integral.
                     More steps = more accurate but slower. Default: 50.
-            baseline: Baseline input for comparison. If None, uses zeros.
-                     Can also be "random" for random baseline or a callable.
+            baseline: Baseline input for comparison:
+                     - None: uses zeros
+                     - "random": random baseline (useful for images)
+                     - np.ndarray: specific baseline values
+                     - Callable: function(instance) -> baseline
             method: Integration method:
                    - "riemann_middle": Middle Riemann sum (default, most accurate)
                    - "riemann_left": Left Riemann sum
                    - "riemann_right": Right Riemann sum
                    - "riemann_trapezoid": Trapezoidal rule
+            input_shape: Expected shape of a single input (excluding batch dim).
+                        If None, inferred from first explain() call.
         """
         super().__init__(model)
         
@@ -89,28 +100,61 @@ class IntegratedGradientsExplainer(BaseExplainer):
                 "Use PyTorchAdapter for PyTorch models."
             )
         
-        self.feature_names = list(feature_names)
+        self.feature_names = list(feature_names) if feature_names else None
         self.class_names = list(class_names) if class_names else None
         self.n_steps = n_steps
         self.baseline = baseline
         self.method = method
+        self.input_shape = input_shape
+    
+    def _infer_data_type(self, instance: np.ndarray) -> str:
+        """
+        Infer whether input is tabular or image data.
+        
+        Args:
+            instance: Input instance (without batch dimension)
+            
+        Returns:
+            "tabular" for 1D data, "image" for 2D+ data
+        """
+        if instance.ndim == 1:
+            return "tabular"
+        elif instance.ndim >= 2:
+            return "image"
+        else:
+            return "tabular"
     
     def _get_baseline(self, instance: np.ndarray) -> np.ndarray:
-        """Get the baseline for a given input shape."""
+        """
+        Get the baseline for a given input shape.
+        
+        Args:
+            instance: Input instance (preserves shape)
+            
+        Returns:
+            Baseline array with same shape as instance
+        """
         if self.baseline is None:
             # Default: zero baseline
             return np.zeros_like(instance)
-        elif isinstance(self.baseline, str) and self.baseline == "random":
-            # Random baseline (useful for images)
-            return np.random.uniform(
-                low=instance.min(),
-                high=instance.max(),
-                size=instance.shape
-            ).astype(instance.dtype)
+        elif isinstance(self.baseline, str):
+            if self.baseline == "random":
+                # Random baseline (useful for images)
+                return np.random.uniform(
+                    low=float(instance.min()),
+                    high=float(instance.max()),
+                    size=instance.shape
+                ).astype(instance.dtype)
+            elif self.baseline == "mean":
+                # Mean value baseline
+                return np.full_like(instance, instance.mean())
+            else:
+                raise ValueError(f"Unknown baseline type: {self.baseline}")
         elif callable(self.baseline):
-            return self.baseline(instance)
+            result = self.baseline(instance)
+            return np.asarray(result).reshape(instance.shape)
         else:
-            return np.array(self.baseline).reshape(instance.shape)
+            return np.asarray(self.baseline).reshape(instance.shape)
     
     def _get_interpolation_alphas(self) -> np.ndarray:
         """Get interpolation points based on method."""
@@ -134,37 +178,67 @@ class IntegratedGradientsExplainer(BaseExplainer):
         """
         Compute integrated gradients for a single instance.
         
+        Preserves input shape throughout computation for proper gradient flow.
+        
         The integral is approximated as:
         IG_i = (x_i - x'_i) * sum_{k=1}^{m} grad_i(x' + k/m * (x - x')) / m
         
         where x is the input, x' is the baseline, and m is n_steps.
+        
+        Args:
+            instance: Input instance (any shape)
+            baseline: Baseline with same shape as instance
+            target_class: Target class for attribution
+            
+        Returns:
+            Attributions with same shape as instance
         """
+        # Store original shape
+        original_shape = instance.shape
+        
         # Get interpolation points
         alphas = self._get_interpolation_alphas()
         
         # Compute path from baseline to input
-        # Shape: (n_steps, n_features)
         delta = instance - baseline
-        interpolated_inputs = baseline + alphas[:, np.newaxis] * delta
         
-        # Compute gradients at each interpolation point
+        # Collect gradients at each interpolation point
         all_gradients = []
-        for interp_input in interpolated_inputs:
+        
+        for alpha in alphas:
+            # Interpolated input: baseline + alpha * (input - baseline)
+            interp_input = baseline + alpha * delta
+            
+            # Add batch dimension for model
+            if interp_input.ndim == len(original_shape):
+                interp_batch = interp_input[np.newaxis, ...]
+            else:
+                interp_batch = interp_input
+            
+            # Get gradients
             _, gradients = self.model.predict_with_gradients(
-                interp_input.reshape(1, -1),
+                interp_batch,
                 target_class=target_class
             )
-            all_gradients.append(gradients.flatten())
+            
+            # Remove batch dimension if present
+            if gradients.shape[0] == 1 and len(gradients.shape) > len(original_shape):
+                gradients = gradients[0]
+            
+            all_gradients.append(gradients.reshape(original_shape))
         
-        all_gradients = np.array(all_gradients)  # Shape: (n_steps, n_features)
+        all_gradients = np.array(all_gradients)  # Shape: (n_steps, *original_shape)
         
         # Approximate the integral
         if self.method == "riemann_trapezoid":
-            # Trapezoidal rule: (f(0) + 2*f(1) + ... + 2*f(n-1) + f(n)) / (2n)
+            # Trapezoidal rule
             weights = np.ones(self.n_steps + 1)
             weights[0] = 0.5
             weights[-1] = 0.5
-            avg_gradients = np.average(all_gradients, axis=0, weights=weights)
+            # Expand weights for broadcasting
+            for _ in range(len(original_shape)):
+                weights = weights[:, np.newaxis]
+            avg_gradients = np.sum(all_gradients * weights, axis=0) / self.n_steps
         else:
             # Standard Riemann sum: average of gradients
             avg_gradients = np.mean(all_gradients, axis=0)
@@ -185,7 +259,10 @@ class IntegratedGradientsExplainer(BaseExplainer):
         Generate Integrated Gradients explanation for an instance.
         
         Args:
-            instance: 1D numpy array of input features.
+            instance: Input instance. Can be:
+                     - 1D array for tabular data
+                     - 2D array for grayscale images
+                     - 3D array for color images (C, H, W)
             target_class: For classification, which class to explain.
                          If None, uses the predicted class.
             baseline: Override the default baseline for this explanation.
@@ -196,29 +273,57 @@ class IntegratedGradientsExplainer(BaseExplainer):
         Returns:
             Explanation object with feature attributions.
         """
-        instance = np.array(instance).flatten().astype(np.float32)
+        instance = np.asarray(instance).astype(np.float32)
+        original_shape = instance.shape
         
-        # Get baseline
+        # Infer data type
+        data_type = self._infer_data_type(instance)
+        
+        # Get baseline (preserves shape)
         if baseline is not None:
-            bl = np.array(baseline).flatten().astype(np.float32)
+            bl = np.asarray(baseline).astype(np.float32).reshape(original_shape)
         else:
             bl = self._get_baseline(instance)
         
         # Determine target class if not specified
         if target_class is None and self.class_names:
-            predictions = self.model.predict(instance.reshape(1, -1))
-            target_class = int(np.argmax(predictions))
+            # Add batch dim for prediction
+            pred_input = instance[np.newaxis, ...] if instance.ndim == len(original_shape) else instance
+            predictions = self.model.predict(pred_input)
+            target_class = int(np.argmax(predictions[0]))
         
-        # Compute integrated gradients
+        # Compute integrated gradients (preserves shape)
         ig_attributions = self._compute_integrated_gradients(
             instance, bl, target_class
         )
         
-        # Build attributions dict
-        attributions = {
-            fname: float(ig_attributions[i])
-            for i, fname in enumerate(self.feature_names)
+        # Build explanation data
+        explanation_data = {
+            "attributions_raw": ig_attributions.tolist(),
+            "baseline": bl.tolist(),
+            "n_steps": self.n_steps,
+            "method": self.method,
+            "input_shape": list(original_shape),
+            "data_type": data_type
         }
+        
+        # For tabular data, create named attributions
+        if data_type == "tabular" and self.feature_names is not None:
+            flat_ig = ig_attributions.flatten()
+            if len(flat_ig) == len(self.feature_names):
+                attributions = {
+                    fname: float(flat_ig[i])
+                    for i, fname in enumerate(self.feature_names)
+                }
+                explanation_data["feature_attributions"] = attributions
+        elif data_type == "image":
+            # For images, store aggregated feature importance
+            explanation_data["attribution_map"] = ig_attributions
+            # Also store channel-aggregated saliency for visualization
+            if ig_attributions.ndim == 3:  # (C, H, W)
+                explanation_data["saliency_map"] = np.abs(ig_attributions).sum(axis=0)
+            else:
+                explanation_data["saliency_map"] = np.abs(ig_attributions)
         
         # Determine class name
         if self.class_names and target_class is not None:
@@ -226,36 +331,32 @@ class IntegratedGradientsExplainer(BaseExplainer):
         else:
             label_name = f"class_{target_class}" if target_class is not None else "output"
         
-        explanation_data = {
-            "feature_attributions": attributions,
-            "attributions_raw": ig_attributions.tolist(),
-            "baseline": bl.tolist(),
-            "n_steps": self.n_steps,
-            "method": self.method
-        }
-        
         # Optionally compute convergence delta
         if return_convergence_delta:
             # The sum of attributions should equal F(x) - F(baseline)
-            pred_input = self.model.predict(instance.reshape(1, -1))
-            pred_baseline = self.model.predict(bl.reshape(1, -1))
+            pred_input = instance[np.newaxis, ...]
+            pred_baseline = bl[np.newaxis, ...]
             
-            if target_class is not None:
-                pred_diff = pred_input[0, target_class] - pred_baseline[0, target_class]
+            pred_input_val = self.model.predict(pred_input)
+            pred_baseline_val = self.model.predict(pred_baseline)
+            
+            if target_class is not None and pred_input_val.shape[-1] > 1:
+                pred_diff = pred_input_val[0, target_class] - pred_baseline_val[0, target_class]
             else:
-                pred_diff = pred_input[0, 0] - pred_baseline[0, 0]
+                pred_diff = pred_input_val[0, 0] - pred_baseline_val[0, 0]
             
-            attribution_sum = np.sum(ig_attributions)
-            convergence_delta = abs(pred_diff - attribution_sum)
+            attribution_sum = float(np.sum(ig_attributions))
+            convergence_delta = abs(float(pred_diff) - attribution_sum)
             
-            explanation_data["convergence_delta"] = float(convergence_delta)
+            explanation_data["convergence_delta"] = convergence_delta
             explanation_data["prediction_difference"] = float(pred_diff)
-            explanation_data["attribution_sum"] = float(attribution_sum)
+            explanation_data["attribution_sum"] = attribution_sum
         
         return Explanation(
             explainer_name="IntegratedGradients",
             target_class=label_name,
-            explanation_data=explanation_data
+            explanation_data=explanation_data,
+            feature_names=self.feature_names
         )
     
     def explain_batch(
@@ -266,20 +367,21 @@ class IntegratedGradientsExplainer(BaseExplainer):
         """
         Generate explanations for multiple instances.
         
-        Note: This is not optimized for batching - it processes
-        instances sequentially. For large batches, consider using
-        the batched gradient computation in a custom implementation.
+        Note: This processes instances sequentially. For large batches,
+        consider implementing batched gradient computation.
         
         Args:
-            X: 2D numpy array of instances (n_samples, n_features).
+            X: Array of instances. First dimension is batch.
             target_class: Target class for all instances.
         
         Returns:
             List of Explanation objects.
         """
-        X = np.array(X)
+        X = np.asarray(X)
+        
+        # Handle single instance passed as array
         if X.ndim == 1:
-            X = X.reshape(1, -1)
+            return [self.explain(X, target_class=target_class)]
         
         return [
             self.explain(X[i], target_class=target_class)
@@ -308,12 +410,13 @@ class IntegratedGradientsExplainer(BaseExplainer):
         Returns:
             Explanation with averaged attributions.
         """
-        instance = np.array(instance).flatten().astype(np.float32)
+        instance = np.asarray(instance).astype(np.float32)
+        original_shape = instance.shape
         
         all_attributions = []
         for _ in range(n_samples):
             # Create noisy baseline
-            noise = np.random.normal(0, noise_scale, instance.shape).astype(np.float32)
+            noise = np.random.normal(0, noise_scale, original_shape).astype(np.float32)
             noisy_baseline = noise  # Noise around zero
             
             ig = self._compute_integrated_gradients(
@@ -325,10 +428,25 @@ class IntegratedGradientsExplainer(BaseExplainer):
         avg_attributions = np.mean(all_attributions, axis=0)
         std_attributions = np.std(all_attributions, axis=0)
         
-        attributions = {
-            fname: float(avg_attributions[i])
-            for i, fname in enumerate(self.feature_names)
+        # Build explanation data
+        data_type = self._infer_data_type(instance)
+        explanation_data = {
+            "attributions_raw": avg_attributions.tolist(),
+            "attributions_std": std_attributions.tolist(),
+            "n_samples": n_samples,
+            "noise_scale": noise_scale,
+            "data_type": data_type
         }
+        
+        # For tabular data, create named attributions
+        if data_type == "tabular" and self.feature_names is not None:
+            flat_avg = avg_attributions.flatten()
+            if len(flat_avg) == len(self.feature_names):
+                attributions = {
+                    fname: float(flat_avg[i])
+                    for i, fname in enumerate(self.feature_names)
+                }
+                explanation_data["feature_attributions"] = attributions
         
         if self.class_names and target_class is not None:
             label_name = self.class_names[target_class]
@@ -338,11 +456,6 @@ class IntegratedGradientsExplainer(BaseExplainer):
         return Explanation(
             explainer_name="IntegratedGradients_Smooth",
             target_class=label_name,
-            explanation_data={
-                "feature_attributions": attributions,
-                "attributions_raw": avg_attributions.tolist(),
-                "attributions_std": std_attributions.tolist(),
-                "n_samples": n_samples,
-                "noise_scale": noise_scale
-            }
+            explanation_data=explanation_data,
+            feature_names=self.feature_names
         )

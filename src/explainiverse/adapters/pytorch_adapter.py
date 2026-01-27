@@ -25,7 +25,7 @@ Example:
 """
 
 import numpy as np
-from typing import List, Optional, Union, Callable
+from typing import List, Optional, Union, Tuple
 
 from .base_adapter import BaseModelAdapter
 
@@ -56,6 +56,11 @@ class PyTorchAdapter(BaseModelAdapter):
     Wraps a PyTorch nn.Module to provide a consistent interface for
     explainability methods. Handles device management, tensor/numpy
     conversions, and supports both classification and regression tasks.
+    
+    Supports:
+        - Multi-class classification (output shape: [batch, n_classes])
+        - Binary classification (output shape: [batch, 1] or [batch])
+        - Regression (output shape: [batch, n_outputs] or [batch])
     
     Attributes:
         model: The PyTorch model (nn.Module)
@@ -150,9 +155,25 @@ class PyTorchAdapter(BaseModelAdapter):
     def _apply_activation(self, output: "torch.Tensor") -> "torch.Tensor":
         """Apply output activation function."""
         if self.output_activation == "softmax":
+            # Handle different output shapes
+            if output.dim() == 1 or (output.dim() == 2 and output.shape[1] == 1):
+                # Binary: apply sigmoid instead of softmax
+                return torch.sigmoid(output)
             return torch.softmax(output, dim=-1)
         elif self.output_activation == "sigmoid":
             return torch.sigmoid(output)
+        return output
+    
+    def _normalize_output_shape(self, output: "torch.Tensor") -> "torch.Tensor":
+        """
+        Normalize output to consistent 2D shape (batch, outputs).
+        
+        Handles:
+            - (batch,) -> (batch, 1)
+            - (batch, n) -> (batch, n)
+        """
+        if output.dim() == 1:
+            return output.unsqueeze(-1)
         return output
     
     def predict(self, data: np.ndarray) -> np.ndarray:
@@ -183,16 +204,66 @@ class PyTorchAdapter(BaseModelAdapter):
                 tensor_batch = self._to_tensor(batch)
                 
                 output = self.model(tensor_batch)
+                output = self._normalize_output_shape(output)
                 output = self._apply_activation(output)
                 outputs.append(self._to_numpy(output))
         
         return np.vstack(outputs)
     
+    def _get_target_scores(
+        self,
+        output: "torch.Tensor",
+        target_class: Optional[Union[int, "torch.Tensor"]] = None
+    ) -> "torch.Tensor":
+        """
+        Extract target scores for gradient computation.
+        
+        Handles both multi-class and binary classification outputs.
+        
+        Args:
+            output: Raw model output (logits)
+            target_class: Target class index or tensor of indices
+            
+        Returns:
+            Target scores tensor for backpropagation
+        """
+        batch_size = output.shape[0]
+        
+        # Normalize to 2D
+        if output.dim() == 1:
+            output = output.unsqueeze(-1)
+        
+        n_outputs = output.shape[1]
+        
+        if self.task == "classification":
+            if n_outputs == 1:
+                # Binary classification with single logit
+                # Score is the logit itself (positive class score)
+                return output.squeeze(-1)
+            else:
+                # Multi-class classification
+                if target_class is None:
+                    target_class = output.argmax(dim=-1)
+                elif isinstance(target_class, int):
+                    target_class = torch.tensor(
+                        [target_class] * batch_size,
+                        device=self.device
+                    )
+                
+                # Gather scores for target class
+                return output.gather(1, target_class.view(-1, 1)).squeeze(-1)
+        else:
+            # Regression: use first output or sum of outputs
+            if n_outputs == 1:
+                return output.squeeze(-1)
+            else:
+                return output.sum(dim=-1)
+    
     def predict_with_gradients(
         self,
         data: np.ndarray,
         target_class: Optional[int] = None
-    ) -> tuple:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Generate predictions and compute gradients w.r.t. inputs.
         
@@ -203,11 +274,17 @@ class PyTorchAdapter(BaseModelAdapter):
             data: Input data as numpy array.
             target_class: Class index for gradient computation.
                          If None, uses the predicted class.
+                         For binary classification with single output,
+                         this is ignored (gradient w.r.t. the single logit).
         
         Returns:
             Tuple of (predictions, gradients) as numpy arrays.
+            - predictions: (batch, n_classes) probabilities
+            - gradients: same shape as input data
         """
         data = np.array(data)
+        original_shape = data.shape
+        
         if data.ndim == 1:
             data = data.reshape(1, -1)
         
@@ -217,20 +294,13 @@ class PyTorchAdapter(BaseModelAdapter):
         
         # Forward pass
         output = self.model(tensor_data)
-        activated_output = self._apply_activation(output)
         
-        # Determine target for gradient
-        if self.task == "classification":
-            if target_class is None:
-                target_class = output.argmax(dim=-1)
-            elif isinstance(target_class, int):
-                target_class = torch.tensor([target_class] * data.shape[0], device=self.device)
-            
-            # Select target class scores for gradient
-            target_scores = output.gather(1, target_class.view(-1, 1)).squeeze()
-        else:
-            # Regression: gradient w.r.t. output
-            target_scores = output.squeeze()
+        # Get activated output for return
+        output_normalized = self._normalize_output_shape(output)
+        activated_output = self._apply_activation(output_normalized)
+        
+        # Get target scores for gradient computation
+        target_scores = self._get_target_scores(output, target_class)
         
         # Backward pass
         if target_scores.dim() == 0:
@@ -295,7 +365,7 @@ class PyTorchAdapter(BaseModelAdapter):
         data: np.ndarray,
         layer_name: str,
         target_class: Optional[int] = None
-    ) -> tuple:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get gradients of output w.r.t. a specific layer's activations.
         
@@ -339,15 +409,8 @@ class PyTorchAdapter(BaseModelAdapter):
             
             output = self.model(tensor_data)
             
-            if self.task == "classification":
-                if target_class is None:
-                    target_class = output.argmax(dim=-1)
-                elif isinstance(target_class, int):
-                    target_class = torch.tensor([target_class] * data.shape[0], device=self.device)
-                
-                target_scores = output.gather(1, target_class.view(-1, 1)).squeeze()
-            else:
-                target_scores = output.squeeze()
+            # Get target scores using the new method
+            target_scores = self._get_target_scores(output, target_class)
             
             if target_scores.dim() == 0:
                 target_scores.backward()

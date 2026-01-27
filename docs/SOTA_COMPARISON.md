@@ -123,7 +123,7 @@
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 | **Gradient Family** | Complete set: IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM |
 
-### Current Implementation (v0.7.0)
+### Current Implementation (v0.7.1)
 
 **17 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
