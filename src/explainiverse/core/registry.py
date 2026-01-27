@@ -372,6 +372,7 @@ def _create_default_registry() -> ExplainerRegistry:
     from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
     from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
     from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
+    from explainiverse.explainers.gradient.smoothgrad import SmoothGradExplainer
     from explainiverse.explainers.example_based.protodash import ProtoDashExplainer
     
     registry = ExplainerRegistry()
@@ -529,6 +530,23 @@ def _create_default_registry() -> ExplainerRegistry:
             paper_reference="Lundberg & Lee, 2017 - combines DeepLIFT with SHAP",
             complexity="O(n_background * forward_pass)",
             requires_training_data=True,
+            supports_batching=True
+        )
+    )
+    
+    # Register SmoothGrad (for neural networks)
+    registry.register(
+        name="smoothgrad",
+        explainer_class=SmoothGradExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["neural"],
+            data_types=["tabular", "image"],
+            task_types=["classification", "regression"],
+            description="SmoothGrad - noise-averaged gradients for smoother saliency maps (requires PyTorch)",
+            paper_reference="Smilkov et al., 2017 - 'SmoothGrad: removing noise by adding noise' (ICML Workshop)",
+            complexity="O(n_samples * forward_pass)",
+            requires_training_data=False,
             supports_batching=True
         )
     )

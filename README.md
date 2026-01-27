@@ -1,63 +1,88 @@
 # Explainiverse
 
-**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI).  
-It provides a standardized interface for model-agnostic explainability with 11 state-of-the-art XAI methods, evaluation metrics, and a plugin registry for easy extensibility.
+[![PyPI version](https://badge.fury.io/py/explainiverse.svg)](https://badge.fury.io/py/explainiverse)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **15 state-of-the-art explanation methods** across local, global, gradient-based, and example-based paradigms, along with **comprehensive evaluation metrics** for assessing explanation quality.
 
 ---
 
-## Features
+## Key Features
 
-### 🎯 Comprehensive XAI Coverage
+| Feature | Description |
+|---------|-------------|
+| **15 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, GradCAM/GradCAM++, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
+| **8 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation) and Stability (RIS, ROS, Lipschitz) |
+| **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
+| **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
+| **Framework Support** | Adapters for scikit-learn and PyTorch (with gradient computation) |
 
-**Local Explainers** (instance-level explanations):
-- **LIME** - Local Interpretable Model-agnostic Explanations ([Ribeiro et al., 2016](https://arxiv.org/abs/1602.04938))
-- **SHAP** - SHapley Additive exPlanations via KernelSHAP ([Lundberg & Lee, 2017](https://arxiv.org/abs/1705.07874))
-- **TreeSHAP** - Exact SHAP values for tree models, 10x+ faster ([Lundberg et al., 2018](https://arxiv.org/abs/1802.03888))
-- **Integrated Gradients** - Axiomatic attributions for neural networks ([Sundararajan et al., 2017](https://arxiv.org/abs/1703.01365))
-- **GradCAM/GradCAM++** - Visual explanations for CNNs ([Selvaraju et al., 2017](https://arxiv.org/abs/1610.02391))
-- **Anchors** - High-precision rule-based explanations ([Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491))
-- **Counterfactual** - DiCE-style diverse counterfactual explanations ([Mothilal et al., 2020](https://arxiv.org/abs/1905.07697))
+---
 
-**Global Explainers** (model-level explanations):
-- **Permutation Importance** - Feature importance via performance degradation ([Breiman, 2001](https://link.springer.com/article/10.1023/A:1010933404324))
-- **Partial Dependence (PDP)** - Marginal feature effects ([Friedman, 2001](https://projecteuclid.org/euclid.aos/1013203451))
-- **ALE** - Accumulated Local Effects, unbiased for correlated features ([Apley & Zhu, 2020](https://academic.oup.com/jrsssb/article/82/4/1059/7056085))
-- **SAGE** - Shapley Additive Global importancE ([Covert et al., 2020](https://arxiv.org/abs/2004.00668))
+## Explainer Coverage
 
-### 🔌 Extensible Plugin Registry
-- Register custom explainers with rich metadata
-- Filter by scope (local/global), model type, data type
-- Automatic recommendations based on use case
+### Local Explainers (Instance-Level)
 
-### 📊 Evaluation Metrics
-- **AOPC** (Area Over Perturbation Curve)
-- **ROAR** (Remove And Retrain)
-- Multiple baseline options and curve generation
+| Method | Type | Reference |
+|--------|------|-----------|
+| **LIME** | Perturbation | [Ribeiro et al., 2016](https://arxiv.org/abs/1602.04938) |
+| **KernelSHAP** | Perturbation | [Lundberg & Lee, 2017](https://arxiv.org/abs/1705.07874) |
+| **TreeSHAP** | Exact (Trees) | [Lundberg et al., 2018](https://arxiv.org/abs/1802.03888) |
+| **Integrated Gradients** | Gradient | [Sundararajan et al., 2017](https://arxiv.org/abs/1703.01365) |
+| **DeepLIFT** | Gradient | [Shrikumar et al., 2017](https://arxiv.org/abs/1704.02685) |
+| **DeepSHAP** | Gradient + Shapley | [Lundberg & Lee, 2017](https://arxiv.org/abs/1705.07874) |
+| **SmoothGrad** | Gradient | [Smilkov et al., 2017](https://arxiv.org/abs/1706.03825) |
+| **GradCAM / GradCAM++** | Gradient (CNN) | [Selvaraju et al., 2017](https://arxiv.org/abs/1610.02391) |
+| **Anchors** | Rule-Based | [Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491) |
+| **Counterfactual** | Contrastive | [Mothilal et al., 2020](https://arxiv.org/abs/1905.07697) |
+| **ProtoDash** | Example-Based | [Gurumoorthy et al., 2019](https://arxiv.org/abs/1707.01212) |
 
-### 🧪 Standardized Interface
-- Consistent `BaseExplainer` API
-- Unified `Explanation` output format
-- Model adapters for sklearn and PyTorch
+### Global Explainers (Model-Level)
+
+| Method | Type | Reference |
+|--------|------|-----------|
+| **Permutation Importance** | Feature Importance | [Breiman, 2001](https://link.springer.com/article/10.1023/A:1010933404324) |
+| **Partial Dependence (PDP)** | Feature Effect | [Friedman, 2001](https://projecteuclid.org/euclid.aos/1013203451) |
+| **ALE** | Feature Effect | [Apley & Zhu, 2020](https://academic.oup.com/jrsssb/article/82/4/1059/7056085) |
+| **SAGE** | Shapley Importance | [Covert et al., 2020](https://arxiv.org/abs/2004.00668) |
+
+---
+
+## Evaluation Metrics
+
+Explainiverse includes a comprehensive suite of evaluation metrics based on the XAI literature:
+
+### Faithfulness Metrics
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **PGI** | Prediction Gap on Important features | [Petsiuk et al., 2018](https://arxiv.org/abs/1806.07421) |
+| **PGU** | Prediction Gap on Unimportant features | [Petsiuk et al., 2018](https://arxiv.org/abs/1806.07421) |
+| **Comprehensiveness** | Drop when removing top-k features | [DeYoung et al., 2020](https://arxiv.org/abs/1911.03429) |
+| **Sufficiency** | Prediction using only top-k features | [DeYoung et al., 2020](https://arxiv.org/abs/1911.03429) |
+| **Faithfulness Correlation** | Correlation between attribution and impact | [Bhatt et al., 2020](https://arxiv.org/abs/2005.00631) |
+
+### Stability Metrics
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **RIS** | Relative Input Stability | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
+| **ROS** | Relative Output Stability | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
+| **Lipschitz Estimate** | Local Lipschitz continuity | [Alvarez-Melis & Jaakkola, 2018](https://arxiv.org/abs/1806.08049) |
 
 ---
 
 ## Installation
 
-From PyPI:
-
 ```bash
+# From PyPI
 pip install explainiverse
-```
 
-With PyTorch support (for neural network explanations):
-
-```bash
+# With PyTorch support (for gradient-based methods)
 pip install explainiverse[torch]
-```
 
-For development:
-
-```bash
+# For development
 git clone https://github.com/jemsbhai/explainiverse.git
 cd explainiverse
 poetry install
@@ -67,7 +92,7 @@ poetry install
 
 ## Quick Start
 
-### Using the Registry (Recommended)
+### Basic Usage with Registry
 
 ```python
 from explainiverse import default_registry, SklearnAdapter
@@ -76,198 +101,321 @@ from sklearn.datasets import load_iris
 
 # Train a model
 iris = load_iris()
-model = RandomForestClassifier().fit(iris.data, iris.target)
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(iris.data, iris.target)
+
+# Wrap with adapter
 adapter = SklearnAdapter(model, class_names=iris.target_names.tolist())
 
-# List available explainers
+# List all available explainers
 print(default_registry.list_explainers())
-# ['lime', 'shap', 'treeshap', 'integrated_gradients', 'gradcam', 'anchors', 'counterfactual', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
+# ['lime', 'shap', 'treeshap', 'integrated_gradients', 'deeplift', 'deepshap', 
+#  'smoothgrad', 'gradcam', 'anchors', 'counterfactual', 'protodash',
+#  'permutation_importance', 'partial_dependence', 'ale', 'sage']
 
-# Create and use an explainer
+# Create an explainer via registry
 explainer = default_registry.create(
     "lime",
     model=adapter,
     training_data=iris.data,
-    feature_names=iris.feature_names,
+    feature_names=iris.feature_names.tolist(),
     class_names=iris.target_names.tolist()
 )
+
+# Generate explanation
 explanation = explainer.explain(iris.data[0])
 print(explanation.explanation_data["feature_attributions"])
 ```
 
-### Filter Explainers by Criteria
+### Filter and Recommend Explainers
 
 ```python
-# Find local explainers for tabular data
-local_tabular = default_registry.filter(scope="local", data_type="tabular")
-print(local_tabular)  # ['lime', 'shap', 'treeshap', 'integrated_gradients', 'anchors', 'counterfactual']
-
-# Find explainers for images/CNNs
+# Filter by criteria
+local_explainers = default_registry.filter(scope="local", data_type="tabular")
+neural_explainers = default_registry.filter(model_type="neural")
 image_explainers = default_registry.filter(data_type="image")
-print(image_explainers)  # ['lime', 'integrated_gradients', 'gradcam']
 
 # Get recommendations
 recommendations = default_registry.recommend(
-    model_type="any",
+    model_type="neural",
     data_type="tabular",
-    scope_preference="local"
+    scope_preference="local",
+    max_results=5
 )
 ```
 
-### TreeSHAP for Tree Models (10x+ Faster)
+---
 
-```python
-from explainiverse.explainers import TreeShapExplainer
-from sklearn.ensemble import RandomForestClassifier
+## Gradient-Based Explainers (PyTorch)
 
-# Train a tree-based model
-model = RandomForestClassifier(n_estimators=100).fit(X_train, y_train)
-
-# TreeSHAP works directly with the model (no adapter needed)
-explainer = TreeShapExplainer(
-    model=model,
-    feature_names=feature_names,
-    class_names=class_names
-)
-
-# Single instance explanation
-explanation = explainer.explain(X_test[0])
-print(explanation.explanation_data["feature_attributions"])
-
-# Batch explanations (efficient)
-explanations = explainer.explain_batch(X_test[:10])
-
-# Feature interactions
-interactions = explainer.explain_interactions(X_test[0])
-print(interactions.explanation_data["interaction_matrix"])
-```
-
-### PyTorch Adapter for Neural Networks
+### Integrated Gradients
 
 ```python
 from explainiverse import PyTorchAdapter
+from explainiverse.explainers.gradient import IntegratedGradientsExplainer
 import torch.nn as nn
 
-# Define a PyTorch model
+# Define and wrap model
 model = nn.Sequential(
-    nn.Linear(10, 64),
-    nn.ReLU(),
-    nn.Linear(64, 3)
+    nn.Linear(10, 64), nn.ReLU(),
+    nn.Linear(64, 32), nn.ReLU(),
+    nn.Linear(32, 3)
+)
+adapter = PyTorchAdapter(model, task="classification", class_names=["A", "B", "C"])
+
+# Create explainer
+explainer = IntegratedGradientsExplainer(
+    model=adapter,
+    feature_names=[f"feature_{i}" for i in range(10)],
+    class_names=["A", "B", "C"],
+    n_steps=50,
+    method="riemann_trapezoid"
 )
 
-# Wrap with adapter
-adapter = PyTorchAdapter(
-    model,
-    task="classification",
-    class_names=["cat", "dog", "bird"]
-)
-
-# Use with any explainer
-predictions = adapter.predict(X)  # Returns numpy array
-
-# Get gradients for attribution methods
-predictions, gradients = adapter.predict_with_gradients(X)
-
-# Access intermediate layers
-activations = adapter.get_layer_output(X, layer_name="0")
+# Explain with convergence check
+explanation = explainer.explain(X[0], return_convergence_delta=True)
+print(f"Attributions: {explanation.explanation_data['feature_attributions']}")
+print(f"Convergence δ: {explanation.explanation_data['convergence_delta']:.6f}")
 ```
 
-### Integrated Gradients for Neural Networks
+### DeepLIFT and DeepSHAP
 
 ```python
-from explainiverse.explainers import IntegratedGradientsExplainer
-from explainiverse import PyTorchAdapter
+from explainiverse.explainers.gradient import DeepLIFTExplainer, DeepLIFTShapExplainer
 
-# Wrap your PyTorch model
-adapter = PyTorchAdapter(model, task="classification", class_names=class_names)
-
-# Create IG explainer
-explainer = IntegratedGradientsExplainer(
+# DeepLIFT - Fast reference-based attributions
+deeplift = DeepLIFTExplainer(
     model=adapter,
     feature_names=feature_names,
     class_names=class_names,
-    n_steps=50  # More steps = more accurate
+    baseline=None  # Uses zero baseline by default
 )
+explanation = deeplift.explain(X[0])
 
-# Explain a prediction
-explanation = explainer.explain(X_test[0])
-print(explanation.explanation_data["feature_attributions"])
-
-# Check convergence (sum of attributions ≈ F(x) - F(baseline))
-explanation = explainer.explain(X_test[0], return_convergence_delta=True)
-print(f"Convergence delta: {explanation.explanation_data['convergence_delta']}")
+# DeepSHAP - DeepLIFT averaged over background samples
+deepshap = DeepLIFTShapExplainer(
+    model=adapter,
+    feature_names=feature_names,
+    class_names=class_names,
+    background_data=X_train[:100]
+)
+explanation = deepshap.explain(X[0])
 ```
 
-### GradCAM for CNN Visual Explanations
+### SmoothGrad
 
 ```python
-from explainiverse.explainers import GradCAMExplainer
-from explainiverse import PyTorchAdapter
+from explainiverse.explainers.gradient import SmoothGradExplainer
 
-# Wrap your CNN model
-adapter = PyTorchAdapter(cnn_model, task="classification", class_names=class_names)
-
-# Find the last convolutional layer
-layers = adapter.list_layers()
-target_layer = "layer4"  # Adjust based on your model architecture
-
-# Create GradCAM explainer
-explainer = GradCAMExplainer(
+# SmoothGrad - Noise-averaged gradients for smoother saliency
+explainer = SmoothGradExplainer(
     model=adapter,
-    target_layer=target_layer,
+    feature_names=feature_names,
     class_names=class_names,
-    method="gradcam"  # or "gradcam++" for improved version
+    n_samples=50,
+    noise_scale=0.15,
+    noise_type="gaussian"  # or "uniform"
 )
 
-# Explain an image prediction
-explanation = explainer.explain(image)  # image shape: (C, H, W) or (N, C, H, W)
-heatmap = explanation.explanation_data["heatmap"]
+# Standard SmoothGrad
+explanation = explainer.explain(X[0], method="smoothgrad")
 
-# Create overlay visualization
+# SmoothGrad-Squared (sharper attributions)
+explanation = explainer.explain(X[0], method="smoothgrad_squared")
+
+# VarGrad (variance of gradients)
+explanation = explainer.explain(X[0], method="vargrad")
+
+# With absolute values
+explanation = explainer.explain(X[0], absolute_value=True)
+```
+
+### GradCAM for CNNs
+
+```python
+from explainiverse.explainers.gradient import GradCAMExplainer
+
+# For CNN models
+adapter = PyTorchAdapter(cnn_model, task="classification", class_names=class_names)
+
+explainer = GradCAMExplainer(
+    model=adapter,
+    target_layer="layer4",  # Last conv layer
+    class_names=class_names,
+    method="gradcam++"  # or "gradcam"
+)
+
+explanation = explainer.explain(image)
+heatmap = explanation.explanation_data["heatmap"]
 overlay = explainer.get_overlay(original_image, heatmap, alpha=0.5)
 ```
 
-### Using Specific Explainers
+---
+
+## Example-Based Explanations
+
+### ProtoDash
 
 ```python
-# Anchors - Rule-based explanations
-from explainiverse.explainers import AnchorsExplainer
+from explainiverse.explainers.example_based import ProtoDashExplainer
 
-anchors = AnchorsExplainer(
+explainer = ProtoDashExplainer(
     model=adapter,
     training_data=X_train,
     feature_names=feature_names,
-    class_names=class_names
+    n_prototypes=5,
+    kernel="rbf",
+    gamma=0.1
 )
-explanation = anchors.explain(instance)
-print(explanation.explanation_data["rules"])
-# ['petal length (cm) > 2.45', 'petal width (cm) <= 1.75']
 
-# Counterfactual - What-if explanations
-from explainiverse.explainers import CounterfactualExplainer
+explanation = explainer.explain(X_test[0])
+print(explanation.explanation_data["prototype_indices"])
+print(explanation.explanation_data["prototype_weights"])
+```
 
-cf = CounterfactualExplainer(
+---
+
+## Evaluation Metrics
+
+### Faithfulness Evaluation
+
+```python
+from explainiverse.evaluation import (
+    compute_pgi, compute_pgu,
+    compute_comprehensiveness, compute_sufficiency,
+    compute_faithfulness_correlation
+)
+
+# PGI - Higher is better (important features affect predictions)
+pgi = compute_pgi(
     model=adapter,
-    training_data=X_train,
+    instance=X[0],
+    attributions=attributions,
+    feature_names=feature_names,
+    top_k=3
+)
+
+# PGU - Lower is better (unimportant features don't affect predictions)
+pgu = compute_pgu(
+    model=adapter,
+    instance=X[0],
+    attributions=attributions,
+    feature_names=feature_names,
+    top_k=3
+)
+
+# Comprehensiveness - Higher is better
+comp = compute_comprehensiveness(
+    model=adapter,
+    instance=X[0],
+    attributions=attributions,
+    feature_names=feature_names,
+    top_k_values=[1, 2, 3, 5]
+)
+
+# Sufficiency - Lower is better
+suff = compute_sufficiency(
+    model=adapter,
+    instance=X[0],
+    attributions=attributions,
+    feature_names=feature_names,
+    top_k_values=[1, 2, 3, 5]
+)
+
+# Faithfulness Correlation
+corr = compute_faithfulness_correlation(
+    model=adapter,
+    instance=X[0],
+    attributions=attributions,
     feature_names=feature_names
 )
-explanation = cf.explain(instance, num_counterfactuals=3)
-print(explanation.explanation_data["changes"])
+```
 
-# SAGE - Global Shapley importance
-from explainiverse.explainers import SAGEExplainer
+### Stability Evaluation
 
+```python
+from explainiverse.evaluation import (
+    compute_ris, compute_ros, compute_lipschitz_estimate
+)
+
+# RIS - Relative Input Stability (lower is better)
+ris = compute_ris(
+    explainer=explainer,
+    instance=X[0],
+    n_perturbations=10,
+    perturbation_scale=0.1
+)
+
+# ROS - Relative Output Stability (lower is better)
+ros = compute_ros(
+    model=adapter,
+    explainer=explainer,
+    instance=X[0],
+    n_perturbations=10,
+    perturbation_scale=0.1
+)
+
+# Lipschitz Estimate (lower is better)
+lipschitz = compute_lipschitz_estimate(
+    explainer=explainer,
+    instance=X[0],
+    n_perturbations=20,
+    perturbation_scale=0.1
+)
+```
+
+---
+
+## Global Explainers
+
+```python
+from explainiverse.explainers import (
+    PermutationImportanceExplainer,
+    PartialDependenceExplainer,
+    ALEExplainer,
+    SAGEExplainer
+)
+
+# Permutation Importance
+perm_imp = PermutationImportanceExplainer(
+    model=adapter,
+    X=X_test,
+    y=y_test,
+    feature_names=feature_names,
+    n_repeats=10
+)
+explanation = perm_imp.explain()
+
+# Partial Dependence Plot
+pdp = PartialDependenceExplainer(
+    model=adapter,
+    X=X_train,
+    feature_names=feature_names
+)
+explanation = pdp.explain(feature="feature_0", grid_resolution=50)
+
+# ALE (handles correlated features)
+ale = ALEExplainer(
+    model=adapter,
+    X=X_train,
+    feature_names=feature_names
+)
+explanation = ale.explain(feature="feature_0", n_bins=20)
+
+# SAGE (global Shapley importance)
 sage = SAGEExplainer(
     model=adapter,
     X=X_train,
     y=y_train,
-    feature_names=feature_names
+    feature_names=feature_names,
+    n_permutations=512
 )
 explanation = sage.explain()
-print(explanation.explanation_data["feature_attributions"])
 ```
 
-### Explanation Suite (Multi-Explainer Comparison)
+---
+
+## Multi-Explainer Comparison
 
 ```python
 from explainiverse import ExplanationSuite
@@ -277,19 +425,20 @@ suite = ExplanationSuite(
     explainer_configs=[
         ("lime", {"training_data": X_train, "feature_names": feature_names, "class_names": class_names}),
         ("shap", {"background_data": X_train[:50], "feature_names": feature_names, "class_names": class_names}),
+        ("treeshap", {"feature_names": feature_names, "class_names": class_names}),
     ]
 )
 
-results = suite.run(instance)
+results = suite.run(X_test[0])
 suite.compare()
 ```
 
 ---
 
-## Registering Custom Explainers
+## Custom Explainer Registration
 
 ```python
-from explainiverse import ExplainerRegistry, ExplainerMeta, BaseExplainer
+from explainiverse import default_registry, ExplainerMeta, BaseExplainer, Explanation
 
 @default_registry.register_decorator(
     name="my_explainer",
@@ -297,14 +446,54 @@ from explainiverse import ExplainerRegistry, ExplainerMeta, BaseExplainer
         scope="local",
         model_types=["any"],
         data_types=["tabular"],
+        task_types=["classification", "regression"],
         description="My custom explainer",
-        paper_reference="Author et al., 2024"
+        paper_reference="Author et al., 2024",
+        complexity="O(n)",
+        requires_training_data=False,
+        supports_batching=True
     )
 )
 class MyExplainer(BaseExplainer):
+    def __init__(self, model, feature_names, **kwargs):
+        super().__init__(model)
+        self.feature_names = feature_names
+    
     def explain(self, instance, **kwargs):
         # Your implementation
-        return Explanation(...)
+        attributions = self._compute_attributions(instance)
+        return Explanation(
+            explainer_name="MyExplainer",
+            target_class="output",
+            explanation_data={"feature_attributions": attributions}
+        )
+```
+
+---
+
+## Architecture
+
+```
+explainiverse/
+├── core/
+│   ├── explainer.py      # BaseExplainer abstract class
+│   ├── explanation.py    # Unified Explanation container
+│   └── registry.py       # ExplainerRegistry with metadata
+├── adapters/
+│   ├── sklearn_adapter.py
+│   └── pytorch_adapter.py  # With gradient support
+├── explainers/
+│   ├── attribution/      # LIME, SHAP, TreeSHAP
+│   ├── gradient/         # IG, DeepLIFT, DeepSHAP, SmoothGrad, GradCAM
+│   ├── rule_based/       # Anchors
+│   ├── counterfactual/   # DiCE-style
+│   ├── global_explainers/  # Permutation, PDP, ALE, SAGE
+│   └── example_based/    # ProtoDash
+├── evaluation/
+│   ├── faithfulness.py   # PGI, PGU, Comprehensiveness, Sufficiency
+│   └── stability.py      # RIS, ROS, Lipschitz
+└── engine/
+    └── suite.py          # Multi-explainer comparison
 ```
 
 ---
@@ -316,26 +505,42 @@ class MyExplainer(BaseExplainer):
 poetry run pytest
 
 # Run with coverage
-poetry run pytest --cov=explainiverse
+poetry run pytest --cov=explainiverse --cov-report=html
 
 # Run specific test file
-poetry run pytest tests/test_new_explainers.py -v
+poetry run pytest tests/test_smoothgrad.py -v
+
+# Run specific test class
+poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
 ```
 
 ---
 
 ## Roadmap
 
-- [x] LIME, SHAP (KernelSHAP)
-- [x] TreeSHAP (optimized for tree models) ✅
-- [x] Anchors, Counterfactuals
-- [x] Permutation Importance, PDP, ALE, SAGE
-- [x] Explainer Registry with filtering
-- [x] PyTorch Adapter ✅
-- [x] Integrated Gradients ✅
-- [x] GradCAM/GradCAM++ for CNNs ✅ NEW
-- [ ] TensorFlow adapter
+### Completed ✅
+- [x] Core framework (BaseExplainer, Explanation, Registry)
+- [x] Perturbation methods: LIME, KernelSHAP, TreeSHAP
+- [x] Gradient methods: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, GradCAM/GradCAM++
+- [x] Rule-based: Anchors
+- [x] Counterfactual: DiCE-style
+- [x] Global: Permutation Importance, PDP, ALE, SAGE
+- [x] Example-based: ProtoDash
+- [x] Evaluation: Faithfulness metrics (PGI, PGU, Comprehensiveness, Sufficiency, Correlation)
+- [x] Evaluation: Stability metrics (RIS, ROS, Lipschitz)
+- [x] PyTorch adapter with gradient support
+
+### In Progress 🚧
+- [ ] Saliency Maps (vanilla gradients)
+- [ ] TCAV (Testing with Concept Activation Vectors)
+- [ ] Layer-wise Relevance Propagation (LRP)
+
+### Planned 📋
+- [ ] Attention-based explanations (for Transformers)
+- [ ] TensorFlow/Keras adapter
 - [ ] Interactive visualization dashboard
+- [ ] Explanation caching and serialization
+- [ ] Distributed computation support
 
 ---
 
@@ -344,16 +549,37 @@ poetry run pytest tests/test_new_explainers.py -v
 If you use Explainiverse in your research, please cite:
 
 ```bibtex
-@software{explainiverse2024,
+@software{explainiverse2025,
   title = {Explainiverse: A Unified Framework for Explainable AI},
   author = {Syed, Muntaser},
-  year = {2024},
-  url = {https://github.com/jemsbhai/explainiverse}
+  year = {2025},
+  url = {https://github.com/jemsbhai/explainiverse},
+  version = {0.5.0}
 }
 ```
+
+---
+
+## Contributing
+
+Contributions are welcome! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Write tests for your changes
+4. Ensure all tests pass (`poetry run pytest`)
+5. Commit your changes (`git commit -m 'Add amazing feature'`)
+6. Push to the branch (`git push origin feature/amazing-feature`)
+7. Open a Pull Request
 
 ---
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+---
+
+## Acknowledgments
+
+Explainiverse builds upon the foundational work of many researchers in the XAI community. We thank the authors of LIME, SHAP, Integrated Gradients, DeepLIFT, GradCAM, Anchors, DiCE, ALE, SAGE, and ProtoDash for their contributions to interpretable machine learning.
