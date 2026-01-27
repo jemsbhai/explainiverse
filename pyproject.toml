@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "explainiverse"
-version = "0.5.0"
+version = "0.6.0"
 description = "Unified, extensible explainability framework supporting LIME, SHAP, Anchors, Counterfactuals, PDP, ALE, SAGE, and more"
 authors = ["Muntaser Syed <jemsbhai@gmail.com>"]
 license = "MIT"

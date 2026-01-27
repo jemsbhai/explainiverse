@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **15 state-of-the-art explanation methods** across local, global, gradient-based, and example-based paradigms, along with **comprehensive evaluation metrics** for assessing explanation quality.
+**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **16 state-of-the-art explanation methods** across local, global, gradient-based, and example-based paradigms, along with **comprehensive evaluation metrics** for assessing explanation quality.
 
 ---
 
@@ -12,7 +12,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **15 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, GradCAM/GradCAM++, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
+| **16 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
 | **8 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation) and Stability (RIS, ROS, Lipschitz) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
@@ -33,6 +33,7 @@
 | **DeepLIFT** | Gradient | [Shrikumar et al., 2017](https://arxiv.org/abs/1704.02685) |
 | **DeepSHAP** | Gradient + Shapley | [Lundberg & Lee, 2017](https://arxiv.org/abs/1705.07874) |
 | **SmoothGrad** | Gradient | [Smilkov et al., 2017](https://arxiv.org/abs/1706.03825) |
+| **Saliency Maps** | Gradient | [Simonyan et al., 2014](https://arxiv.org/abs/1312.6034) |
 | **GradCAM / GradCAM++** | Gradient (CNN) | [Selvaraju et al., 2017](https://arxiv.org/abs/1610.02391) |
 | **Anchors** | Rule-Based | [Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491) |
 | **Counterfactual** | Contrastive | [Mothilal et al., 2020](https://arxiv.org/abs/1905.07697) |
@@ -200,6 +201,41 @@ deepshap = DeepLIFTShapExplainer(
     background_data=X_train[:100]
 )
 explanation = deepshap.explain(X[0])
+```
+
+### Saliency Maps
+
+```python
+from explainiverse.explainers.gradient import SaliencyExplainer
+
+# Saliency Maps - simplest and fastest gradient method
+explainer = SaliencyExplainer(
+    model=adapter,
+    feature_names=feature_names,
+    class_names=class_names,
+    absolute_value=True  # Default: absolute gradient magnitudes
+)
+
+# Standard saliency (absolute gradients)
+explanation = explainer.explain(X[0], method="saliency")
+
+# Input × Gradient (gradient scaled by input values)
+explanation = explainer.explain(X[0], method="input_times_gradient")
+
+# Signed saliency (keep gradient direction)
+explainer_signed = SaliencyExplainer(
+    model=adapter,
+    feature_names=feature_names,
+    class_names=class_names,
+    absolute_value=False
+)
+explanation = explainer_signed.explain(X[0])
+
+# Compare all variants
+variants = explainer.compute_all_variants(X[0])
+print(variants["saliency_absolute"])
+print(variants["saliency_signed"])
+print(variants["input_times_gradient"])
 ```
 
 ### SmoothGrad
@@ -521,7 +557,7 @@ poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
 ### Completed ✅
 - [x] Core framework (BaseExplainer, Explanation, Registry)
 - [x] Perturbation methods: LIME, KernelSHAP, TreeSHAP
-- [x] Gradient methods: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, GradCAM/GradCAM++
+- [x] Gradient methods: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++
 - [x] Rule-based: Anchors
 - [x] Counterfactual: DiCE-style
 - [x] Global: Permutation Importance, PDP, ALE, SAGE
@@ -531,7 +567,6 @@ poetry run pytest tests/test_smoothgrad.py::TestSmoothGradBasic -v
 - [x] PyTorch adapter with gradient support
 
 ### In Progress 🚧
-- [ ] Saliency Maps (vanilla gradients)
 - [ ] TCAV (Testing with Concept Activation Vectors)
 - [ ] Layer-wise Relevance Propagation (LRP)
 
@@ -554,7 +589,7 @@ If you use Explainiverse in your research, please cite:
   author = {Syed, Muntaser},
   year = {2025},
   url = {https://github.com/jemsbhai/explainiverse},
-  version = {0.5.0}
+  version = {0.6.0}
 }
 ```
 

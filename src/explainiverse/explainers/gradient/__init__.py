@@ -10,6 +10,7 @@ from explainiverse.explainers.gradient.integrated_gradients import IntegratedGra
 from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
 from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
 from explainiverse.explainers.gradient.smoothgrad import SmoothGradExplainer
+from explainiverse.explainers.gradient.saliency import SaliencyExplainer
 
 __all__ = [
     "IntegratedGradientsExplainer", 
@@ -17,4 +18,5 @@ __all__ = [
     "DeepLIFTExplainer",
     "DeepLIFTShapExplainer",
     "SmoothGradExplainer",
+    "SaliencyExplainer",
 ]
