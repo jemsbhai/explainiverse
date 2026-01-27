@@ -9,12 +9,17 @@ Local Explainers (instance-level):
 - Anchors: High-precision rule-based explanations
 - Counterfactual: Diverse counterfactual explanations
 - Integrated Gradients: Gradient-based attributions for neural networks
+- DeepLIFT: Reference-based attributions for neural networks
+- DeepSHAP: DeepLIFT combined with SHAP for neural networks
 
 Global Explainers (model-level):
 - Permutation Importance: Feature importance via permutation
 - Partial Dependence: Marginal feature effects (PDP)
 - ALE: Accumulated Local Effects (unbiased for correlated features)
 - SAGE: Shapley Additive Global importancE
+
+Example-Based Explainers:
+- ProtoDash: Prototype selection with importance weights
 """
 
 from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
@@ -29,6 +34,7 @@ from explainiverse.explainers.global_explainers.sage import SAGEExplainer
 from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
 from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
 from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
+from explainiverse.explainers.example_based.protodash import ProtoDashExplainer
 
 __all__ = [
     # Local explainers
@@ -46,4 +52,6 @@ __all__ = [
     "PartialDependenceExplainer",
     "ALEExplainer",
     "SAGEExplainer",
+    # Example-based explainers
+    "ProtoDashExplainer",
 ]

@@ -372,6 +372,7 @@ def _create_default_registry() -> ExplainerRegistry:
     from explainiverse.explainers.gradient.integrated_gradients import IntegratedGradientsExplainer
     from explainiverse.explainers.gradient.gradcam import GradCAMExplainer
     from explainiverse.explainers.gradient.deeplift import DeepLIFTExplainer, DeepLIFTShapExplainer
+    from explainiverse.explainers.example_based.protodash import ProtoDashExplainer
     
     registry = ExplainerRegistry()
     
@@ -601,6 +602,27 @@ def _create_default_registry() -> ExplainerRegistry:
             complexity="O(n_permutations * n_features * n_samples)",
             requires_training_data=True,
             supports_batching=False
+        )
+    )
+    
+    # =========================================================================
+    # Example-Based Explainers
+    # =========================================================================
+    
+    # Register ProtoDash
+    registry.register(
+        name="protodash",
+        explainer_class=ProtoDashExplainer,
+        meta=ExplainerMeta(
+            scope="local",
+            model_types=["any"],
+            data_types=["tabular"],
+            task_types=["classification", "regression"],
+            description="ProtoDash - prototype selection with importance weights for example-based explanations",
+            paper_reference="Gurumoorthy et al., 2019 - 'Efficient Data Representation by Selecting Prototypes' (ICDM)",
+            complexity="O(n_prototypes * n_samples^2)",
+            requires_training_data=True,
+            supports_batching=True
         )
     )
     
