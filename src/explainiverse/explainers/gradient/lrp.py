@@ -207,6 +207,76 @@ class LRPExplainer(BaseExplainer):
         """Get the underlying PyTorch model."""
         return self.model.model
     
+    def _is_cnn_model(self) -> bool:
+        """Check if the model's first weighted layer is Conv2d."""
+        model = self._get_pytorch_model()
+        for module in model.modules():
+            if isinstance(module, nn.Conv2d):
+                return True
+            if isinstance(module, nn.Linear):
+                return False
+        return False
+    
+    def _prepare_input_tensor(self, instance: np.ndarray) -> torch.Tensor:
+        """
+        Prepare input tensor with correct shape for the model.
+        
+        For CNN models, preserves the spatial dimensions.
+        For MLP models, flattens to 2D.
+        
+        Args:
+            instance: Input array (1D for tabular, 3D for images)
+        
+        Returns:
+            Tensor with batch dimension added and correct shape for model
+        """
+        instance = np.array(instance).astype(np.float32)
+        original_shape = instance.shape
+        
+        model = self._get_pytorch_model()
+        
+        # Find first weighted layer to determine input type
+        first_layer = None
+        for module in model.modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                first_layer = module
+                break
+        
+        if isinstance(first_layer, nn.Conv2d):
+            # CNN model - need 4D input (batch, channels, height, width)
+            in_channels = first_layer.in_channels
+            
+            if len(original_shape) >= 3:
+                # Already (C, H, W) format - just add batch dimension
+                x = torch.tensor(instance).unsqueeze(0)
+            elif len(original_shape) == 2:
+                # (H, W) - assume single channel, add channel and batch dimensions
+                x = torch.tensor(instance).unsqueeze(0).unsqueeze(0)
+            else:
+                # Flattened - try to infer spatial dimensions
+                n_features = instance.size
+                if n_features % in_channels == 0:
+                    spatial_size = int(np.sqrt(n_features // in_channels))
+                    if spatial_size * spatial_size * in_channels == n_features:
+                        x = torch.tensor(instance.flatten()).reshape(
+                            1, in_channels, spatial_size, spatial_size
+                        )
+                    else:
+                        raise ValueError(
+                            f"Cannot infer spatial dimensions for {n_features} features "
+                            f"with {in_channels} channels"
+                        )
+                else:
+                    raise ValueError(
+                        f"Number of features ({n_features}) not divisible by "
+                        f"input channels ({in_channels})"
+                    )
+        else:
+            # MLP model - need 2D input (batch, features)
+            x = torch.tensor(instance.flatten()).reshape(1, -1)
+        
+        return x.float()
+    
     def _get_rule_for_layer(self, layer_idx: int, layer_type: str) -> str:
         """
         Get the propagation rule for a specific layer.
@@ -764,32 +834,8 @@ class LRPExplainer(BaseExplainer):
         model = self._get_pytorch_model()
         model.eval()
         
-        # Prepare input
-        original_shape = instance.shape
-        instance_flat = instance.flatten().astype(np.float32)
-        x = torch.tensor(instance_flat, dtype=torch.float32).reshape(1, -1)
-        
-        # Check if this is an image input (for CNN models)
-        # Try to infer from model's first layer
-        first_layer = None
-        for module in model.modules():
-            if isinstance(module, (nn.Linear, nn.Conv2d)):
-                first_layer = module
-                break
-        
-        if isinstance(first_layer, nn.Conv2d):
-            # Reshape for CNN input: assume square image or use original shape
-            in_channels = first_layer.in_channels
-            if len(original_shape) >= 2:
-                x = torch.tensor(instance.astype(np.float32)).unsqueeze(0)
-            else:
-                # Try to infer image dimensions
-                n_features = len(instance_flat)
-                if n_features % in_channels == 0:
-                    spatial_size = int(np.sqrt(n_features // in_channels))
-                    if spatial_size * spatial_size * in_channels == n_features:
-                        x = x.reshape(1, in_channels, spatial_size, spatial_size)
-        
+        # Prepare input with correct shape for model type (CNN vs MLP)
+        x = self._prepare_input_tensor(instance)
         x.requires_grad_(False)
         
         # =====================================================================
@@ -939,8 +985,13 @@ class LRPExplainer(BaseExplainer):
         
         # Determine target class if not specified
         if target_class is None and self.class_names:
-            predictions = self.model.predict(instance_flat.reshape(1, -1))
-            target_class = int(np.argmax(predictions))
+            # Get prediction using properly shaped input
+            model = self._get_pytorch_model()
+            model.eval()
+            with torch.no_grad():
+                x = self._prepare_input_tensor(instance)
+                output = model(x)
+                target_class = int(torch.argmax(output, dim=1).item())
         
         # Compute LRP attributions
         attributions_raw = self._compute_lrp(instance, target_class)
@@ -981,26 +1032,8 @@ class LRPExplainer(BaseExplainer):
             model.eval()
             
             with torch.no_grad():
-                x = torch.tensor(instance_flat.reshape(1, -1), dtype=torch.float32)
-                
-                # Handle CNN input reshaping
-                first_layer = None
-                for module in model.modules():
-                    if isinstance(module, (nn.Linear, nn.Conv2d)):
-                        first_layer = module
-                        break
-                
-                if isinstance(first_layer, nn.Conv2d):
-                    in_channels = first_layer.in_channels
-                    if len(original_shape) >= 2:
-                        x = torch.tensor(instance.astype(np.float32)).unsqueeze(0)
-                    else:
-                        n_features = len(instance_flat)
-                        if n_features % in_channels == 0:
-                            spatial_size = int(np.sqrt(n_features // in_channels))
-                            if spatial_size * spatial_size * in_channels == n_features:
-                                x = x.reshape(1, in_channels, spatial_size, spatial_size)
-                
+                # Use the helper method to get properly shaped input
+                x = self._prepare_input_tensor(instance)
                 output = model(x)
                 
                 if target_class is not None:
@@ -1080,8 +1113,13 @@ class LRPExplainer(BaseExplainer):
         
         # Determine target class if not specified
         if target_class is None and self.class_names:
-            predictions = self.model.predict(instance.flatten().reshape(1, -1))
-            target_class = int(np.argmax(predictions))
+            # Get prediction using properly shaped input
+            model = self._get_pytorch_model()
+            model.eval()
+            with torch.no_grad():
+                x = self._prepare_input_tensor(instance)
+                output = model(x)
+                target_class = int(torch.argmax(output, dim=1).item())
         
         # Compute LRP with layer relevances
         input_relevances, layer_relevances = self._compute_lrp(
@@ -1123,8 +1161,13 @@ class LRPExplainer(BaseExplainer):
         
         # Determine target class
         if target_class is None and self.class_names:
-            predictions = self.model.predict(instance.flatten().reshape(1, -1))
-            target_class = int(np.argmax(predictions))
+            # Get prediction using properly shaped input
+            model = self._get_pytorch_model()
+            model.eval()
+            with torch.no_grad():
+                x = self._prepare_input_tensor(instance)
+                output = model(x)
+                target_class = int(torch.argmax(output, dim=1).item())
         
         if rules is None:
             rules = ["epsilon", "gamma", "alpha_beta", "z_plus"]
