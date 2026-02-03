@@ -940,6 +940,11 @@ class LRPExplainer(BaseExplainer):
                 if activation.dim() > 2:
                     relevance = relevance.reshape(activation.shape)
             
+            elif isinstance(layer, nn.Unflatten):
+                # Unflatten in forward expands dimensions: (batch, features) -> (batch, *dims)
+                # In backward, reshape relevance to match the flattened input activation
+                relevance = relevance.view(activation.shape)
+            
             elif isinstance(layer, PASSTHROUGH_LAYERS):
                 # Dropout and other passthrough layers
                 pass
