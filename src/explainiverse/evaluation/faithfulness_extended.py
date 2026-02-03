@@ -257,6 +257,175 @@ def compute_batch_faithfulness_estimate(
 
 
 # =============================================================================
+# Metric 3: Monotonicity-Nguyen (Nguyen et al., 2020)
+# =============================================================================
+
+def compute_monotonicity_nguyen(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    use_absolute: bool = True,
+) -> float:
+    """
+    Compute Monotonicity Correlation (Nguyen et al., 2020).
+    
+    Measures the Spearman rank correlation between attribution magnitudes
+    and the prediction changes when each feature is individually removed
+    (replaced with baseline). A faithful explanation should show that
+    features with higher attributions cause larger prediction changes
+    when removed.
+    
+    Unlike Arya's Monotonicity (sequential feature addition), this metric
+    evaluates each feature independently and uses rank correlation to
+    measure agreement between attributed importance and actual impact.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal ("mean", "median", scalar, array, callable)
+        background_data: Reference data for computing baseline (required for "mean"/"median")
+        target_class: Target class index for probability (default: predicted class)
+        use_absolute: If True, use absolute attribution values (default: True)
+        
+    Returns:
+        Monotonicity correlation score (Spearman rho, -1 to 1, higher is better)
+        
+    References:
+        Nguyen, A. P., & Martinez, M. R. (2020). Quantitative Evaluation of 
+        Machine Learning Explanations: A Human-Grounded Benchmark. 
+        arXiv:2010.07455.
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Compute prediction change for each feature when removed
+    prediction_changes = []
+    attribution_values = []
+    
+    for i in range(n_features):
+        # Create perturbed instance with feature i replaced by baseline
+        perturbed = instance.copy()
+        perturbed[i] = baseline_values[i]
+        
+        # Get prediction for perturbed instance
+        perturbed_pred = get_prediction_value(model, perturbed.reshape(1, -1))
+        if isinstance(perturbed_pred, np.ndarray) and perturbed_pred.ndim > 0 and len(perturbed_pred) > target_class:
+            perturbed_value = perturbed_pred[target_class]
+        else:
+            perturbed_value = float(perturbed_pred)
+        
+        # Prediction change (drop in confidence when feature is removed)
+        # Positive change means removing the feature decreased prediction
+        change = original_value - perturbed_value
+        prediction_changes.append(abs(change))
+        
+        # Attribution value
+        if use_absolute:
+            attribution_values.append(abs(attr_array[i]))
+        else:
+            attribution_values.append(attr_array[i])
+    
+    prediction_changes = np.array(prediction_changes)
+    attribution_values = np.array(attribution_values)
+    
+    # Handle edge cases
+    if len(prediction_changes) < 2:
+        return 0.0
+    
+    # Check for constant arrays (would cause division by zero in correlation)
+    if np.std(prediction_changes) < 1e-10 or np.std(attribution_values) < 1e-10:
+        # If both are constant, consider it perfect correlation
+        if np.std(prediction_changes) < 1e-10 and np.std(attribution_values) < 1e-10:
+            return 1.0
+        # If only one is constant, correlation is undefined
+        return 0.0
+    
+    # Compute Spearman rank correlation
+    corr, _ = stats.spearmanr(attribution_values, prediction_changes)
+    
+    return float(corr) if not np.isnan(corr) else 0.0
+
+
+def compute_batch_monotonicity_nguyen(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    use_absolute: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute average Monotonicity-Nguyen over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature removal
+        max_samples: Maximum number of samples to evaluate
+        use_absolute: If True, use absolute attribution values
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+    
+    scores = []
+    
+    for i in range(n_samples):
+        try:
+            score = compute_monotonicity_nguyen(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                use_absolute=use_absolute
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 2: Monotonicity (Arya et al., 2019)
 # =============================================================================
 

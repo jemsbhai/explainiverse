@@ -41,6 +41,8 @@ from explainiverse.evaluation.faithfulness_extended import (
     compute_batch_faithfulness_estimate,
     compute_monotonicity,
     compute_batch_monotonicity,
+    compute_monotonicity_nguyen,
+    compute_batch_monotonicity_nguyen,
 )
 
 __all__ = [
@@ -70,4 +72,6 @@ __all__ = [
     "compute_batch_faithfulness_estimate",
     "compute_monotonicity",
     "compute_batch_monotonicity",
+    "compute_monotonicity_nguyen",
+    "compute_batch_monotonicity_nguyen",
 ]
