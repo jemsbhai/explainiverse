@@ -1,11 +1,12 @@
 # Explainiverse vs State-of-the-Art XAI Frameworks
 
-## Comprehensive Comparison Analysis (January 2026)
+## Comprehensive Comparison Analysis (February 2025)
 
 ### Major XAI Frameworks Analyzed
 
 | Framework | Maintainer | Focus | Active |
 |-----------|-----------|-------|--------|
+| **Quantus** | Understandable ML | Evaluation metrics | ✅ |
 | **OmniXAI** | Salesforce | Multi-modal, unified interface | ✅ |
 | **Captum** | Meta (PyTorch) | Deep learning attribution | ✅ |
 | **Alibi** | Seldon | Production-ready explanations | ✅ |
@@ -75,23 +76,44 @@
 | TensorFlow | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ |
 | XGBoost/LightGBM | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
 
-### 4. EVALUATION METRICS
+### 4. EVALUATION METRICS (Key Differentiator)
 
-| Metric Type | Explainiverse | OmniXAI | Captum | Alibi | OpenXAI | AIX360 |
-|-------------|:-------------:|:-------:|:------:|:-----:|:-------:|:------:|
+| Metric | Explainiverse | Quantus | OpenXAI | OmniXAI | Captum | Alibi |
+|--------|:-------------:|:-------:|:-------:|:-------:|:------:|:-----:|
 | **Faithfulness** |
-| PGI (Prediction Gap Important) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| PGU (Prediction Gap Unimportant) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Comprehensiveness | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Sufficiency | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Faithfulness Correlation | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| PGI | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| PGU | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Comprehensiveness | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Sufficiency | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Faithfulness Correlation | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Faithfulness Estimate | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Monotonicity (Arya) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Monotonicity-Nguyen | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Pixel Flipping | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Region Perturbation | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Selectivity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| IROF | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Infidelity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Insertion/Deletion AUC | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Stability** |
-| RIS (Relative Input Stability) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| ROS (Relative Output Stability) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Lipschitz Estimate | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Other** |
-| Fairness Metrics | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Ground-truth Comparison | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| RIS | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| ROS | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Lipschitz Estimate | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Max-Sensitivity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Localisation** |
+| Pointing Game | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Top-K Intersection | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Complexity** |
+| Sparseness | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Effective Complexity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Randomisation** |
+| Model Param Randomisation | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Random Logit | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Axiomatic** |
+| Completeness | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Non-Sensitivity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+**Legend:** ✅ = Implemented | ⏳ = Planned | ❌ = Not available
 
 ### 5. INFRASTRUCTURE & TOOLING
 
@@ -107,24 +129,34 @@
 
 ---
 
-## Explainiverse Current Strengths
+## Summary Statistics
 
-### Competitive Advantages
+| Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
+|--------|:-------------:|:-------:|:-------:|:------:|:-------:|
+| **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
+| **Evaluation Metrics** | 12 → **54** | 37 | 0 | 0 | 22 |
+| **Data Types** | 2 | N/A | 4 | 4 | 1 |
+| **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
+
+---
+
+## Explainiverse Competitive Position
+
+### Current Strengths (v0.8.3)
 
 | Strength | Description |
 |----------|-------------|
 | **Unified Registry** | Plugin architecture with rich metadata, filtering by scope/model/data type |
-| **Evaluation Metrics** | 8 built-in metrics (most frameworks have 0) - only OpenXAI competes here |
+| **Growing Evaluation Suite** | 12 metrics now, targeting 54 (will exceed Quantus's 37) |
+| **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
+| **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 | **SAGE** | Global Shapley importance - rare in other frameworks |
 | **ALE** | Accumulated Local Effects - only Alibi also has this |
-| **TreeSHAP** | Optimized exact SHAP for tree models |
 | **Anchors** | Rule-based explanations - only Alibi has this |
 | **ProtoDash** | Example-based with importance weights - only AIX360 has this |
 | **Clean API** | Consistent BaseExplainer interface across all methods |
-| **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
-| **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 
-### Current Implementation (v0.8.0)
+### Current Implementation (v0.8.3)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -136,102 +168,96 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**8 Evaluation Metrics:**
-- Faithfulness: PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
+**12 Evaluation Metrics:**
+- Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
+- Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen
 - Stability: RIS, ROS, Lipschitz Estimate
 
 ---
 
-## Gap Analysis: Remaining Opportunities
-
-### HIGH PRIORITY (For Publication Impact)
-
-| Gap | Competitor Has It | Priority | Notes |
-|-----|-------------------|----------|-------|
-| **TCAV** | Captum | ✅ Complete | Concept-based explanations - implemented in v0.7.0 |
-| **LRP** | Captum | ✅ Complete | Layer-wise Relevance Propagation - implemented in v0.8.0 |
-| **Influence Functions** | Captum | 🟡 High | Training data attribution |
-
-### MEDIUM PRIORITY
-
-| Gap | Competitor Has It | Priority | Notes |
-|-----|-------------------|----------|-------|
-| Text/NLP Support | OmniXAI, Captum, Alibi | 🟡 Medium | Token importance, attention |
-| Time Series | OmniXAI, Captum | 🟡 Medium | Temporal explanations |
-| TensorFlow Adapter | OmniXAI, Alibi | 🟡 Medium | Keras/TF2 support |
-| CEM (Contrastive) | OmniXAI, Alibi, AIX360 | 🟡 Medium | Pertinent positives/negatives |
-| Occlusion | OmniXAI, Captum | 🟢 Low | Image perturbation method |
-
-### LOWER PRIORITY
-
-| Gap | Competitor Has It | Priority | Notes |
-|-----|-------------------|----------|-------|
-| Guided Backprop | OmniXAI, Captum | 🟢 Low | Gradient filtering |
-| GUI Dashboard | OmniXAI, Captum, InterpretML | 🟢 Low | Interactive visualization |
-| Glass-Box (EBM) | InterpretML | 🟢 Low | Wrapper for InterpretML |
-| Fairness Metrics | OpenXAI | 🟢 Low | Group disparity measures |
-
----
-
-## Summary Statistics
-
-| Metric | Explainiverse | OmniXAI | Captum | Alibi | OpenXAI |
-|--------|:-------------:|:-------:|:------:|:-----:|:-------:|
-| **Explanation Methods** | 18 | ~25 | ~20 | ~15 | ~10 |
-| **Evaluation Metrics** | 8 | 0 | 0 | 0 | 22 |
-| **Data Types** | 2 | 4 | 4 | 3 | 1 |
-| **ML Frameworks** | 2 | 3 | 1 | 3 | 1 |
-
-### Explainiverse Position
+## Strategic Position
 
 ```
                     Methods Coverage
                          ↑
                     High │  OmniXAI    Captum
                          │      
-                         │  Explainiverse ←── Good balance + LRP
+                         │  Explainiverse ←── Balanced + Growing Metrics
                          │      
-                    Low  │  OpenXAI
-                         └────────────────────→
-                         Low              High
+                    Low  │  OpenXAI    Quantus
+                         └────────────────────────────→
+                         Low                      High
                               Evaluation Metrics
+
+Current: Explainiverse at (18 methods, 12 metrics)
+Target:  Explainiverse at (18 methods, 54 metrics) - Best in class for metrics!
 ```
 
-**Key Insight:** Explainiverse occupies a unique position with strong evaluation metrics (rivaling OpenXAI) combined with comprehensive explanation methods (approaching OmniXAI/Captum). With TCAV (v0.7.0) and LRP (v0.8.0), Explainiverse now offers both concept-based and decomposition-based explanations that previously only Captum had among major frameworks. The LRP implementation includes all major propagation rules (ε, γ, αβ, z⁺, composite), making it one of the most comprehensive LRP implementations available.
+**Key Insight:** Explainiverse is uniquely positioned to become the **only framework** combining:
+1. Comprehensive explanation methods (rivaling OmniXAI/Captum)
+2. Extensive evaluation metrics (exceeding Quantus)
+
+No other framework currently achieves both.
 
 ---
 
-## Strategic Roadmap
+## Metrics Expansion Roadmap
 
-### Phase 1: Concept-Based (v0.7.0) ✅ COMPLETE
-- **TCAV** - Testing with Concept Activation Vectors
-- High publication impact, differentiator from most frameworks
+### Phase 1: Faithfulness (v0.8.x → v0.9.0) - IN PROGRESS
 
-### Phase 2: Propagation Methods (v0.8.0) ✅ COMPLETE
-- **LRP** - Layer-wise Relevance Propagation
-- 5 propagation rules: epsilon, gamma, alpha-beta, z-plus, composite
-- Full layer support: Linear, Conv2d, BatchNorm, pooling, activations
-- Conservation property verification
-- Completes the gradient/decomposition method family
+| # | Metric | Status |
+|---|--------|--------|
+| 1 | Faithfulness Estimate | ✅ v0.8.1 |
+| 2 | Monotonicity (Arya) | ✅ v0.8.2 |
+| 3 | Monotonicity-Nguyen | ✅ v0.8.3 |
+| 4 | Pixel Flipping | ⏳ Next |
+| 5 | Region Perturbation | ❌ |
+| 6 | Selectivity | ❌ |
+| 7 | Sensitivity-n | ❌ |
+| 8 | IROF | ❌ |
+| 9 | Infidelity | ❌ |
+| 10 | ROAD | ❌ |
+| 11 | Insertion AUC | ❌ |
+| 12 | Deletion AUC | ❌ |
 
-### Phase 3: Attention & Transformers (NEXT)
-- Attention Rollout
-- Attention Flow
+### Future Phases
 
-### Phase 4: Multi-Modal (v0.9.0)
-- Text/NLP support
-- TensorFlow adapter
+| Phase | Version | Category | New Metrics |
+|-------|---------|----------|-------------|
+| 2 | v0.10.0 | Robustness | +7 |
+| 3 | v0.11.0 | Localisation | +8 |
+| 4 | v0.12.0 | Complexity | +4 |
+| 5 | v0.13.0 | Randomisation | +5 |
+| 6 | v0.14.0 | Axiomatic | +4 |
+| 7 | v0.15.0 | Fairness | +4 |
 
-### Phase 5: Production & Polish (v1.0.0)
-- Visualization dashboard
-- Performance optimization
-- Documentation for publication
+---
+
+## Gap Analysis: Remaining Opportunities
+
+### For Metrics Dominance (HIGH PRIORITY)
+
+| Gap | Priority | Notes |
+|-----|----------|-------|
+| Complete Phase 1 Faithfulness | 🔴 Critical | 9 more metrics to implement |
+| Robustness metrics | 🔴 High | Phase 2 |
+| Localisation metrics | 🟡 Medium | Phase 3 |
+| Complexity metrics | 🟡 Medium | Phase 4 |
+
+### For Methods Coverage (LOWER PRIORITY)
+
+| Gap | Priority | Notes |
+|-----|----------|-------|
+| Text/NLP Support | 🟡 Medium | After metrics expansion |
+| TensorFlow Adapter | 🟡 Medium | After metrics expansion |
+| Influence Functions | 🟢 Low | Nice to have |
 
 ---
 
 ## References
 
 ### Frameworks
+- Quantus: https://github.com/understandable-machine-intelligence-lab/Quantus
 - OmniXAI: https://github.com/salesforce/OmniXAI
 - Captum: https://captum.ai/
 - Alibi: https://github.com/SeldonIO/alibi
@@ -239,13 +265,17 @@
 - AIX360: https://github.com/Trusted-AI/AIX360
 - OpenXAI: https://github.com/AI4LIFE-GROUP/OpenXAI
 
-### Key Papers
-- TCAV: Kim et al., 2018 - "Interpretability Beyond Feature Attribution" (ICML)
-- LRP: Bach et al., 2015 - "On Pixel-Wise Explanations for Non-Linear Classifier Decisions" (PLOS ONE)
-- LRP Rules: Montavon et al., 2019 - "Layer-wise Relevance Propagation: An Overview" (Springer)
-- Evaluation: Petsiuk et al., 2018; DeYoung et al., 2020; Agarwal et al., 2022
+### Key Evaluation Papers
+- Faithfulness Estimate: Alvarez-Melis & Jaakkola, 2018
+- Monotonicity: Arya et al., 2019
+- Monotonicity-Nguyen: Nguyen & Martinez, 2020
+- Pixel Flipping: Bach et al., 2015
+- IROF: Rieger & Hansen, 2020
+- Infidelity: Yeh et al., 2019
+- ROAD: Rong et al., 2022
+- Insertion/Deletion: Petsiuk et al., 2018
 
 ---
 
-*Last updated: January 2026 (v0.8.0)*
-*Next review: After Attention methods implementation*
+*Last updated: February 2025 (v0.8.3)*
+*Next review: After Phase 1 completion*

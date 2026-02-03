@@ -5,7 +5,7 @@
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) targeting publication at top-tier ML venues (NeurIPS/ICML).
 
 - **Location:** `E:\data\code\claudecode\explainiverse`
-- **Current Version:** v0.8.0
+- **Current Version:** v0.8.3
 - **Package Manager:** Poetry
 - **Python:** 3.10+
 
@@ -36,18 +36,21 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (8 total)
+### Evaluation Metrics (12 total)
 
-| Category | Metric | Status | Description |
-|----------|--------|--------|-------------|
-| **Faithfulness** | PGI | ✅ Complete | Prediction Gap on Important features |
-| | PGU | ✅ Complete | Prediction Gap on Unimportant features |
-| | Comprehensiveness | ✅ Complete | Drop when removing top-k features |
-| | Sufficiency | ✅ Complete | Prediction using only top-k features |
-| | Faithfulness Correlation | ✅ Complete | Correlation between attribution and impact |
-| **Stability** | RIS | ✅ Complete | Relative Input Stability |
-| | ROS | ✅ Complete | Relative Output Stability |
-| | Lipschitz Estimate | ✅ Complete | Local Lipschitz continuity |
+| Category | Metric | Status | Version | Reference |
+|----------|--------|--------|---------|-----------|
+| **Faithfulness (Core)** | PGI | ✅ Complete | v0.3.0 | - |
+| | PGU | ✅ Complete | v0.3.0 | - |
+| | Comprehensiveness | ✅ Complete | v0.3.0 | DeYoung et al., 2020 |
+| | Sufficiency | ✅ Complete | v0.3.0 | DeYoung et al., 2020 |
+| | Faithfulness Correlation | ✅ Complete | v0.3.0 | - |
+| **Faithfulness (Extended)** | Faithfulness Estimate | ✅ Complete | v0.8.1 | Alvarez-Melis et al., 2018 |
+| | Monotonicity | ✅ Complete | v0.8.2 | Arya et al., 2019 |
+| | Monotonicity-Nguyen | ✅ Complete | v0.8.3 | Nguyen et al., 2020 |
+| **Stability** | RIS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
+| | ROS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
+| | Lipschitz Estimate | ✅ Complete | v0.3.0 | Alvarez-Melis & Jaakkola, 2018 |
 
 ### Infrastructure
 
@@ -62,56 +65,134 @@
 
 ---
 
-## Roadmap: Upcoming Features
+## Strategic Goal: Beat State-of-the-Art Evaluation Metrics
 
-### Phase 1: Concept-Based Explanations ✅ COMPLETE
+We are expanding evaluation metrics to definitively exceed all existing XAI frameworks:
 
-| Method | Complexity | Value | Status | Reference |
-|--------|------------|-------|--------|-----------|
-| **TCAV** | High | Very High | ✅ Complete | Kim et al., 2018 |
-| CAV Variants | Medium | High | Planned | - |
+| Framework | Current Metrics | Notes |
+|-----------|----------------|-------|
+| **Quantus** | 37 | Current SOTA for metrics |
+| **OpenXAI** | 22 | Academic benchmark |
+| **Explainiverse** | 12 → **54** | Target after Phase 1-7 |
 
-**TCAV (Testing with Concept Activation Vectors)** - v0.7.0
-- Explains model behavior in terms of high-level concepts
-- Key differentiator for publication - few libraries implement this well
-- Reference: [Kim et al., 2018 - "Interpretability Beyond Feature Attribution"](https://arxiv.org/abs/1711.11279)
+### Master Metrics Implementation Plan (7 Phases)
 
-### Phase 2: Propagation Methods ✅ COMPLETE
+| Phase | Version | Category | New Metrics | Running Total |
+|-------|---------|----------|-------------|---------------|
+| 1 | v0.9.0 | Faithfulness | +9 | 21 |
+| 2 | v0.10.0 | Robustness | +7 | 28 |
+| 3 | v0.11.0 | Localisation | +8 | 36 |
+| 4 | v0.12.0 | Complexity | +4 | 40 |
+| 5 | v0.13.0 | Randomisation | +5 | 45 |
+| 6 | v0.14.0 | Axiomatic | +4 | 49 |
+| 7 | v0.15.0 | Fairness | +4 | 53 |
 
-| Method | Complexity | Value | Status | Reference |
-|--------|------------|-------|--------|-----------|
-| **LRP** | High | High | ✅ Complete | Bach et al., 2015 |
-| Deep Taylor | Medium | Medium | Planned | Montavon et al., 2017 |
+---
 
-**LRP (Layer-wise Relevance Propagation)** - v0.8.0
-- Decomposition-based attribution with conservation property
-- Multiple propagation rules: ε, γ, αβ, z⁺, composite
-- Full layer support: Linear, Conv2d, BatchNorm, pooling, activations
-- Reference: [Bach et al., 2015 - "On Pixel-wise Explanations for Non-Linear Classifier Decisions"](https://doi.org/10.1371/journal.pone.0130140)
+## Phase 1: Faithfulness Metrics (In Progress)
 
-**Implementation Details:**
-- 5 propagation rules with layer-specific implementations
-- Supports both tabular (MLP) and image (CNN) data
-- Conservation property verification
-- Layer-wise relevance analysis
-- Rule comparison utilities
-- Composite rules for different layers
+**Target:** v0.9.0 with 12 additional faithfulness metrics
 
-### Phase 3: Attention & Transformers (NEXT)
+| # | Metric | Reference | Status | Version |
+|---|--------|-----------|--------|---------|
+| 1 | Faithfulness Estimate | Alvarez-Melis et al., 2018 | ✅ Complete | v0.8.1 |
+| 2 | Monotonicity | Arya et al., 2019 | ✅ Complete | v0.8.2 |
+| 3 | Monotonicity-Nguyen | Nguyen et al., 2020 | ✅ Complete | v0.8.3 |
+| 4 | Pixel Flipping | Bach et al., 2015 | ⏳ Next | - |
+| 5 | Region Perturbation | Samek et al., 2015 | ❌ Not started | - |
+| 6 | Selectivity | Montavon et al., 2018 | ❌ Not started | - |
+| 7 | Sensitivity-n | Ancona et al., 2018 | ❌ Not started | - |
+| 8 | IROF | Rieger & Hansen, 2020 | ❌ Not started | - |
+| 9 | Infidelity | Yeh et al., 2019 | ❌ Not started | - |
+| 10 | ROAD | Rong et al., 2022 | ❌ Not started | - |
+| 11 | Insertion AUC | Petsiuk et al., 2018 | ❌ Not started | - |
+| 12 | Deletion AUC | Petsiuk et al., 2018 | ❌ Not started | - |
 
-| Method | Complexity | Value | Status | Reference |
-|--------|------------|-------|--------|-----------|
-| Attention Rollout | Medium | High | 🔜 Next | Abnar & Zuidema, 2020 |
-| Attention Flow | Medium | High | Planned | - |
+---
 
-### Phase 4: Additional Features
+## Future Phases (Planned)
 
-| Feature | Priority | Status |
-|---------|----------|--------|
-| TensorFlow/Keras Adapter | Medium | Planned |
-| Visualization Dashboard | Medium | Planned |
-| Explanation Caching | Low | Planned |
-| Distributed Computation | Low | Planned |
+### Phase 2: Robustness Metrics (v0.10.0)
+- Local Lipschitz Estimate
+- Max-Sensitivity
+- Avg-Sensitivity
+- Continuity
+- Consistency
+- Relative Input/Output Stability extensions
+
+### Phase 3: Localisation Metrics (v0.11.0)
+- Pointing Game
+- Top-K Intersection
+- Relevance Mass Accuracy
+- Relevance Rank Accuracy
+- Attribution Localisation
+- Focus
+- AUC (localisation)
+- Bounding Box metrics
+
+### Phase 4: Complexity Metrics (v0.12.0)
+- Sparseness
+- Complexity
+- Effective Complexity
+- Entropy
+
+### Phase 5: Randomisation Metrics (v0.13.0)
+- Model Parameter Randomisation
+- Random Logit Test
+- Data Randomisation
+- MPRT variants
+
+### Phase 6: Axiomatic Metrics (v0.14.0)
+- Completeness
+- Non-Sensitivity
+- Input Invariance
+- Symmetry
+
+### Phase 7: Fairness Metrics (v0.15.0)
+- Group Fairness
+- Individual Fairness
+- Counterfactual Fairness
+- Disparity metrics
+
+---
+
+## Development Workflow
+
+### Standard Workflow (Per Feature)
+
+1. **Implement** - Write implementation following existing patterns
+2. **Test** - Comprehensive test suite (35-50+ tests per metric/explainer)
+3. **Document** - Update ROADMAP.md and SOTA_COMPARISON.md
+4. **Bump Version** - Update pyproject.toml and __init__.py
+5. **Push** - Commit to GitHub with detailed message
+6. **Publish** - `poetry publish --build` to PyPI
+
+### Commands
+
+```powershell
+# Navigate to project
+cd E:\data\code\claudecode\explainiverse
+
+# Run specific tests
+python -m pytest tests/test_<name>.py -v --tb=short
+
+# Run all tests
+python -m pytest tests/ -v
+
+# Bump version (in pyproject.toml and src/explainiverse/__init__.py)
+# Then commit and push
+git add -A
+git commit -m "v0.X.Y: Description of changes"
+git push origin main
+
+# Publish to PyPI
+poetry publish --build
+```
+
+### Version Bump Locations
+
+1. `pyproject.toml` → `version = "X.Y.Z"`
+2. `src/explainiverse/__init__.py` → `__version__ = "X.Y.Z"`
 
 ---
 
@@ -134,97 +215,29 @@ explainiverse/
 │   ├── global_explainers/    # Permutation, PDP, ALE, SAGE
 │   └── example_based/        # ProtoDash
 ├── evaluation/
-│   ├── faithfulness.py       # PGI, PGU, Comprehensiveness, Sufficiency
-│   └── stability.py          # RIS, ROS, Lipschitz
+│   ├── faithfulness.py       # Core faithfulness metrics
+│   ├── faithfulness_extended.py  # Extended faithfulness (Phase 1)
+│   ├── stability.py          # Stability metrics
+│   ├── metrics.py            # AOPC, ROAR
+│   └── _utils.py             # Shared utilities
 └── engine/
     └── suite.py              # Multi-explainer comparison
 ```
 
 ---
 
-## Development Workflow
-
-1. **Develop** - Write implementation following existing patterns
-2. **Test** - Comprehensive test suite (40+ tests per explainer)
-3. **Push** - Commit to GitHub with detailed message
-4. **Publish** - `poetry publish --build` to PyPI
-
-### Commands
-
-```powershell
-# Activate environment
-cd E:\data\code\claudecode\explainiverse
-.\.venv\Scripts\Activate.ps1
-
-# Run tests
-poetry run pytest tests/test_<name>.py -v
-
-# Run all tests
-poetry run pytest
-
-# Publish
-poetry publish --build
-```
-
----
-
-## Key Patterns
-
-### Explainer Implementation Pattern
-
-```python
-class NewExplainer(BaseExplainer):
-    def __init__(self, model, feature_names, class_names=None, **kwargs):
-        super().__init__(model)
-        # Validate model capabilities
-        # Store parameters
-    
-    def explain(self, instance, **kwargs) -> Explanation:
-        # Compute attributions
-        return Explanation(
-            explainer_name="NewExplainer",
-            target_class=label_name,
-            explanation_data={...}
-        )
-    
-    def explain_batch(self, X, **kwargs) -> List[Explanation]:
-        # Process multiple instances
-```
-
-### Registry Registration Pattern
-
-```python
-registry.register(
-    name="new_explainer",
-    explainer_class=NewExplainer,
-    meta=ExplainerMeta(
-        scope="local",  # or "global"
-        model_types=["neural"],
-        data_types=["tabular", "image"],
-        task_types=["classification", "regression"],
-        description="Description here",
-        paper_reference="Author et al., Year - 'Title'",
-        complexity="O(...)",
-        requires_training_data=False,
-        supports_batching=True
-    )
-)
-```
-
----
-
 ## Testing Standards
 
-- **Minimum 35+ tests** per explainer
+- **Minimum 35-50 tests** per metric/explainer
 - **Test categories:**
-  - Basic functionality (creation, validation, parameters)
-  - Classification tasks
-  - Regression tasks  
-  - Method variants
-  - Batch processing
-  - Registry integration
-  - Edge cases and robustness
-  - Layer/architecture support (for neural network explainers)
+  - Basic functionality (creation, return types, valid ranges)
+  - Different baseline types (mean, median, scalar, array, callable)
+  - Batch operations
+  - Multiple model types (LogisticRegression, RandomForest, GradientBoosting)
+  - Multiple explainers (LIME vs SHAP comparison)
+  - Edge cases (few features, many features, zero/identical attributions)
+  - Semantic validation (good explanations score better than random)
+  - Target class handling
 - **All tests must pass before pushing**
 
 ---
@@ -241,6 +254,20 @@ registry.register(
 | v0.6.0 | Jan 2025 | Saliency Maps |
 | v0.7.0 | Jan 2025 | TCAV (Concept-Based Explanations) |
 | v0.8.0 | Jan 2025 | LRP (Layer-wise Relevance Propagation) |
+| v0.8.1 | Feb 2025 | Faithfulness Estimate metric |
+| v0.8.2 | Feb 2025 | Monotonicity metric (Arya et al., 2019) |
+| v0.8.3 | Feb 2025 | Monotonicity-Nguyen metric (Nguyen et al., 2020) |
+
+---
+
+## Key Files for Phase 1 Development
+
+| Purpose | File |
+|---------|------|
+| Implementation | `src/explainiverse/evaluation/faithfulness_extended.py` |
+| Exports | `src/explainiverse/evaluation/__init__.py` |
+| Utilities | `src/explainiverse/evaluation/_utils.py` |
+| Tests | `tests/test_<metric_name>.py` |
 
 ---
 
@@ -253,6 +280,16 @@ registry.register(
 - TCAV: Kim et al., 2018 - "Interpretability Beyond Feature Attribution"
 - LRP: Bach et al., 2015 - "On Pixel-wise Explanations for Non-Linear Classifier Decisions"
 
-### Evaluation
-- Faithfulness: Petsiuk et al., 2018; DeYoung et al., 2020
-- Stability: Agarwal et al., 2022; Alvarez-Melis & Jaakkola, 2018
+### Evaluation Metrics (Phase 1)
+- Faithfulness Estimate: Alvarez-Melis & Jaakkola, 2018 - "Towards Robust Interpretability"
+- Monotonicity: Arya et al., 2019 - "One Explanation Does Not Fit All"
+- Monotonicity-Nguyen: Nguyen & Martinez, 2020 - "Quantitative Evaluation of ML Explanations"
+- Pixel Flipping: Bach et al., 2015
+- IROF: Rieger & Hansen, 2020
+- Infidelity: Yeh et al., 2019
+- ROAD: Rong et al., 2022
+- Insertion/Deletion: Petsiuk et al., 2018
+
+---
+
+*Last updated: February 2025 (v0.8.3)*

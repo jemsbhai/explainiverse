@@ -13,7 +13,7 @@
 | Feature | Description |
 |---------|-------------|
 | **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
-| **8 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation) and Stability (RIS, ROS, Lipschitz) |
+| **12 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen) and Stability (RIS, ROS, Lipschitz) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
 | **Framework Support** | Adapters for scikit-learn and PyTorch (with gradient computation) |
@@ -65,6 +65,9 @@ Explainiverse includes a comprehensive suite of evaluation metrics based on the 
 | **Comprehensiveness** | Drop when removing top-k features | [DeYoung et al., 2020](https://arxiv.org/abs/1911.03429) |
 | **Sufficiency** | Prediction using only top-k features | [DeYoung et al., 2020](https://arxiv.org/abs/1911.03429) |
 | **Faithfulness Correlation** | Correlation between attribution and impact | [Bhatt et al., 2020](https://arxiv.org/abs/2005.00631) |
+| **Faithfulness Estimate** | Correlation of attributions with single-feature perturbation impact | [Alvarez-Melis & Jaakkola, 2018](https://arxiv.org/abs/1806.08049) |
+| **Monotonicity** | Sequential feature addition shows monotonic prediction increase | [Arya et al., 2019](https://arxiv.org/abs/1909.03012) |
+| **Monotonicity-Nguyen** | Spearman correlation between attributions and feature removal impact | [Nguyen & Martinez, 2020](https://arxiv.org/abs/2010.07455) |
 
 ### Stability Metrics
 
@@ -684,6 +687,16 @@ poetry run pytest tests/test_lrp.py::TestLRPConv2d -v
 - [x] Evaluation: Stability metrics (RIS, ROS, Lipschitz)
 - [x] PyTorch adapter with gradient support
 
+### In Progress 🔄
+- [ ] **Evaluation metrics expansion** - Adding 42 more metrics across 7 categories to exceed Quantus (37 metrics)
+  - Phase 1: Faithfulness (+9 metrics) - 3/12 complete
+  - Phase 2: Robustness (+7 metrics)
+  - Phase 3: Localisation (+8 metrics)
+  - Phase 4: Complexity (+4 metrics)
+  - Phase 5: Randomisation (+5 metrics)
+  - Phase 6: Axiomatic (+4 metrics)
+  - Phase 7: Fairness (+4 metrics)
+
 ### Planned 📋
 - [ ] Attention-based explanations (for Transformers)
 - [ ] TensorFlow/Keras adapter
@@ -703,7 +716,7 @@ If you use Explainiverse in your research, please cite:
   author = {Syed, Muntaser},
   year = {2025},
   url = {https://github.com/jemsbhai/explainiverse},
-  version = {0.8.0}
+  version = {0.8.3}
 }
 ```
 
