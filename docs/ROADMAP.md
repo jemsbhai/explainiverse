@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) targeting publication at top-tier ML venues (NeurIPS/ICML).
+**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Location:** `E:\data\code\claudecode\explainiverse`
-- **Current Version:** v0.8.3
-- **Package Manager:** Poetry
+- **Current Version:** v0.8.4
+- **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
+- **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
 
 ---
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (12 total)
+### Evaluation Metrics (13 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -48,6 +48,7 @@
 | **Faithfulness (Extended)** | Faithfulness Estimate | ✅ Complete | v0.8.1 | Alvarez-Melis et al., 2018 |
 | | Monotonicity | ✅ Complete | v0.8.2 | Arya et al., 2019 |
 | | Monotonicity-Nguyen | ✅ Complete | v0.8.3 | Nguyen et al., 2020 |
+| | Pixel Flipping | ✅ Complete | v0.8.4 | Bach et al., 2015 |
 | **Stability** | RIS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | ROS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | Lipschitz Estimate | ✅ Complete | v0.3.0 | Alvarez-Melis & Jaakkola, 2018 |
@@ -65,15 +66,15 @@
 
 ---
 
-## Strategic Goal: Beat State-of-the-Art Evaluation Metrics
+## Strategic Goal: Comprehensive Evaluation Metrics
 
-We are expanding evaluation metrics to definitively exceed all existing XAI frameworks:
+Explainiverse aims to provide the most comprehensive evaluation metrics suite among XAI frameworks:
 
 | Framework | Current Metrics | Notes |
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 12 → **54** | Target after Phase 1-7 |
+| **Explainiverse** | 13 → **54** | Target after Phase 1-7 |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
@@ -98,15 +99,15 @@ We are expanding evaluation metrics to definitively exceed all existing XAI fram
 | 1 | Faithfulness Estimate | Alvarez-Melis et al., 2018 | ✅ Complete | v0.8.1 |
 | 2 | Monotonicity | Arya et al., 2019 | ✅ Complete | v0.8.2 |
 | 3 | Monotonicity-Nguyen | Nguyen et al., 2020 | ✅ Complete | v0.8.3 |
-| 4 | Pixel Flipping | Bach et al., 2015 | ⏳ Next | - |
-| 5 | Region Perturbation | Samek et al., 2015 | ❌ Not started | - |
-| 6 | Selectivity | Montavon et al., 2018 | ❌ Not started | - |
-| 7 | Sensitivity-n | Ancona et al., 2018 | ❌ Not started | - |
-| 8 | IROF | Rieger & Hansen, 2020 | ❌ Not started | - |
-| 9 | Infidelity | Yeh et al., 2019 | ❌ Not started | - |
-| 10 | ROAD | Rong et al., 2022 | ❌ Not started | - |
-| 11 | Insertion AUC | Petsiuk et al., 2018 | ❌ Not started | - |
-| 12 | Deletion AUC | Petsiuk et al., 2018 | ❌ Not started | - |
+| 4 | Pixel Flipping | Bach et al., 2015 | ✅ Complete | v0.8.4 |
+| 5 | Region Perturbation | Samek et al., 2015 | ❌ Planned | - |
+| 6 | Selectivity | Montavon et al., 2018 | ❌ Planned | - |
+| 7 | Sensitivity-n | Ancona et al., 2018 | ❌ Planned | - |
+| 8 | IROF | Rieger & Hansen, 2020 | ❌ Planned | - |
+| 9 | Infidelity | Yeh et al., 2019 | ❌ Planned | - |
+| 10 | ROAD | Rong et al., 2022 | ❌ Planned | - |
+| 11 | Insertion AUC | Petsiuk et al., 2018 | ❌ Planned | - |
+| 12 | Deletion AUC | Petsiuk et al., 2018 | ❌ Planned | - |
 
 ---
 
@@ -156,46 +157,6 @@ We are expanding evaluation metrics to definitively exceed all existing XAI fram
 
 ---
 
-## Development Workflow
-
-### Standard Workflow (Per Feature)
-
-1. **Implement** - Write implementation following existing patterns
-2. **Test** - Comprehensive test suite (35-50+ tests per metric/explainer)
-3. **Document** - Update ROADMAP.md and SOTA_COMPARISON.md
-4. **Bump Version** - Update pyproject.toml and __init__.py
-5. **Push** - Commit to GitHub with detailed message
-6. **Publish** - `poetry publish --build` to PyPI
-
-### Commands
-
-```powershell
-# Navigate to project
-cd E:\data\code\claudecode\explainiverse
-
-# Run specific tests
-python -m pytest tests/test_<name>.py -v --tb=short
-
-# Run all tests
-python -m pytest tests/ -v
-
-# Bump version (in pyproject.toml and src/explainiverse/__init__.py)
-# Then commit and push
-git add -A
-git commit -m "v0.X.Y: Description of changes"
-git push origin main
-
-# Publish to PyPI
-poetry publish --build
-```
-
-### Version Bump Locations
-
-1. `pyproject.toml` → `version = "X.Y.Z"`
-2. `src/explainiverse/__init__.py` → `__version__ = "X.Y.Z"`
-
----
-
 ## Architecture
 
 ```
@@ -238,7 +199,7 @@ explainiverse/
   - Edge cases (few features, many features, zero/identical attributions)
   - Semantic validation (good explanations score better than random)
   - Target class handling
-- **All tests must pass before pushing**
+- **All tests must pass before release**
 
 ---
 
@@ -257,17 +218,7 @@ explainiverse/
 | v0.8.1 | Feb 2025 | Faithfulness Estimate metric |
 | v0.8.2 | Feb 2025 | Monotonicity metric (Arya et al., 2019) |
 | v0.8.3 | Feb 2025 | Monotonicity-Nguyen metric (Nguyen et al., 2020) |
-
----
-
-## Key Files for Phase 1 Development
-
-| Purpose | File |
-|---------|------|
-| Implementation | `src/explainiverse/evaluation/faithfulness_extended.py` |
-| Exports | `src/explainiverse/evaluation/__init__.py` |
-| Utilities | `src/explainiverse/evaluation/_utils.py` |
-| Tests | `tests/test_<metric_name>.py` |
+| v0.8.4 | Feb 2025 | Pixel Flipping metric (Bach et al., 2015) |
 
 ---
 
@@ -280,7 +231,7 @@ explainiverse/
 - TCAV: Kim et al., 2018 - "Interpretability Beyond Feature Attribution"
 - LRP: Bach et al., 2015 - "On Pixel-wise Explanations for Non-Linear Classifier Decisions"
 
-### Evaluation Metrics (Phase 1)
+### Evaluation Metrics
 - Faithfulness Estimate: Alvarez-Melis & Jaakkola, 2018 - "Towards Robust Interpretability"
 - Monotonicity: Arya et al., 2019 - "One Explanation Does Not Fit All"
 - Monotonicity-Nguyen: Nguyen & Martinez, 2020 - "Quantitative Evaluation of ML Explanations"
@@ -292,4 +243,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.8.3)*
+*Last updated: February 2025 (v0.8.4)*

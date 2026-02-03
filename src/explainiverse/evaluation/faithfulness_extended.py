@@ -257,6 +257,179 @@ def compute_batch_faithfulness_estimate(
 
 
 # =============================================================================
+# Metric 4: Pixel Flipping (Bach et al., 2015)
+# =============================================================================
+
+def compute_pixel_flipping(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    use_absolute: bool = True,
+    return_curve: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    """
+    Compute Pixel Flipping score (Bach et al., 2015).
+    
+    Sequentially removes features in order of attributed importance (most
+    important first) and measures the cumulative prediction degradation.
+    A faithful explanation should cause rapid prediction drop when the
+    most important features are removed first.
+    
+    The score is the Area Under the perturbation Curve (AUC), normalized
+    to [0, 1]. Lower AUC indicates better faithfulness (faster degradation).
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal ("mean", "median", scalar, array, callable)
+        background_data: Reference data for computing baseline (required for "mean"/"median")
+        target_class: Target class index for probability (default: predicted class)
+        use_absolute: If True, sort features by absolute attribution value
+        return_curve: If True, return full degradation curve and predictions
+        
+    Returns:
+        If return_curve=False: AUC score (float, 0 to 1, lower is better)
+        If return_curve=True: Dictionary with 'auc', 'curve', 'predictions', 'feature_order'
+        
+    References:
+        Bach, S., et al. (2015). On Pixel-Wise Explanations for Non-Linear 
+        Classifier Decisions by Layer-Wise Relevance Propagation. PLOS ONE.
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Sort features by attribution (descending - most important first)
+    if use_absolute:
+        sorted_indices = np.argsort(-np.abs(attr_array))
+    else:
+        sorted_indices = np.argsort(-attr_array)
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Start with original instance
+    current = instance.copy()
+    
+    # Track predictions as features are removed
+    predictions = [original_value]
+    
+    # Remove features one by one (most important first)
+    for idx in sorted_indices:
+        # Remove this feature (replace with baseline)
+        current[idx] = baseline_values[idx]
+        
+        # Get prediction
+        pred = get_prediction_value(model, current.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0 and len(pred) > target_class:
+            predictions.append(pred[target_class])
+        else:
+            predictions.append(float(pred))
+    
+    predictions = np.array(predictions)
+    
+    # Normalize predictions to [0, 1] relative to original
+    # curve[i] = prediction after removing i features / original prediction
+    if abs(original_value) > 1e-10:
+        curve = predictions / original_value
+    else:
+        # Handle zero original prediction
+        curve = predictions
+    
+    # Compute AUC using trapezoidal rule
+    # x-axis: fraction of features removed (0 to 1)
+    # y-axis: relative prediction value
+    x = np.linspace(0, 1, len(predictions))
+    auc = np.trapz(curve, x)
+    
+    if return_curve:
+        return {
+            "auc": float(auc),
+            "curve": curve,
+            "predictions": predictions,
+            "feature_order": sorted_indices,
+            "n_features": n_features,
+        }
+    
+    return float(auc)
+
+
+def compute_batch_pixel_flipping(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    use_absolute: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute average Pixel Flipping score over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature removal
+        max_samples: Maximum number of samples to evaluate
+        use_absolute: If True, sort features by absolute attribution value
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+    
+    scores = []
+    
+    for i in range(n_samples):
+        try:
+            score = compute_pixel_flipping(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                use_absolute=use_absolute
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 3: Monotonicity-Nguyen (Nguyen et al., 2020)
 # =============================================================================
 
