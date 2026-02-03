@@ -257,6 +257,223 @@ def compute_batch_faithfulness_estimate(
 
 
 # =============================================================================
+# Metric 5: Region Perturbation (Samek et al., 2015)
+# =============================================================================
+
+def compute_region_perturbation(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    region_size: int = None,
+    use_absolute: bool = True,
+    return_curve: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    """
+    Compute Region Perturbation score (Samek et al., 2015).
+    
+    Similar to Pixel Flipping, but operates on regions (groups) of features
+    rather than individual features. Features are divided into non-overlapping
+    regions, and regions are perturbed in order of their cumulative importance
+    (sum of attributions within the region).
+    
+    This metric is particularly relevant for image data where local spatial
+    correlations exist, but is also applicable to tabular data with groups
+    of related features.
+    
+    The score is the Area Under the perturbation Curve (AUC), normalized
+    to [0, 1]. Lower AUC indicates better faithfulness (faster degradation
+    when important regions are removed first).
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal ("mean", "median", scalar, array, callable)
+        background_data: Reference data for computing baseline (required for "mean"/"median")
+        target_class: Target class index for probability (default: predicted class)
+        region_size: Number of features per region. If None, defaults to max(1, n_features // 4)
+            For image-like data, this would correspond to patch size.
+        use_absolute: If True, sort regions by absolute attribution sum (default: True)
+        return_curve: If True, return full degradation curve and details
+        
+    Returns:
+        If return_curve=False: AUC score (float, 0 to 1, lower is better)
+        If return_curve=True: Dictionary with:
+            - 'auc': float - Area under the perturbation curve
+            - 'curve': np.ndarray - Normalized prediction values at each step
+            - 'predictions': np.ndarray - Raw prediction values
+            - 'region_order': list - Order in which regions were perturbed
+            - 'regions': list - List of feature indices in each region
+            - 'n_regions': int - Number of regions
+            - 'region_size': int - Size of each region
+        
+    References:
+        Samek, W., Binder, A., Montavon, G., Lapuschkin, S., & Müller, K. R. (2015).
+        Evaluating the Visualization of What a Deep Neural Network has Learned.
+        arXiv preprint arXiv:1509.06321.
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Determine region size
+    if region_size is None:
+        # Default: divide features into ~4 regions
+        region_size = max(1, n_features // 4)
+    region_size = max(1, min(region_size, n_features))  # Clamp to valid range
+    
+    # Create non-overlapping regions
+    regions = []
+    for start_idx in range(0, n_features, region_size):
+        end_idx = min(start_idx + region_size, n_features)
+        regions.append(list(range(start_idx, end_idx)))
+    
+    n_regions = len(regions)
+    
+    # Compute region importance (sum of attributions in each region)
+    region_importance = []
+    for region in regions:
+        if use_absolute:
+            importance = np.sum(np.abs(attr_array[region]))
+        else:
+            importance = np.sum(attr_array[region])
+        region_importance.append(importance)
+    
+    # Sort regions by importance (descending - most important first)
+    sorted_region_indices = np.argsort(-np.array(region_importance))
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Start with original instance
+    current = instance.copy()
+    
+    # Track predictions as regions are perturbed
+    predictions = [original_value]
+    
+    # Perturb regions one by one (most important first)
+    for region_idx in sorted_region_indices:
+        region = regions[region_idx]
+        
+        # Replace all features in this region with baseline
+        for feat_idx in region:
+            current[feat_idx] = baseline_values[feat_idx]
+        
+        # Get prediction
+        pred = get_prediction_value(model, current.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0 and len(pred) > target_class:
+            predictions.append(pred[target_class])
+        else:
+            predictions.append(float(pred))
+    
+    predictions = np.array(predictions)
+    
+    # Normalize predictions to [0, 1] relative to original
+    # curve[i] = prediction after perturbing i regions / original prediction
+    if abs(original_value) > 1e-10:
+        curve = predictions / original_value
+    else:
+        # Handle zero original prediction
+        curve = predictions
+    
+    # Compute AUC using trapezoidal rule
+    # x-axis: fraction of regions perturbed (0 to 1)
+    # y-axis: relative prediction value
+    x = np.linspace(0, 1, len(predictions))
+    auc = np.trapz(curve, x)
+    
+    if return_curve:
+        return {
+            "auc": float(auc),
+            "curve": curve,
+            "predictions": predictions,
+            "region_order": sorted_region_indices.tolist(),
+            "regions": regions,
+            "n_regions": n_regions,
+            "region_size": region_size,
+        }
+    
+    return float(auc)
+
+
+def compute_batch_region_perturbation(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    region_size: int = None,
+    use_absolute: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute average Region Perturbation score over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature removal
+        max_samples: Maximum number of samples to evaluate
+        region_size: Number of features per region (default: n_features // 4)
+        use_absolute: If True, sort regions by absolute attribution sum
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+    
+    scores = []
+    
+    for i in range(n_samples):
+        try:
+            score = compute_region_perturbation(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                region_size=region_size,
+                use_absolute=use_absolute
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 4: Pixel Flipping (Bach et al., 2015)
 # =============================================================================
 

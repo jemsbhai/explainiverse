@@ -90,7 +90,7 @@
 | Monotonicity (Arya) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Monotonicity-Nguyen | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Pixel Flipping | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Region Perturbation | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Region Perturbation | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Selectivity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | IROF | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Infidelity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -134,7 +134,7 @@
 | Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
 |--------|:-------------:|:-------:|:-------:|:------:|:-------:|
 | **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
-| **Evaluation Metrics** | 13 → **54** | 37 | 0 | 0 | 22 |
+| **Evaluation Metrics** | 14 → **54** | 37 | 0 | 0 | 22 |
 | **Data Types** | 2 | N/A | 4 | 4 | 1 |
 | **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
 
@@ -142,7 +142,7 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.8.4)
+### Current Strengths (v0.8.5)
 
 | Strength | Description |
 |----------|-------------|
@@ -156,7 +156,7 @@
 | **ProtoDash** | Example-based with importance weights - only AIX360 has this |
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 
-### Current Implementation (v0.8.4)
+### Current Implementation (v0.8.5)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -168,9 +168,9 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**13 Evaluation Metrics:**
+**14 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
-- Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping
+- Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation
 - Stability: RIS, ROS, Lipschitz Estimate
 
 ---
@@ -189,7 +189,7 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 13 metrics)
+Current: Explainiverse at (18 methods, 14 metrics)
 Target:  Explainiverse at (18 methods, 54 metrics) - Best in class for metrics!
 ```
 
@@ -211,7 +211,7 @@ No other framework currently achieves both.
 | 2 | Monotonicity (Arya) | ✅ v0.8.2 |
 | 3 | Monotonicity-Nguyen | ✅ v0.8.3 |
 | 4 | Pixel Flipping | ✅ v0.8.4 |
-| 5 | Region Perturbation | ❌ |
+| 5 | Region Perturbation | ✅ v0.8.5 |
 | 6 | Selectivity | ❌ |
 | 7 | Sensitivity-n | ❌ |
 | 8 | IROF | ❌ |
@@ -239,7 +239,7 @@ No other framework currently achieves both.
 
 | Gap | Priority | Notes |
 |-----|----------|-------|
-| Complete Phase 1 Faithfulness | 🔴 Critical | 9 more metrics to implement |
+| Complete Phase 1 Faithfulness | 🔴 Critical | 7 more metrics to implement |
 | Robustness metrics | 🔴 High | Phase 2 |
 | Localisation metrics | 🟡 Medium | Phase 3 |
 | Complexity metrics | 🟡 Medium | Phase 4 |
@@ -277,5 +277,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.8.4)*
+*Last updated: February 2025 (v0.8.5)*
 *Next review: After Phase 1 completion*

@@ -13,7 +13,7 @@
 | Feature | Description |
 |---------|-------------|
 | **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
-| **13 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping) and Stability (RIS, ROS, Lipschitz) |
+| **14 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation) and Stability (RIS, ROS, Lipschitz) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
 | **Framework Support** | Adapters for scikit-learn and PyTorch (with gradient computation) |
@@ -69,6 +69,7 @@ Explainiverse includes a comprehensive suite of evaluation metrics based on the 
 | **Monotonicity** | Sequential feature addition shows monotonic prediction increase | [Arya et al., 2019](https://arxiv.org/abs/1909.03012) |
 | **Monotonicity-Nguyen** | Spearman correlation between attributions and feature removal impact | [Nguyen & Martinez, 2020](https://arxiv.org/abs/2010.07455) |
 | **Pixel Flipping** | AUC of prediction degradation when removing features by importance | [Bach et al., 2015](https://doi.org/10.1371/journal.pone.0130140) |
+| **Region Perturbation** | AUC of prediction degradation when perturbing feature regions by importance | [Samek et al., 2015](https://arxiv.org/abs/1509.06321) |
 
 ### Stability Metrics
 

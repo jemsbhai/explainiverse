@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.8.4
+- **Current Version:** v0.8.5
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (13 total)
+### Evaluation Metrics (14 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -49,6 +49,7 @@
 | | Monotonicity | ✅ Complete | v0.8.2 | Arya et al., 2019 |
 | | Monotonicity-Nguyen | ✅ Complete | v0.8.3 | Nguyen et al., 2020 |
 | | Pixel Flipping | ✅ Complete | v0.8.4 | Bach et al., 2015 |
+| | Region Perturbation | ✅ Complete | v0.8.5 | Samek et al., 2015 |
 | **Stability** | RIS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | ROS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | Lipschitz Estimate | ✅ Complete | v0.3.0 | Alvarez-Melis & Jaakkola, 2018 |
@@ -74,13 +75,13 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 13 → **54** | Target after Phase 1-7 |
+| **Explainiverse** | 14 → **54** | Target after Phase 1-7 |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
 | Phase | Version | Category | New Metrics | Running Total |
 |-------|---------|----------|-------------|---------------|
-| 1 | v0.9.0 | Faithfulness | +9 | 21 |
+| 1 | v0.9.0 | Faithfulness | +8 | 22 |
 | 2 | v0.10.0 | Robustness | +7 | 28 |
 | 3 | v0.11.0 | Localisation | +8 | 36 |
 | 4 | v0.12.0 | Complexity | +4 | 40 |
@@ -100,7 +101,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 | 2 | Monotonicity | Arya et al., 2019 | ✅ Complete | v0.8.2 |
 | 3 | Monotonicity-Nguyen | Nguyen et al., 2020 | ✅ Complete | v0.8.3 |
 | 4 | Pixel Flipping | Bach et al., 2015 | ✅ Complete | v0.8.4 |
-| 5 | Region Perturbation | Samek et al., 2015 | ❌ Planned | - |
+| 5 | Region Perturbation | Samek et al., 2015 | ✅ Complete | v0.8.5 |
 | 6 | Selectivity | Montavon et al., 2018 | ❌ Planned | - |
 | 7 | Sensitivity-n | Ancona et al., 2018 | ❌ Planned | - |
 | 8 | IROF | Rieger & Hansen, 2020 | ❌ Planned | - |
@@ -219,6 +220,7 @@ explainiverse/
 | v0.8.2 | Feb 2025 | Monotonicity metric (Arya et al., 2019) |
 | v0.8.3 | Feb 2025 | Monotonicity-Nguyen metric (Nguyen et al., 2020) |
 | v0.8.4 | Feb 2025 | Pixel Flipping metric (Bach et al., 2015) |
+| v0.8.5 | Feb 2025 | Region Perturbation metric (Samek et al., 2015) |
 
 ---
 
@@ -236,6 +238,7 @@ explainiverse/
 - Monotonicity: Arya et al., 2019 - "One Explanation Does Not Fit All"
 - Monotonicity-Nguyen: Nguyen & Martinez, 2020 - "Quantitative Evaluation of ML Explanations"
 - Pixel Flipping: Bach et al., 2015
+- Region Perturbation: Samek et al., 2015 - "Evaluating the Visualization of What a Deep Neural Network has Learned"
 - IROF: Rieger & Hansen, 2020
 - Infidelity: Yeh et al., 2019
 - ROAD: Rong et al., 2022
@@ -243,4 +246,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.8.4)*
+*Last updated: February 2025 (v0.8.5)*
