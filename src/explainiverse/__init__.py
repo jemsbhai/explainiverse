@@ -34,7 +34,7 @@ from explainiverse.adapters.sklearn_adapter import SklearnAdapter
 from explainiverse.adapters import TORCH_AVAILABLE
 from explainiverse.engine.suite import ExplanationSuite
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 __all__ = [
     # Core
