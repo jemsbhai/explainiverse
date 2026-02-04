@@ -90,11 +90,11 @@ def setup_batch(setup_model):
         }
         
         exp = Explanation(
-            explanation_type="feature_attribution",
-            explanation_data={"feature_attributions": attributions},
             explainer_name="test_explainer",
+            target_class="class_0",
+            explanation_data={"feature_attributions": attributions},
+            feature_names=feature_names,
         )
-        exp.feature_names = feature_names
         explanations.append(exp)
     
     return model, X, explanations
@@ -111,11 +111,11 @@ def create_explanation(attributions: np.ndarray, feature_names=None) -> Explanat
     }
     
     exp = Explanation(
-        explanation_type="feature_attribution",
-        explanation_data={"feature_attributions": attr_dict},
         explainer_name="test_explainer",
+        target_class="class_0",
+        explanation_data={"feature_attributions": attr_dict},
+        feature_names=feature_names,
     )
-    exp.feature_names = feature_names
     
     return exp
 
