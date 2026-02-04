@@ -455,6 +455,318 @@ def compute_batch_selectivity(
 
 
 # =============================================================================
+# Metric 7: Sensitivity-n (Ancona et al., 2018)
+# =============================================================================
+
+def compute_sensitivity_n(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    n: int = None,
+    n_subsets: int = 100,
+    use_absolute: bool = True,
+    seed: int = None,
+    return_details: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray, List]]]:
+    """
+    Compute Sensitivity-n score (Ancona et al., 2018).
+    
+    Measures the correlation between the sum of attributions for a subset
+    of n features and the prediction change when those features are removed.
+    A faithful explanation should show high correlation - removing features
+    with high total attribution should cause proportionally larger prediction drops.
+    
+    For a random subset S of size n:
+    - Sum of attributions: Σᵢ∈S aᵢ
+    - Prediction change: f(x) - f(x_S) where x_S has features in S removed
+    
+    The metric computes Pearson correlation across many random subsets.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal ("mean", "median", scalar, array, callable)
+        background_data: Reference data for computing baseline (required for "mean"/"median")
+        target_class: Target class index for probability (default: predicted class)
+        n: Subset size. If None, defaults to max(1, n_features // 4)
+        n_subsets: Number of random subsets to sample (default: 100)
+        use_absolute: If True, use absolute attribution values in sum (default: True)
+        seed: Random seed for reproducibility
+        return_details: If True, return detailed results including all subset data
+        
+    Returns:
+        If return_details=False: Sensitivity-n score (Pearson correlation, -1 to 1, higher is better)
+        If return_details=True: Dictionary with:
+            - 'correlation': float - Pearson correlation coefficient
+            - 'p_value': float - p-value of the correlation
+            - 'attribution_sums': np.ndarray - Sum of attributions for each subset
+            - 'prediction_drops': np.ndarray - Prediction drop for each subset  
+            - 'subsets': list - List of subset indices sampled
+            - 'n': int - Subset size used
+            - 'n_subsets': int - Number of subsets sampled
+        
+    References:
+        Ancona, M., Ceolini, E., Öztireli, C., & Gross, M. (2018). Towards Better
+        Understanding of Gradient-based Attribution Methods for Deep Neural Networks.
+        ICLR 2018.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Determine subset size
+    if n is None:
+        n = max(1, n_features // 4)
+    n = max(1, min(n, n_features))  # Clamp to valid range
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Sample random subsets and compute correlations
+    attribution_sums = []
+    prediction_drops = []
+    subsets = []
+    
+    for _ in range(n_subsets):
+        # Sample random subset of size n
+        subset = np.random.choice(n_features, size=n, replace=False)
+        subsets.append(subset.tolist())
+        
+        # Compute sum of attributions in subset
+        if use_absolute:
+            attr_sum = np.sum(np.abs(attr_array[subset]))
+        else:
+            attr_sum = np.sum(attr_array[subset])
+        attribution_sums.append(attr_sum)
+        
+        # Create perturbed instance with subset features removed
+        perturbed = instance.copy()
+        for idx in subset:
+            perturbed[idx] = baseline_values[idx]
+        
+        # Get prediction for perturbed instance
+        perturbed_pred = get_prediction_value(model, perturbed.reshape(1, -1))
+        if isinstance(perturbed_pred, np.ndarray) and perturbed_pred.ndim > 0 and len(perturbed_pred) > target_class:
+            perturbed_value = perturbed_pred[target_class]
+        else:
+            perturbed_value = float(perturbed_pred)
+        
+        # Prediction drop (positive = removing features decreased prediction)
+        drop = original_value - perturbed_value
+        prediction_drops.append(drop)
+    
+    attribution_sums = np.array(attribution_sums)
+    prediction_drops = np.array(prediction_drops)
+    
+    # Handle edge cases
+    if len(attribution_sums) < 2:
+        if return_details:
+            return {
+                "correlation": 0.0,
+                "p_value": 1.0,
+                "attribution_sums": attribution_sums,
+                "prediction_drops": prediction_drops,
+                "subsets": subsets,
+                "n": n,
+                "n_subsets": len(subsets),
+            }
+        return 0.0
+    
+    # Check for constant arrays
+    if np.std(attribution_sums) < 1e-10 or np.std(prediction_drops) < 1e-10:
+        if return_details:
+            return {
+                "correlation": 0.0 if np.std(attribution_sums) < 1e-10 or np.std(prediction_drops) < 1e-10 else 1.0,
+                "p_value": 1.0,
+                "attribution_sums": attribution_sums,
+                "prediction_drops": prediction_drops,
+                "subsets": subsets,
+                "n": n,
+                "n_subsets": len(subsets),
+            }
+        return 0.0
+    
+    # Compute Pearson correlation
+    corr, p_value = stats.pearsonr(attribution_sums, prediction_drops)
+    
+    if np.isnan(corr):
+        corr = 0.0
+        p_value = 1.0
+    
+    if return_details:
+        return {
+            "correlation": float(corr),
+            "p_value": float(p_value),
+            "attribution_sums": attribution_sums,
+            "prediction_drops": prediction_drops,
+            "subsets": subsets,
+            "n": n,
+            "n_subsets": len(subsets),
+        }
+    
+    return float(corr)
+
+
+def compute_sensitivity_n_multi(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    n_values: List[int] = None,
+    n_subsets: int = 100,
+    use_absolute: bool = True,
+    seed: int = None,
+) -> Dict[str, Union[float, Dict[int, float]]]:
+    """
+    Compute Sensitivity-n for multiple subset sizes and return average.
+    
+    This is the recommended way to use Sensitivity-n, as averaging across
+    multiple subset sizes provides a more robust assessment of faithfulness.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal
+        background_data: Reference data for computing baseline
+        target_class: Target class index for probability (default: predicted class)
+        n_values: List of subset sizes to evaluate. If None, uses [1, n//4, n//2, 3n//4]
+        n_subsets: Number of random subsets per n value (default: 100)
+        use_absolute: If True, use absolute attribution values
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary with:
+            - 'mean': float - Average correlation across all n values
+            - 'scores': Dict[int, float] - Correlation for each n value
+            - 'n_values': List[int] - Subset sizes evaluated
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Determine n values to evaluate
+    if n_values is None:
+        n_values = [
+            1,
+            max(1, n_features // 4),
+            max(1, n_features // 2),
+            max(1, 3 * n_features // 4),
+        ]
+        # Remove duplicates and sort
+        n_values = sorted(set(n_values))
+    
+    scores = {}
+    for n in n_values:
+        if seed is not None:
+            np.random.seed(seed + n)  # Different seed per n for reproducibility
+        
+        score = compute_sensitivity_n(
+            model, instance, explanation,
+            baseline=baseline, background_data=background_data,
+            target_class=target_class, n=n,
+            n_subsets=n_subsets, use_absolute=use_absolute,
+            seed=None  # Already set above
+        )
+        scores[n] = score
+    
+    mean_score = np.mean(list(scores.values()))
+    
+    return {
+        "mean": float(mean_score),
+        "scores": scores,
+        "n_values": n_values,
+    }
+
+
+def compute_batch_sensitivity_n(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    n: int = None,
+    n_subsets: int = 100,
+    use_absolute: bool = True,
+    seed: int = None,
+) -> Dict[str, float]:
+    """
+    Compute average Sensitivity-n over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature removal
+        max_samples: Maximum number of samples to evaluate
+        n: Subset size (default: n_features // 4)
+        n_subsets: Number of random subsets per instance
+        use_absolute: If True, use absolute attribution values
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+    
+    scores = []
+    
+    for i in range(n_samples):
+        try:
+            current_seed = seed + i if seed is not None else None
+            score = compute_sensitivity_n(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                n=n, n_subsets=n_subsets,
+                use_absolute=use_absolute, seed=current_seed
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 5: Region Perturbation (Samek et al., 2015)
 # =============================================================================
 

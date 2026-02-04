@@ -49,6 +49,9 @@ from explainiverse.evaluation.faithfulness_extended import (
     compute_batch_region_perturbation,
     compute_selectivity,
     compute_batch_selectivity,
+    compute_sensitivity_n,
+    compute_sensitivity_n_multi,
+    compute_batch_sensitivity_n,
 )
 
 __all__ = [
@@ -86,4 +89,7 @@ __all__ = [
     "compute_batch_region_perturbation",
     "compute_selectivity",
     "compute_batch_selectivity",
+    "compute_sensitivity_n",
+    "compute_sensitivity_n_multi",
+    "compute_batch_sensitivity_n",
 ]

@@ -92,6 +92,7 @@
 | Pixel Flipping | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Region Perturbation | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Selectivity | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Sensitivity-n | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | IROF | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Infidelity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Insertion/Deletion AUC | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -134,7 +135,7 @@
 | Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
 |--------|:-------------:|:-------:|:-------:|:------:|:-------:|
 | **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
-| **Evaluation Metrics** | 15 → **54** | 37 | 0 | 0 | 22 |
+| **Evaluation Metrics** | 16 → **54** | 37 | 0 | 0 | 22 |
 | **Data Types** | 2 | N/A | 4 | 4 | 1 |
 | **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
 
@@ -142,12 +143,12 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.8.6)
+### Current Strengths (v0.8.7)
 
 | Strength | Description |
 |----------|-------------|
 | **Unified Registry** | Plugin architecture with rich metadata, filtering by scope/model/data type |
-| **Growing Evaluation Suite** | 12 metrics now, targeting 54 (will exceed Quantus's 37) |
+| **Growing Evaluation Suite** | 16 metrics now, targeting 54 (will exceed Quantus's 37) |
 | **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
 | **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 | **SAGE** | Global Shapley importance - rare in other frameworks |
@@ -156,7 +157,7 @@
 | **ProtoDash** | Example-based with importance weights - only AIX360 has this |
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 
-### Current Implementation (v0.8.6)
+### Current Implementation (v0.8.7)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -168,9 +169,9 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**15 Evaluation Metrics:**
+**16 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
-- Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC)
+- Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n
 - Stability: RIS, ROS, Lipschitz Estimate
 
 ---
@@ -189,7 +190,7 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 15 metrics)
+Current: Explainiverse at (18 methods, 16 metrics)
 Target:  Explainiverse at (18 methods, 54 metrics) - Best in class for metrics!
 ```
 
@@ -213,7 +214,7 @@ No other framework currently achieves both.
 | 4 | Pixel Flipping | ✅ v0.8.4 |
 | 5 | Region Perturbation | ✅ v0.8.5 |
 | 6 | Selectivity (AOPC) | ✅ v0.8.6 |
-| 7 | Sensitivity-n | ❌ |
+| 7 | Sensitivity-n | ✅ v0.8.7 |
 | 8 | IROF | ❌ |
 | 9 | Infidelity | ❌ |
 | 10 | ROAD | ❌ |
@@ -239,7 +240,7 @@ No other framework currently achieves both.
 
 | Gap | Priority | Notes |
 |-----|----------|-------|
-| Complete Phase 1 Faithfulness | 🔴 Critical | 6 more metrics to implement |
+| Complete Phase 1 Faithfulness | 🔴 Critical | 5 more metrics to implement |
 | Robustness metrics | 🔴 High | Phase 2 |
 | Localisation metrics | 🟡 Medium | Phase 3 |
 | Complexity metrics | 🟡 Medium | Phase 4 |
@@ -277,5 +278,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.8.6)*
+*Last updated: February 2025 (v0.8.7)*
 *Next review: After Phase 1 completion*

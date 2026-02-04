@@ -13,7 +13,7 @@
 | Feature | Description |
 |---------|-------------|
 | **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
-| **15 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity) and Stability (RIS, ROS, Lipschitz) |
+| **16 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity, Sensitivity-n) and Stability (RIS, ROS, Lipschitz) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
 | **Framework Support** | Adapters for scikit-learn and PyTorch (with gradient computation) |
@@ -71,6 +71,7 @@ Explainiverse includes a comprehensive suite of evaluation metrics based on the 
 | **Pixel Flipping** | AUC of prediction degradation when removing features by importance | [Bach et al., 2015](https://doi.org/10.1371/journal.pone.0130140) |
 | **Region Perturbation** | AUC of prediction degradation when perturbing feature regions by importance | [Samek et al., 2015](https://arxiv.org/abs/1509.06321) |
 | **Selectivity (AOPC)** | Average prediction drop when sequentially removing features by importance | [Montavon et al., 2018](https://doi.org/10.1016/j.dsp.2017.10.011) |
+| **Sensitivity-n** | Correlation between attribution sums and prediction changes for random feature subsets | [Ancona et al., 2018](https://arxiv.org/abs/1711.06104) |
 
 ### Stability Metrics
 
