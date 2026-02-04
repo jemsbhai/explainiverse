@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.8.7
+- **Current Version:** v0.8.8
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -250,4 +250,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.8.7)*
+*Last updated: February 2025 (v0.8.8)*

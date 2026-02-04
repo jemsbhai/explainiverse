@@ -143,7 +143,7 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.8.7)
+### Current Strengths (v0.8.8)
 
 | Strength | Description |
 |----------|-------------|
@@ -157,7 +157,7 @@
 | **ProtoDash** | Example-based with importance weights - only AIX360 has this |
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 
-### Current Implementation (v0.8.7)
+### Current Implementation (v0.8.8)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -278,5 +278,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.8.7)*
+*Last updated: February 2025 (v0.8.8)*
 *Next review: After Phase 1 completion*
