@@ -596,36 +596,189 @@ suite.compare()
 
 ## Custom Explainer Registration
 
+Explainiverse's plugin architecture allows you to register your own custom explainers and have them integrate seamlessly with the registry's discovery, filtering, and recommendation system.
+
+### Why Register Custom Explainers?
+
+| Benefit | Description |
+|---------|-------------|
+| **Discoverability** | Your explainer appears in `list_explainers()` and can be filtered by criteria |
+| **Rich Metadata** | Attach scope, model types, data types, paper references, and complexity info |
+| **Unified API** | Create instances via `default_registry.create("my_explainer", ...)` |
+| **Recommendations** | Your explainer can be recommended based on the user's use case |
+| **Consistency** | Follows the same `BaseExplainer` interface as all built-in methods |
+
+### Method 1: Decorator-Based Registration (Recommended)
+
+The cleanest way to register a custom explainer:
+
 ```python
-from explainiverse import default_registry, ExplainerMeta, BaseExplainer, Explanation
+from explainiverse import default_registry, BaseExplainer, Explanation
+from explainiverse.core.registry import ExplainerMeta
 
 @default_registry.register_decorator(
     name="my_explainer",
     meta=ExplainerMeta(
-        scope="local",
-        model_types=["any"],
-        data_types=["tabular"],
+        scope="local",                              # "local" or "global"
+        model_types=["any"],                        # ["any", "tree", "linear", "neural", "ensemble"]
+        data_types=["tabular"],                     # ["tabular", "image", "text", "time_series"]
         task_types=["classification", "regression"],
-        description="My custom explainer",
-        paper_reference="Author et al., 2024",
-        complexity="O(n)",
+        description="My custom attribution method",
+        paper_reference="Author et al., 2024 - 'My Method' (Conference)",
+        complexity="O(n * d)",                      # Computational complexity
         requires_training_data=False,
         supports_batching=True
     )
 )
 class MyExplainer(BaseExplainer):
+    """Custom explainer implementing your attribution method."""
+    
+    def __init__(self, model, feature_names, class_names=None, **kwargs):
+        super().__init__(model)
+        self.feature_names = feature_names
+        self.class_names = class_names
+    
+    def explain(self, instance, target_class=None, **kwargs):
+        """
+        Generate explanation for a single instance.
+        
+        Args:
+            instance: Input to explain (1D array for tabular)
+            target_class: Class to explain (optional)
+            **kwargs: Additional method-specific parameters
+            
+        Returns:
+            Explanation object with feature attributions
+        """
+        # Your attribution logic here
+        attributions = self._compute_attributions(instance, target_class)
+        
+        # Return standardized Explanation object
+        return Explanation(
+            explainer_name="MyExplainer",
+            target_class=str(target_class or 0),
+            explanation_data={"feature_attributions": attributions},
+            feature_names=self.feature_names,
+            metadata={"method": "my_method", "params": kwargs}
+        )
+    
+    def _compute_attributions(self, instance, target_class):
+        """Compute feature attributions (implement your method here)."""
+        # Example: simple gradient-like computation
+        import numpy as np
+        attributions = {}
+        for i, name in enumerate(self.feature_names):
+            attributions[name] = float(np.random.randn())  # Replace with real logic
+        return attributions
+```
+
+### Method 2: Programmatic Registration
+
+For dynamic registration or when decorators aren't suitable:
+
+```python
+from explainiverse import default_registry, BaseExplainer, Explanation
+from explainiverse.core.registry import ExplainerMeta, get_default_registry
+
+# Define your explainer class
+class AnotherExplainer(BaseExplainer):
     def __init__(self, model, feature_names, **kwargs):
         super().__init__(model)
         self.feature_names = feature_names
     
     def explain(self, instance, **kwargs):
-        # Your implementation
-        attributions = self._compute_attributions(instance)
+        # Implementation
         return Explanation(
-            explainer_name="MyExplainer",
-            target_class="output",
-            explanation_data={"feature_attributions": attributions}
+            explainer_name="AnotherExplainer",
+            target_class="0",
+            explanation_data={"feature_attributions": {}},
+            feature_names=self.feature_names
         )
+
+# Register programmatically
+registry = get_default_registry()
+registry.register(
+    name="another_explainer",
+    explainer_class=AnotherExplainer,
+    meta=ExplainerMeta(
+        scope="local",
+        model_types=["neural"],
+        data_types=["image"],
+        description="Another custom explainer"
+    )
+)
+```
+
+### Using Your Registered Explainer
+
+Once registered, your explainer works like any built-in method:
+
+```python
+# Verify registration
+print(default_registry.list_explainers())  # [..., 'my_explainer', ...]
+
+# Check metadata
+meta = default_registry.get_meta("my_explainer")
+print(meta.description)  # "My custom attribution method"
+
+# Create via registry
+explainer = default_registry.create(
+    "my_explainer",
+    model=adapter,
+    feature_names=feature_names,
+    class_names=class_names
+)
+
+# Generate explanations
+explanation = explainer.explain(X[0])
+print(explanation.get_top_features(k=5))
+
+# Your explainer is now discoverable via filtering
+local_explainers = default_registry.filter(scope="local")
+print("my_explainer" in local_explainers)  # True
+
+# And included in recommendations
+recommended = default_registry.recommend(
+    model_type="any",
+    data_type="tabular",
+    scope_preference="local"
+)
+```
+
+### ExplainerMeta Fields Reference
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `scope` | `str` | **Required.** `"local"` (instance-level) or `"global"` (model-level) |
+| `model_types` | `List[str]` | Compatible models: `["any", "tree", "linear", "neural", "ensemble"]` |
+| `data_types` | `List[str]` | Compatible data: `["tabular", "image", "text", "time_series"]` |
+| `task_types` | `List[str]` | Compatible tasks: `["classification", "regression"]` |
+| `description` | `str` | Human-readable description (shown in `summary()`) |
+| `paper_reference` | `str` | Citation for the method's paper |
+| `complexity` | `str` | Computational complexity (e.g., `"O(n^2)"`) |
+| `requires_training_data` | `bool` | Whether `explain()` needs background/training data |
+| `supports_batching` | `bool` | Whether the explainer can process batches efficiently |
+
+### Managing Registrations
+
+```python
+from explainiverse.core.registry import get_default_registry
+
+registry = get_default_registry()
+
+# Override an existing registration
+registry.register(
+    name="my_explainer",
+    explainer_class=ImprovedExplainer,
+    meta=ExplainerMeta(scope="local", description="Improved version"),
+    override=True  # Required to replace existing
+)
+
+# Unregister an explainer
+registry.unregister("my_explainer")
+
+# View summary of all registered explainers
+print(registry.summary())
 ```
 
 ---
