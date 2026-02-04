@@ -549,6 +549,336 @@ def compute_batch_irof(
 
 
 # =============================================================================
+# Metric 9: Infidelity (Yeh et al., 2019)
+# =============================================================================
+
+def compute_infidelity(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    perturbation_type: str = "gaussian",
+    noise_scale: float = 0.1,
+    n_samples: int = 100,
+    subset_size: int = None,
+    seed: int = None,
+    return_details: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    """
+    Compute Infidelity score (Yeh et al., 2019).
+    
+    Infidelity measures how well an explanation predicts the change in model
+    output when the input is perturbed. A faithful explanation should accurately
+    predict that perturbing important features causes proportional prediction changes.
+    
+    The metric computes:
+    
+        INFD(φ, f, x) = E_{I ~ μ}[(φ(x)ᵀ · I - (f(x) - f(x - I)))²]
+    
+    where:
+    - φ(x) are the attributions (explanation)
+    - I is a perturbation vector sampled from distribution μ
+    - f(x) is the model output for the target class
+    - The expectation is estimated via Monte Carlo sampling
+    
+    The intuition is that if attributions correctly identify feature importance,
+    then the dot product φ(x)ᵀ · I (expected prediction change based on explanation)
+    should match the actual prediction change f(x) - f(x - I).
+    
+    **Lower infidelity = better explanation** (0 is perfect).
+    
+    Three perturbation strategies are supported:
+    - "gaussian": Continuous Gaussian noise I ~ N(0, σ²I)
+    - "square": Binary mask (1s for perturbed features, 0s otherwise)
+    - "subset": Random subset of features are perturbed
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for perturbation ("mean", "median", scalar, array, callable)
+            Used to determine perturbed values: x - I becomes baseline where I=1
+        background_data: Reference data for computing baseline (required for "mean"/"median")
+        target_class: Target class index for probability (default: predicted class)
+        perturbation_type: Type of perturbation distribution:
+            - "gaussian": Gaussian noise scaled by noise_scale
+            - "square": Binary mask perturbation (features replaced with baseline)
+            - "subset": Random subset of features perturbed to baseline
+        noise_scale: Standard deviation for Gaussian perturbations (default: 0.1)
+            For "square" and "subset", controls probability of perturbation per feature.
+        n_samples: Number of Monte Carlo samples for expectation (default: 100)
+        subset_size: For "subset" perturbation, number of features to perturb.
+            If None, defaults to max(1, n_features // 4)
+        seed: Random seed for reproducibility
+        return_details: If True, return detailed results
+        
+    Returns:
+        If return_details=False: Infidelity score (float, lower is better, 0 is perfect)
+        If return_details=True: Dictionary with:
+            - 'infidelity': float - Mean squared error
+            - 'squared_errors': np.ndarray - Squared error for each sample
+            - 'expected_changes': np.ndarray - φ(x)ᵀ · I for each sample
+            - 'actual_changes': np.ndarray - f(x) - f(x-I) for each sample
+            - 'n_samples': int - Number of Monte Carlo samples
+            - 'perturbation_type': str - Type of perturbation used
+        
+    References:
+        Yeh, C. K., Hsieh, C. Y., Suggala, A., Inber, D. I., Ravikumar, P. K., 
+        Ravikumar, P., & Dhillon, I. S. (2019). On the (In)fidelity and Sensitivity 
+        of Explanations. NeurIPS 2019.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Determine subset size for subset perturbation
+    if subset_size is None:
+        subset_size = max(1, n_features // 4)
+    subset_size = max(1, min(subset_size, n_features))
+    
+    # Monte Carlo sampling for expectation
+    squared_errors = []
+    expected_changes = []
+    actual_changes = []
+    
+    for _ in range(n_samples):
+        if perturbation_type == "gaussian":
+            # Gaussian perturbation: I ~ N(0, σ²I)
+            # For continuous perturbation, we add noise directly
+            perturbation = np.random.normal(0, noise_scale, n_features)
+            perturbed = instance - perturbation
+            
+            # Expected change: φ(x)ᵀ · I
+            expected_change = np.dot(attr_array, perturbation)
+            
+        elif perturbation_type == "square":
+            # Square/binary mask perturbation
+            # Each feature has probability noise_scale of being perturbed
+            mask = np.random.random(n_features) < noise_scale
+            
+            # Perturbation vector: difference between original and baseline for masked features
+            perturbation = np.zeros(n_features)
+            perturbed = instance.copy()
+            
+            for i in range(n_features):
+                if mask[i]:
+                    perturbation[i] = instance[i] - baseline_values[i]
+                    perturbed[i] = baseline_values[i]
+            
+            # Expected change: φ(x)ᵀ · I (using the actual perturbation magnitude)
+            expected_change = np.dot(attr_array, perturbation)
+            
+        elif perturbation_type == "subset":
+            # Random subset perturbation
+            subset_indices = np.random.choice(n_features, size=subset_size, replace=False)
+            
+            # Perturbation vector: 1 for perturbed features, 0 otherwise
+            # But we scale by the actual value difference for meaningful comparison
+            perturbation = np.zeros(n_features)
+            perturbed = instance.copy()
+            
+            for idx in subset_indices:
+                perturbation[idx] = instance[idx] - baseline_values[idx]
+                perturbed[idx] = baseline_values[idx]
+            
+            # Expected change: φ(x)ᵀ · I
+            expected_change = np.dot(attr_array, perturbation)
+            
+        else:
+            raise ValueError(f"Unknown perturbation_type: {perturbation_type}. "
+                           f"Choose from 'gaussian', 'square', 'subset'.")
+        
+        # Get perturbed prediction
+        perturbed_pred = get_prediction_value(model, perturbed.reshape(1, -1))
+        if isinstance(perturbed_pred, np.ndarray) and perturbed_pred.ndim > 0 and len(perturbed_pred) > target_class:
+            perturbed_value = perturbed_pred[target_class]
+        else:
+            perturbed_value = float(perturbed_pred)
+        
+        # Actual change: f(x) - f(x - I)
+        actual_change = original_value - perturbed_value
+        
+        # Squared error: (expected - actual)²
+        sq_error = (expected_change - actual_change) ** 2
+        
+        squared_errors.append(sq_error)
+        expected_changes.append(expected_change)
+        actual_changes.append(actual_change)
+    
+    squared_errors = np.array(squared_errors)
+    expected_changes = np.array(expected_changes)
+    actual_changes = np.array(actual_changes)
+    
+    # Infidelity is the mean squared error
+    infidelity = np.mean(squared_errors)
+    
+    if return_details:
+        return {
+            "infidelity": float(infidelity),
+            "squared_errors": squared_errors,
+            "expected_changes": expected_changes,
+            "actual_changes": actual_changes,
+            "n_samples": n_samples,
+            "perturbation_type": perturbation_type,
+            "original_prediction": original_value,
+        }
+    
+    return float(infidelity)
+
+
+def compute_infidelity_multi_perturbation(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    perturbation_types: List[str] = None,
+    noise_scale: float = 0.1,
+    n_samples: int = 100,
+    seed: int = None,
+) -> Dict[str, Union[float, Dict[str, float]]]:
+    """
+    Compute Infidelity across multiple perturbation types.
+    
+    This variant provides a more robust assessment by evaluating infidelity
+    under different perturbation strategies and returning the average.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for perturbation
+        background_data: Reference data for computing baseline
+        target_class: Target class index for probability
+        perturbation_types: List of perturbation types to evaluate.
+            If None, uses ["gaussian", "square", "subset"]
+        noise_scale: Standard deviation/probability for perturbations
+        n_samples: Number of Monte Carlo samples per perturbation type
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary with:
+            - 'mean': float - Average infidelity across perturbation types
+            - 'scores': Dict[str, float] - Infidelity for each perturbation type
+            - 'perturbation_types': List[str] - Types evaluated
+    """
+    if perturbation_types is None:
+        perturbation_types = ["gaussian", "square", "subset"]
+    
+    scores = {}
+    for i, ptype in enumerate(perturbation_types):
+        current_seed = seed + i if seed is not None else None
+        score = compute_infidelity(
+            model, instance, explanation,
+            baseline=baseline, background_data=background_data,
+            target_class=target_class,
+            perturbation_type=ptype,
+            noise_scale=noise_scale,
+            n_samples=n_samples,
+            seed=current_seed,
+        )
+        scores[ptype] = score
+    
+    mean_score = np.mean(list(scores.values()))
+    
+    return {
+        "mean": float(mean_score),
+        "scores": scores,
+        "perturbation_types": perturbation_types,
+    }
+
+
+def compute_batch_infidelity(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    perturbation_type: str = "gaussian",
+    noise_scale: float = 0.1,
+    n_perturbations: int = 100,
+    seed: int = None,
+) -> Dict[str, float]:
+    """
+    Compute average Infidelity score over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for perturbation
+        max_samples: Maximum number of samples to evaluate
+        perturbation_type: Type of perturbation ("gaussian", "square", "subset")
+        noise_scale: Perturbation scale parameter
+        n_perturbations: Number of Monte Carlo samples per instance
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    n_instances = len(explanations)
+    if max_samples:
+        n_instances = min(n_instances, max_samples)
+    
+    scores = []
+    
+    for i in range(n_instances):
+        try:
+            current_seed = seed + i if seed is not None else None
+            score = compute_infidelity(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                perturbation_type=perturbation_type,
+                noise_scale=noise_scale,
+                n_samples=n_perturbations,
+                seed=current_seed,
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 6: Selectivity (Montavon et al., 2018)
 # =============================================================================
 

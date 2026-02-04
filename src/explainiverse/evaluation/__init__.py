@@ -55,6 +55,9 @@ from explainiverse.evaluation.faithfulness_extended import (
     compute_irof,
     compute_irof_multi_segment,
     compute_batch_irof,
+    compute_infidelity,
+    compute_infidelity_multi_perturbation,
+    compute_batch_infidelity,
 )
 
 __all__ = [
@@ -98,4 +101,7 @@ __all__ = [
     "compute_irof",
     "compute_irof_multi_segment",
     "compute_batch_irof",
+    "compute_infidelity",
+    "compute_infidelity_multi_perturbation",
+    "compute_batch_infidelity",
 ]

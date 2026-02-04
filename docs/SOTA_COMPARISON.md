@@ -94,7 +94,7 @@
 | Selectivity | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Sensitivity-n | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | IROF | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Infidelity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Infidelity | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Insertion/Deletion AUC | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Stability** |
 | RIS | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
@@ -135,7 +135,7 @@
 | Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
 |--------|:-------------:|:-------:|:-------:|:------:|:-------:|
 | **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
-| **Evaluation Metrics** | 17 → **54** | 37 | 0 | 0 | 22 |
+| **Evaluation Metrics** | 18 → **54** | 37 | 0 | 0 | 22 |
 | **Data Types** | 2 | N/A | 4 | 4 | 1 |
 | **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
 
@@ -143,7 +143,7 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.8.9)
+### Current Strengths (v0.8.10)
 
 | Strength | Description |
 |----------|-------------|
@@ -216,7 +216,7 @@ No other framework currently achieves both.
 | 6 | Selectivity (AOPC) | ✅ v0.8.6 |
 | 7 | Sensitivity-n | ✅ v0.8.7 |
 | 8 | IROF | ✅ v0.8.9 |
-| 9 | Infidelity | ❌ |
+| 9 | Infidelity | ✅ v0.8.10 |
 | 10 | ROAD | ❌ |
 | 11 | Insertion AUC | ❌ |
 | 12 | Deletion AUC | ❌ |
@@ -240,7 +240,7 @@ No other framework currently achieves both.
 
 | Gap | Priority | Notes |
 |-----|----------|-------|
-| Complete Phase 1 Faithfulness | 🔴 Critical | 4 more metrics to implement |
+| Complete Phase 1 Faithfulness | 🔴 Critical | 3 more metrics to implement |
 | Robustness metrics | 🔴 High | Phase 2 |
 | Localisation metrics | 🟡 Medium | Phase 3 |
 | Complexity metrics | 🟡 Medium | Phase 4 |
@@ -278,5 +278,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.8.9)*
+*Last updated: February 2025 (v0.8.10)*
 *Next review: After Phase 1 completion*
