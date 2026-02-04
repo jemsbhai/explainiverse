@@ -13,7 +13,7 @@
 | Feature | Description |
 |---------|-------------|
 | **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
-| **16 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity, Sensitivity-n) and Stability (RIS, ROS, Lipschitz) |
+| **17 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity, Sensitivity-n, IROF) and Stability (RIS, ROS, Lipschitz) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
 | **Framework Support** | Adapters for scikit-learn and PyTorch (with gradient computation) |
@@ -72,6 +72,7 @@ Explainiverse includes a comprehensive suite of evaluation metrics based on the 
 | **Region Perturbation** | AUC of prediction degradation when perturbing feature regions by importance | [Samek et al., 2015](https://arxiv.org/abs/1509.06321) |
 | **Selectivity (AOPC)** | Average prediction drop when sequentially removing features by importance | [Montavon et al., 2018](https://doi.org/10.1016/j.dsp.2017.10.011) |
 | **Sensitivity-n** | Correlation between attribution sums and prediction changes for random feature subsets | [Ancona et al., 2018](https://arxiv.org/abs/1711.06104) |
+| **IROF** | Area over curve measuring prediction degradation when iteratively removing features | [Rieger & Hansen, 2020](https://arxiv.org/abs/2003.08747) |
 
 ### Stability Metrics
 
@@ -846,7 +847,7 @@ poetry run pytest tests/test_lrp.py::TestLRPConv2d -v
 
 ### In Progress 🔄
 - [ ] **Evaluation metrics expansion** - Adding 42 more metrics across 7 categories to exceed Quantus (37 metrics)
-  - Phase 1: Faithfulness (+9 metrics) - 4/12 complete
+  - Phase 1: Faithfulness (+12 metrics) - 8/12 complete
   - Phase 2: Robustness (+7 metrics)
   - Phase 3: Localisation (+8 metrics)
   - Phase 4: Complexity (+4 metrics)

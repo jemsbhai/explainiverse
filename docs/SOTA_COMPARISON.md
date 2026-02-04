@@ -93,7 +93,7 @@
 | Region Perturbation | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Selectivity | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Sensitivity-n | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| IROF | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| IROF | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Infidelity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Insertion/Deletion AUC | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Stability** |
@@ -135,7 +135,7 @@
 | Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
 |--------|:-------------:|:-------:|:-------:|:------:|:-------:|
 | **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
-| **Evaluation Metrics** | 16 → **54** | 37 | 0 | 0 | 22 |
+| **Evaluation Metrics** | 17 → **54** | 37 | 0 | 0 | 22 |
 | **Data Types** | 2 | N/A | 4 | 4 | 1 |
 | **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
 
@@ -143,7 +143,7 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.8.8)
+### Current Strengths (v0.8.9)
 
 | Strength | Description |
 |----------|-------------|
@@ -157,7 +157,7 @@
 | **ProtoDash** | Example-based with importance weights - only AIX360 has this |
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 
-### Current Implementation (v0.8.8)
+### Current Implementation (v0.8.9)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -169,9 +169,9 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**16 Evaluation Metrics:**
+**17 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
-- Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n
+- Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n, IROF
 - Stability: RIS, ROS, Lipschitz Estimate
 
 ---
@@ -190,7 +190,7 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 16 metrics)
+Current: Explainiverse at (18 methods, 17 metrics)
 Target:  Explainiverse at (18 methods, 54 metrics) - Best in class for metrics!
 ```
 
@@ -215,7 +215,7 @@ No other framework currently achieves both.
 | 5 | Region Perturbation | ✅ v0.8.5 |
 | 6 | Selectivity (AOPC) | ✅ v0.8.6 |
 | 7 | Sensitivity-n | ✅ v0.8.7 |
-| 8 | IROF | ❌ |
+| 8 | IROF | ✅ v0.8.9 |
 | 9 | Infidelity | ❌ |
 | 10 | ROAD | ❌ |
 | 11 | Insertion AUC | ❌ |
@@ -240,7 +240,7 @@ No other framework currently achieves both.
 
 | Gap | Priority | Notes |
 |-----|----------|-------|
-| Complete Phase 1 Faithfulness | 🔴 Critical | 5 more metrics to implement |
+| Complete Phase 1 Faithfulness | 🔴 Critical | 4 more metrics to implement |
 | Robustness metrics | 🔴 High | Phase 2 |
 | Localisation metrics | 🟡 Medium | Phase 3 |
 | Complexity metrics | 🟡 Medium | Phase 4 |
@@ -278,5 +278,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.8.8)*
+*Last updated: February 2025 (v0.8.9)*
 *Next review: After Phase 1 completion*

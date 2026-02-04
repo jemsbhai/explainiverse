@@ -257,6 +257,298 @@ def compute_batch_faithfulness_estimate(
 
 
 # =============================================================================
+# Metric 8: IROF - Iterative Removal of Features (Rieger & Hansen, 2020)
+# =============================================================================
+
+def compute_irof(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    segment_size: int = None,
+    use_absolute: bool = True,
+    return_details: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray, List]]]:
+    """
+    Compute IROF (Iterative Removal of Features) score (Rieger & Hansen, 2020).
+    
+    IROF measures explanation faithfulness by iteratively removing features
+    (or segments of features) in order of attributed importance and tracking
+    prediction degradation. Features are organized into segments, and segments
+    are removed from most to least important based on the sum of their
+    attributed relevance scores.
+    
+    The metric computes the Area Over the Perturbation Curve (AOC), which
+    measures how quickly the model's prediction for the target class drops
+    as important features are removed. Higher AOC indicates better faithfulness
+    (the explanation correctly identifies features important for classification).
+    
+    For tabular data, each feature can be treated as a segment (segment_size=1),
+    or features can be grouped into larger segments.
+    
+    AOC = ∫₀¹ [original_pred - f(x_perturbed)] d(fraction_removed)
+    
+    where the integral is computed using the trapezoidal rule over the
+    normalized perturbation curve.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal ("mean", "median", scalar, array, callable)
+        background_data: Reference data for computing baseline (required for "mean"/"median")
+        target_class: Target class index for probability (default: predicted class)
+        segment_size: Number of features per segment. If None, defaults to 1
+            (each feature is its own segment). For image-like data, this groups
+            features into spatial regions.
+        use_absolute: If True, sort segments by absolute attribution sum (default: True)
+        return_details: If True, return detailed results including degradation curve
+        
+    Returns:
+        If return_details=False: AOC score (float, higher is better)
+        If return_details=True: Dictionary with:
+            - 'aoc': float - Area Over the perturbation Curve
+            - 'curve': np.ndarray - Prediction drop at each step (original - perturbed)
+            - 'predictions': np.ndarray - Raw predictions at each step
+            - 'segment_order': list - Order in which segments were removed
+            - 'segments': list - List of feature indices in each segment
+            - 'segment_importance': np.ndarray - Aggregated importance per segment
+            - 'n_segments': int - Number of segments
+            - 'original_prediction': float - Original prediction value
+        
+    References:
+        Rieger, L., & Hansen, L. K. (2020). IROF: A Low Resource Evaluation
+        Metric for Explanation Methods. Workshop AI for Affordable Healthcare
+        at ICLR 2020.
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Determine segment size (default: 1 = each feature is a segment)
+    if segment_size is None:
+        segment_size = 1
+    segment_size = max(1, min(segment_size, n_features))
+    
+    # Create non-overlapping segments
+    segments = []
+    for start_idx in range(0, n_features, segment_size):
+        end_idx = min(start_idx + segment_size, n_features)
+        segments.append(list(range(start_idx, end_idx)))
+    
+    n_segments = len(segments)
+    
+    # Compute segment importance (sum of attributions in each segment)
+    segment_importance = np.zeros(n_segments)
+    for i, segment in enumerate(segments):
+        if use_absolute:
+            segment_importance[i] = np.sum(np.abs(attr_array[segment]))
+        else:
+            segment_importance[i] = np.sum(attr_array[segment])
+    
+    # Sort segments by importance (descending - most important first)
+    sorted_segment_indices = np.argsort(-segment_importance)
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Start with original instance
+    current = instance.copy()
+    
+    # Track predictions and prediction drops at each step
+    # Step 0: no segments removed
+    predictions = [original_value]
+    prediction_drops = [0.0]  # original - original = 0
+    
+    # Iteratively remove segments (most important first)
+    for segment_idx in sorted_segment_indices:
+        segment = segments[segment_idx]
+        
+        # Remove features in this segment (replace with baseline)
+        for feat_idx in segment:
+            current[feat_idx] = baseline_values[feat_idx]
+        
+        # Get prediction
+        pred = get_prediction_value(model, current.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0 and len(pred) > target_class:
+            current_pred = pred[target_class]
+        else:
+            current_pred = float(pred)
+        
+        predictions.append(current_pred)
+        # Prediction drop: original_value - current_pred
+        # Positive drop means removing features decreased prediction
+        prediction_drops.append(original_value - current_pred)
+    
+    predictions = np.array(predictions)
+    prediction_drops = np.array(prediction_drops)
+    
+    # Compute Area Over the Curve (AOC)
+    # x-axis: fraction of segments removed (0 to 1)
+    # y-axis: prediction drop (original - perturbed)
+    # Higher AOC = more area above baseline = better explanation
+    x = np.linspace(0, 1, len(prediction_drops))
+    aoc = np.trapz(prediction_drops, x)
+    
+    if return_details:
+        return {
+            "aoc": float(aoc),
+            "curve": prediction_drops,
+            "predictions": predictions,
+            "segment_order": sorted_segment_indices.tolist(),
+            "segments": segments,
+            "segment_importance": segment_importance,
+            "n_segments": n_segments,
+            "original_prediction": original_value,
+        }
+    
+    return float(aoc)
+
+
+def compute_irof_multi_segment(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    segment_sizes: List[int] = None,
+    use_absolute: bool = True,
+) -> Dict[str, Union[float, Dict[int, float]]]:
+    """
+    Compute IROF for multiple segment sizes and return average.
+    
+    This variant evaluates IROF across different segment granularities,
+    providing a more robust assessment that is less sensitive to the
+    choice of segment size.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal
+        background_data: Reference data for computing baseline
+        target_class: Target class index for probability (default: predicted class)
+        segment_sizes: List of segment sizes to evaluate. If None, uses
+            [1, n//4, n//2] where n is the number of features.
+        use_absolute: If True, sort segments by absolute attribution sum
+        
+    Returns:
+        Dictionary with:
+            - 'mean': float - Average AOC across all segment sizes
+            - 'scores': Dict[int, float] - AOC for each segment size
+            - 'segment_sizes': List[int] - Segment sizes evaluated
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Determine segment sizes to evaluate
+    if segment_sizes is None:
+        segment_sizes = [
+            1,
+            max(1, n_features // 4),
+            max(1, n_features // 2),
+        ]
+        # Remove duplicates and sort
+        segment_sizes = sorted(set(segment_sizes))
+    
+    scores = {}
+    for seg_size in segment_sizes:
+        score = compute_irof(
+            model, instance, explanation,
+            baseline=baseline, background_data=background_data,
+            target_class=target_class,
+            segment_size=seg_size,
+            use_absolute=use_absolute,
+        )
+        scores[seg_size] = score
+    
+    mean_score = np.mean(list(scores.values()))
+    
+    return {
+        "mean": float(mean_score),
+        "scores": scores,
+        "segment_sizes": segment_sizes,
+    }
+
+
+def compute_batch_irof(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    segment_size: int = None,
+    use_absolute: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute average IROF score over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature removal
+        max_samples: Maximum number of samples to evaluate
+        segment_size: Number of features per segment (default: 1)
+        use_absolute: If True, sort segments by absolute attribution sum
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+    
+    scores = []
+    
+    for i in range(n_samples):
+        try:
+            score = compute_irof(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                segment_size=segment_size,
+                use_absolute=use_absolute,
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 6: Selectivity (Montavon et al., 2018)
 # =============================================================================
 

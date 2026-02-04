@@ -52,6 +52,9 @@ from explainiverse.evaluation.faithfulness_extended import (
     compute_sensitivity_n,
     compute_sensitivity_n_multi,
     compute_batch_sensitivity_n,
+    compute_irof,
+    compute_irof_multi_segment,
+    compute_batch_irof,
 )
 
 __all__ = [
@@ -92,4 +95,7 @@ __all__ = [
     "compute_sensitivity_n",
     "compute_sensitivity_n_multi",
     "compute_batch_sensitivity_n",
+    "compute_irof",
+    "compute_irof_multi_segment",
+    "compute_batch_irof",
 ]
