@@ -47,6 +47,8 @@ from explainiverse.evaluation.faithfulness_extended import (
     compute_batch_pixel_flipping,
     compute_region_perturbation,
     compute_batch_region_perturbation,
+    compute_selectivity,
+    compute_batch_selectivity,
 )
 
 __all__ = [
@@ -82,4 +84,6 @@ __all__ = [
     "compute_batch_pixel_flipping",
     "compute_region_perturbation",
     "compute_batch_region_perturbation",
+    "compute_selectivity",
+    "compute_batch_selectivity",
 ]

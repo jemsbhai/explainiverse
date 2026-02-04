@@ -257,6 +257,204 @@ def compute_batch_faithfulness_estimate(
 
 
 # =============================================================================
+# Metric 6: Selectivity (Montavon et al., 2018)
+# =============================================================================
+
+def compute_selectivity(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    n_steps: int = None,
+    use_absolute: bool = True,
+    return_details: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    """
+    Compute Selectivity score using AOPC (Montavon et al., 2018).
+    
+    Measures how quickly the prediction function drops when removing features
+    with the highest attributed values. Computed as the Area Over the
+    Perturbation Curve (AOPC), which is the average prediction drop across
+    all perturbation steps.
+    
+    AOPC = (1/(K+1)) * Σₖ₌₀ᴷ [f(x) - f(x_{1..k})]
+    
+    where:
+    - f(x) is the original prediction for the target class
+    - f(x_{1..k}) is the prediction after removing the top-k most important features
+    - K is the total number of perturbation steps (default: n_features)
+    
+    Higher AOPC indicates better selectivity - the explanation correctly
+    identifies features whose removal causes the largest prediction drop.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal ("mean", "median", scalar, array, callable)
+        background_data: Reference data for computing baseline (required for "mean"/"median")
+        target_class: Target class index for probability (default: predicted class)
+        n_steps: Number of perturbation steps (default: n_features, max features to remove)
+        use_absolute: If True, sort features by absolute attribution value (default: True)
+        return_details: If True, return detailed results including prediction drops per step
+        
+    Returns:
+        If return_details=False: AOPC score (float, higher is better)
+        If return_details=True: Dictionary with:
+            - 'aopc': float - Area Over the Perturbation Curve (average drop)
+            - 'prediction_drops': np.ndarray - Drop at each step [f(x) - f(x_{1..k})]
+            - 'predictions': np.ndarray - Predictions at each step
+            - 'feature_order': np.ndarray - Order in which features were removed
+            - 'n_steps': int - Number of perturbation steps
+        
+    References:
+        Montavon, G., Samek, W., & Müller, K. R. (2018). Methods for Interpreting
+        and Understanding Deep Neural Networks. Digital Signal Processing, 73, 1-15.
+        
+        Samek, W., Binder, A., Montavon, G., Lapuschkin, S., & Müller, K. R. (2016).
+        Evaluating the Visualization of What a Deep Neural Network has Learned.
+        IEEE Transactions on Neural Networks and Learning Systems, 28(11), 2660-2673.
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Determine number of steps (default: all features)
+    if n_steps is None:
+        n_steps = n_features
+    n_steps = min(n_steps, n_features)
+    
+    # Sort features by attribution (descending - most important first)
+    if use_absolute:
+        sorted_indices = np.argsort(-np.abs(attr_array))
+    else:
+        sorted_indices = np.argsort(-attr_array)
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Start with original instance
+    current = instance.copy()
+    
+    # Track predictions and drops at each step
+    # Step 0: no features removed (drop = 0)
+    predictions = [original_value]
+    prediction_drops = [0.0]  # f(x) - f(x) = 0
+    
+    # Remove features one by one (most important first)
+    for k in range(n_steps):
+        idx = sorted_indices[k]
+        # Remove this feature (replace with baseline)
+        current[idx] = baseline_values[idx]
+        
+        # Get prediction
+        pred = get_prediction_value(model, current.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0 and len(pred) > target_class:
+            current_pred = pred[target_class]
+        else:
+            current_pred = float(pred)
+        
+        predictions.append(current_pred)
+        # Prediction drop: f(x) - f(x_{1..k})
+        prediction_drops.append(original_value - current_pred)
+    
+    predictions = np.array(predictions)
+    prediction_drops = np.array(prediction_drops)
+    
+    # Compute AOPC: average of prediction drops across all steps
+    # AOPC = (1/(K+1)) * Σₖ₌₀ᴷ [f(x) - f(x_{1..k})]
+    aopc = np.mean(prediction_drops)
+    
+    if return_details:
+        return {
+            "aopc": float(aopc),
+            "prediction_drops": prediction_drops,
+            "predictions": predictions,
+            "feature_order": sorted_indices[:n_steps],
+            "n_steps": n_steps,
+            "original_prediction": original_value,
+        }
+    
+    return float(aopc)
+
+
+def compute_batch_selectivity(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    n_steps: int = None,
+    use_absolute: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute average Selectivity (AOPC) over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature removal
+        max_samples: Maximum number of samples to evaluate
+        n_steps: Number of perturbation steps per instance
+        use_absolute: If True, sort features by absolute attribution value
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+    
+    scores = []
+    
+    for i in range(n_samples):
+        try:
+            score = compute_selectivity(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                n_steps=n_steps,
+                use_absolute=use_absolute
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 5: Region Perturbation (Samek et al., 2015)
 # =============================================================================
 
