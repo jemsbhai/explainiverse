@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.8.10
+- **Current Version:** v0.8.11
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (18 total)
+### Evaluation Metrics (19 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -54,6 +54,7 @@
 | | Sensitivity-n | ✅ Complete | v0.8.7 | Ancona et al., 2018 |
 | | IROF | ✅ Complete | v0.8.9 | Rieger & Hansen, 2020 |
 | | Infidelity | ✅ Complete | v0.8.10 | Yeh et al., 2019 |
+| | ROAD | ✅ Complete | v0.8.11 | Rong et al., 2022 |
 | **Stability** | RIS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | ROS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | Lipschitz Estimate | ✅ Complete | v0.3.0 | Alvarez-Melis & Jaakkola, 2018 |
@@ -97,7 +98,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 
 ## Phase 1: Faithfulness Metrics (In Progress)
 
-**Target:** v0.9.0 with 12 additional faithfulness metrics (9/12 complete, 75%)
+**Target:** v0.9.0 with 12 additional faithfulness metrics (10/12 complete, 83%)
 
 | # | Metric | Reference | Status | Version |
 |---|--------|-----------|--------|---------|
@@ -110,7 +111,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 | 7 | Sensitivity-n | Ancona et al., 2018 | ✅ Complete | v0.8.7 |
 | 8 | IROF | Rieger & Hansen, 2020 | ✅ Complete | v0.8.9 |
 | 9 | Infidelity | Yeh et al., 2019 | ✅ Complete | v0.8.10 |
-| 10 | ROAD | Rong et al., 2022 | ❌ Planned | - |
+| 10 | ROAD | Rong et al., 2022 | ✅ Complete | v0.8.11 |
 | 11 | Insertion AUC | Petsiuk et al., 2018 | ❌ Planned | - |
 | 12 | Deletion AUC | Petsiuk et al., 2018 | ❌ Planned | - |
 
@@ -230,6 +231,7 @@ explainiverse/
 | v0.8.8 | Feb 2025 | Documentation updates |
 | v0.8.9 | Feb 2025 | IROF metric (Rieger & Hansen, 2020) |
 | v0.8.10 | Feb 2025 | Infidelity metric (Yeh et al., 2019) |
+| v0.8.11 | Feb 2025 | ROAD metric (Rong et al., 2022) |
 
 ---
 
@@ -255,4 +257,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.8.10)*
+*Last updated: February 2025 (v0.8.11)*

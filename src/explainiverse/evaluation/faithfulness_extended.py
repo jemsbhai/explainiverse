@@ -86,6 +86,442 @@ def _extract_attribution_array(
 
 
 # =============================================================================
+# Noisy Linear Imputation (helper for ROAD)
+# =============================================================================
+
+def _noisy_linear_impute(
+    instance: np.ndarray,
+    removed_indices: List[int],
+    remaining_indices: List[int],
+    background_data: np.ndarray,
+    noise_scale: float = 1.0,
+    seed: int = None,
+) -> np.ndarray:
+    """
+    Impute removed features using Noisy Linear Imputation (Rong et al., 2022).
+    
+    For each removed feature j, fits a linear regression from the remaining
+    features using the background data:
+        x_j = w^T * x_remaining + b + epsilon
+    where epsilon ~ N(0, noise_scale * sigma^2_residual).
+    
+    The noise prevents class information leakage through the imputed values,
+    which is the key insight of the ROAD framework.
+    
+    Args:
+        instance: Input instance (1D array)
+        removed_indices: Indices of features to impute
+        remaining_indices: Indices of features to use as predictors
+        background_data: Training data for fitting linear models (2D array)
+        noise_scale: Scale factor for residual noise (default: 1.0).
+            Higher values add more noise, reducing information leakage.
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Imputed instance with removed features replaced by noisy linear predictions
+    """
+    if seed is not None:
+        rng = np.random.RandomState(seed)
+    else:
+        rng = np.random.RandomState()
+    
+    imputed = instance.copy()
+    
+    if len(removed_indices) == 0:
+        return imputed
+    
+    if len(remaining_indices) == 0:
+        # No remaining features to predict from - use column means + noise
+        for j in removed_indices:
+            col_mean = np.mean(background_data[:, j])
+            col_std = np.std(background_data[:, j])
+            imputed[j] = col_mean + rng.normal(0, noise_scale * col_std)
+        return imputed
+    
+    # Extract remaining features from background data and instance
+    X_remaining = background_data[:, remaining_indices]
+    x_remaining = instance[remaining_indices].reshape(1, -1)
+    
+    # For each removed feature, fit a linear model and impute with noise
+    for j in removed_indices:
+        y_target = background_data[:, j]
+        
+        # Fit linear regression: y_target = X_remaining @ w + b
+        # Using least squares with intercept via augmented matrix
+        n_samples = X_remaining.shape[0]
+        X_aug = np.column_stack([X_remaining, np.ones(n_samples)])
+        
+        try:
+            # Use least squares (handles rank-deficient cases)
+            result = np.linalg.lstsq(X_aug, y_target, rcond=None)
+            coeffs = result[0]
+            
+            # Predict for the instance
+            x_aug = np.column_stack([x_remaining, np.ones(1)])
+            predicted = float(x_aug @ coeffs)
+            
+            # Compute residual standard deviation
+            y_pred_train = X_aug @ coeffs
+            residuals = y_target - y_pred_train
+            residual_std = np.std(residuals)
+            
+            # Add calibrated noise
+            noise = rng.normal(0, noise_scale * max(residual_std, 1e-10))
+            imputed[j] = predicted + noise
+            
+        except np.linalg.LinAlgError:
+            # Fallback: use column mean + noise if linear fit fails
+            col_mean = np.mean(y_target)
+            col_std = np.std(y_target)
+            imputed[j] = col_mean + rng.normal(0, noise_scale * max(col_std, 1e-10))
+    
+    return imputed
+
+
+# =============================================================================
+# Metric 10: ROAD - RemOve And Debias (Rong et al., 2022)
+# =============================================================================
+
+def compute_road(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    background_data: np.ndarray,
+    target_class: int = None,
+    percentages: List[float] = None,
+    order: str = "morf",
+    noise_scale: float = 1.0,
+    use_absolute: bool = True,
+    seed: int = None,
+    return_details: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray, List]]]:
+    """
+    Compute ROAD (RemOve And Debias) score (Rong et al., 2022).
+    
+    ROAD evaluates explanation faithfulness using noisy linear imputation
+    instead of simple baseline replacement, addressing the out-of-distribution
+    problem and class information leakage in perturbation-based evaluation.
+    
+    At each removal percentage p, the top-p% features (by attribution) are
+    removed and replaced using Noisy Linear Imputation fitted on the
+    background data. The model's prediction change on the imputed sample
+    is recorded. The final score is the mean prediction change across
+    all percentages.
+    
+    Two ordering strategies:
+    - **MoRF** (Most Relevant First): Remove important features first.
+      Higher score = better explanation (important features truly matter).
+    - **LeRF** (Least Relevant First): Remove unimportant features first.
+      Lower score = better explanation (unimportant features truly don't matter).
+    
+    The Noisy Linear Imputation operator fits a linear regression from
+    remaining features to each removed feature using the training data,
+    then adds calibrated Gaussian noise (epsilon ~ N(0, sigma^2_residual))
+    to provably remove information while preserving inter-feature dependencies.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        background_data: Training data for fitting imputation models (2D array).
+            Required for noisy linear imputation.
+        target_class: Target class index for probability (default: predicted class)
+        percentages: List of removal percentages as fractions in (0, 1).
+            Default: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        order: Feature removal order:
+            - "morf": Most Relevant First (descending attribution)
+            - "lerf": Least Relevant First (ascending attribution)
+        noise_scale: Scale factor for imputation noise (default: 1.0).
+            Controls the amount of Gaussian noise added to linear predictions.
+        use_absolute: If True, sort features by absolute attribution value
+        seed: Random seed for reproducibility
+        return_details: If True, return detailed results
+        
+    Returns:
+        If return_details=False: Mean prediction change across percentages (float).
+            For MoRF: higher is better (removing important features hurts prediction).
+            For LeRF: lower is better (removing unimportant features has little effect).
+        If return_details=True: Dictionary with:
+            - 'score': float - Mean prediction change across percentages
+            - 'prediction_changes': np.ndarray - Change at each percentage
+            - 'predictions': np.ndarray - Prediction at each percentage
+            - 'percentages': list - Removal percentages used
+            - 'n_removed': list - Number of features removed at each step
+            - 'feature_order': np.ndarray - Order in which features are removed
+            - 'order': str - Removal order used ('morf' or 'lerf')
+            - 'original_prediction': float - Original prediction value
+        
+    References:
+        Rong, Y., Leemann, T., Borisov, V., Kasneci, G., & Kasneci, E. (2022).
+        A Consistent and Efficient Evaluation Strategy for Attribution Methods.
+        Proceedings of the 39th International Conference on Machine Learning
+        (ICML), PMLR 162, 18770-18795.
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+    
+    # Validate background_data
+    if background_data is None:
+        raise ValueError(
+            "background_data is required for ROAD metric "
+            "(needed for noisy linear imputation)."
+        )
+    background_data = np.asarray(background_data)
+    if background_data.ndim != 2 or background_data.shape[1] != n_features:
+        raise ValueError(
+            f"background_data must be 2D with {n_features} columns, "
+            f"got shape {background_data.shape}."
+        )
+    
+    # Validate order
+    if order not in ("morf", "lerf"):
+        raise ValueError(
+            f"order must be 'morf' or 'lerf', got '{order}'."
+        )
+    
+    # Extract attributions as array
+    attr_array = _extract_attribution_array(explanation, n_features)
+    
+    # Sort features by attribution
+    if use_absolute:
+        sort_values = np.abs(attr_array)
+    else:
+        sort_values = attr_array
+    
+    if order == "morf":
+        # Most Relevant First: descending order
+        sorted_indices = np.argsort(-sort_values)
+    else:
+        # Least Relevant First: ascending order
+        sorted_indices = np.argsort(sort_values)
+    
+    # Default percentages
+    if percentages is None:
+        percentages = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    
+    # Validate percentages
+    percentages = [p for p in percentages if 0 < p < 1]
+    if not percentages:
+        raise ValueError("percentages must contain values in (0, 1).")
+    percentages = sorted(percentages)
+    
+    # Determine target class
+    if target_class is None:
+        pred = get_prediction_value(model, instance.reshape(1, -1))
+        if isinstance(pred, np.ndarray) and pred.ndim > 0:
+            target_class = int(np.argmax(pred))
+        else:
+            target_class = 0
+    
+    # Get original prediction for the target class
+    original_pred = get_prediction_value(model, instance.reshape(1, -1))
+    if isinstance(original_pred, np.ndarray) and original_pred.ndim > 0 and len(original_pred) > target_class:
+        original_value = original_pred[target_class]
+    else:
+        original_value = float(original_pred)
+    
+    # Evaluate at each removal percentage
+    prediction_changes = []
+    predictions = []
+    n_removed_list = []
+    
+    for p in percentages:
+        # Number of features to remove at this percentage
+        n_remove = max(1, int(round(p * n_features)))
+        n_remove = min(n_remove, n_features)
+        n_removed_list.append(n_remove)
+        
+        # Determine removed and remaining feature indices
+        removed_indices = sorted_indices[:n_remove].tolist()
+        remaining_indices = sorted_indices[n_remove:].tolist()
+        
+        # Compute seed for this step (deterministic per percentage)
+        step_seed = None
+        if seed is not None:
+            step_seed = seed + int(p * 1000)
+        
+        # Impute removed features using noisy linear imputation
+        imputed = _noisy_linear_impute(
+            instance,
+            removed_indices,
+            remaining_indices,
+            background_data,
+            noise_scale=noise_scale,
+            seed=step_seed,
+        )
+        
+        # Get prediction on imputed sample
+        imputed_pred = get_prediction_value(model, imputed.reshape(1, -1))
+        if isinstance(imputed_pred, np.ndarray) and imputed_pred.ndim > 0 and len(imputed_pred) > target_class:
+            imputed_value = imputed_pred[target_class]
+        else:
+            imputed_value = float(imputed_pred)
+        
+        predictions.append(imputed_value)
+        # Prediction change: drop in confidence (positive = prediction decreased)
+        prediction_changes.append(original_value - imputed_value)
+    
+    prediction_changes = np.array(prediction_changes)
+    predictions = np.array(predictions)
+    
+    # Score: mean prediction change across percentages
+    score = float(np.mean(prediction_changes))
+    
+    if return_details:
+        return {
+            "score": score,
+            "prediction_changes": prediction_changes,
+            "predictions": predictions,
+            "percentages": percentages,
+            "n_removed": n_removed_list,
+            "feature_order": sorted_indices,
+            "order": order,
+            "original_prediction": original_value,
+        }
+    
+    return score
+
+
+def compute_road_combined(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    background_data: np.ndarray,
+    target_class: int = None,
+    percentages: List[float] = None,
+    noise_scale: float = 1.0,
+    use_absolute: bool = True,
+    seed: int = None,
+) -> Dict[str, Union[float, Dict[str, float]]]:
+    """
+    Compute combined ROAD-MoRF and ROAD-LeRF scores.
+    
+    This variant evaluates both removal orderings and provides a combined
+    assessment. A good explanation should have high MoRF score (removing
+    important features hurts) and low LeRF score (removing unimportant
+    features doesn't hurt), so a large gap (MoRF - LeRF) indicates a
+    faithful explanation.
+    
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        background_data: Training data for fitting imputation models
+        target_class: Target class index for probability (default: predicted class)
+        percentages: List of removal percentages as fractions in (0, 1)
+        noise_scale: Scale factor for imputation noise
+        use_absolute: If True, sort features by absolute attribution value
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary with:
+            - 'morf': float - ROAD-MoRF score (higher is better)
+            - 'lerf': float - ROAD-LeRF score (lower is better)
+            - 'gap': float - MoRF minus LeRF (higher gap = better explanation)
+            - 'scores': Dict[str, float] - Both scores by name
+    """
+    morf_seed = seed
+    lerf_seed = seed + 10000 if seed is not None else None
+    
+    morf_score = compute_road(
+        model, instance, explanation,
+        background_data=background_data,
+        target_class=target_class,
+        percentages=percentages,
+        order="morf",
+        noise_scale=noise_scale,
+        use_absolute=use_absolute,
+        seed=morf_seed,
+    )
+    
+    lerf_score = compute_road(
+        model, instance, explanation,
+        background_data=background_data,
+        target_class=target_class,
+        percentages=percentages,
+        order="lerf",
+        noise_scale=noise_scale,
+        use_absolute=use_absolute,
+        seed=lerf_seed,
+    )
+    
+    return {
+        "morf": float(morf_score),
+        "lerf": float(lerf_score),
+        "gap": float(morf_score - lerf_score),
+        "scores": {"morf": float(morf_score), "lerf": float(lerf_score)},
+    }
+
+
+def compute_batch_road(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    background_data: np.ndarray = None,
+    max_samples: int = None,
+    percentages: List[float] = None,
+    order: str = "morf",
+    noise_scale: float = 1.0,
+    use_absolute: bool = True,
+    seed: int = None,
+) -> Dict[str, float]:
+    """
+    Compute average ROAD score over a batch of instances.
+    
+    Args:
+        model: Model adapter
+        X: Input data (2D array)
+        explanations: List of Explanation objects (one per instance)
+        background_data: Training data for imputation (default: uses X)
+        max_samples: Maximum number of samples to evaluate
+        percentages: Removal percentages (default: [0.1, ..., 0.9])
+        order: Feature removal order ('morf' or 'lerf')
+        noise_scale: Scale factor for imputation noise
+        use_absolute: If True, sort features by absolute attribution value
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary with mean, std, min, max, and count of valid scores
+    """
+    if background_data is None:
+        background_data = X
+    
+    n_instances = len(explanations)
+    if max_samples:
+        n_instances = min(n_instances, max_samples)
+    
+    scores = []
+    
+    for i in range(n_instances):
+        try:
+            current_seed = seed + i if seed is not None else None
+            score = compute_road(
+                model, X[i], explanations[i],
+                background_data=background_data,
+                percentages=percentages,
+                order=order,
+                noise_scale=noise_scale,
+                use_absolute=use_absolute,
+                seed=current_seed,
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+    
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+    
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
 # Metric 1: Faithfulness Estimate (Alvarez-Melis & Jaakkola, 2018)
 # =============================================================================
 
