@@ -7,6 +7,7 @@ Includes:
 - Stability metrics (RIS, ROS, Lipschitz)
 - Perturbation metrics (AOPC, ROAR)
 - Extended faithfulness metrics (Phase 1 expansion)
+- Insertion/Deletion AUC (Petsiuk et al., 2018)
 """
 
 from explainiverse.evaluation.metrics import (
@@ -61,6 +62,11 @@ from explainiverse.evaluation.faithfulness_extended import (
     compute_road,
     compute_road_combined,
     compute_batch_road,
+    compute_deletion_auc,
+    compute_batch_deletion_auc,
+    compute_insertion_auc,
+    compute_batch_insertion_auc,
+    compute_insertion_deletion_auc,
 )
 
 __all__ = [
@@ -110,4 +116,10 @@ __all__ = [
     "compute_road",
     "compute_road_combined",
     "compute_batch_road",
+    # Insertion/Deletion AUC (Petsiuk et al., 2018)
+    "compute_deletion_auc",
+    "compute_batch_deletion_auc",
+    "compute_insertion_auc",
+    "compute_batch_insertion_auc",
+    "compute_insertion_deletion_auc",
 ]

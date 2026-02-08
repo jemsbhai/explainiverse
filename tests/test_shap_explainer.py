@@ -56,7 +56,7 @@ def test_shap_logistic_regression_multiclass():
     class_names = data.target_names.tolist()
     feature_names = data.feature_names
 
-    model = LogisticRegression(multi_class='multinomial', solver='lbfgs', max_iter=200)
+    model = LogisticRegression(solver='lbfgs', max_iter=1000)
     model.fit(X, y)
     adapter = SklearnAdapter(model, class_names=class_names)
 

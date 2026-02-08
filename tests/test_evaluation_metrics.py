@@ -37,7 +37,7 @@ def test_aopc_lime_vs_shap():
     class_names = iris.target_names.tolist()
     feature_names = list(iris.feature_names)
 
-    model = LogisticRegression(max_iter=200)
+    model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
     adapter = SklearnAdapter(model, class_names=class_names)
 
@@ -83,7 +83,7 @@ def test_batch_aopc_lime_vs_shap():
     class_names = iris.target_names.tolist()
     feature_names = list(iris.feature_names)
 
-    model = LogisticRegression(max_iter=200)
+    model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
     adapter = SklearnAdapter(model, class_names=class_names)
 
@@ -142,7 +142,7 @@ def test_roar_lime_vs_shap():
     )
 
     model_class = LogisticRegression
-    model_args = {"max_iter": 200}
+    model_args = {"max_iter": 1000}
 
     base_model = model_class(**model_args)
     base_model.fit(X_train, y_train)
@@ -203,8 +203,10 @@ def test_roar_lime_vs_shap():
 # ROAR Tests - Multiple Models
 # =============================================================================
 
-def _test_roar_per_model(model_class, model_name):
+def _test_roar_per_model(model_class, model_name, model_kwargs=None):
     """Helper function to test ROAR for a specific model type."""
+    if model_kwargs is None:
+        model_kwargs = {}
     iris = load_iris()
     X, y = iris.data, iris.target
     class_names = iris.target_names.tolist()
@@ -216,7 +218,7 @@ def _test_roar_per_model(model_class, model_name):
 
     print(f"\n[ROAR Test: {model_name}]")
     try:
-        model = model_class()
+        model = model_class(**model_kwargs)
         model.fit(X_train, y_train)
         adapter = SklearnAdapter(model, class_names=class_names)
 
@@ -238,8 +240,8 @@ def _test_roar_per_model(model_class, model_name):
         for e in lime_exps + shap_exps:
             e.feature_names = feature_names
 
-        roar_lime = compute_roar(model_class, X_train, y_train, X_test, y_test, lime_exps, top_k=2)
-        roar_shap = compute_roar(model_class, X_train, y_train, X_test, y_test, shap_exps, top_k=2)
+        roar_lime = compute_roar(model_class, X_train, y_train, X_test, y_test, lime_exps, top_k=2, model_kwargs=model_kwargs)
+        roar_shap = compute_roar(model_class, X_train, y_train, X_test, y_test, shap_exps, top_k=2, model_kwargs=model_kwargs)
 
         print(f"  ROAR Drop - LIME: {roar_lime:.4f}")
         print(f"  ROAR Drop - SHAP: {roar_shap:.4f}")
@@ -253,7 +255,7 @@ def _test_roar_per_model(model_class, model_name):
 
 def test_roar_logistic_regression():
     """ROAR with Logistic Regression."""
-    roar_lime, roar_shap = _test_roar_per_model(LogisticRegression, "LogisticRegression")
+    roar_lime, roar_shap = _test_roar_per_model(LogisticRegression, "LogisticRegression", model_kwargs={"max_iter": 1000})
     assert isinstance(roar_lime, float)
     assert isinstance(roar_shap, float)
 
@@ -312,15 +314,15 @@ def test_roar_multiple_models():
     )
 
     model_variants = {
-        "logreg": LogisticRegression,
-        "rf": RandomForestClassifier
+        "logreg": (LogisticRegression, {"max_iter": 1000}),
+        "rf": (RandomForestClassifier, {})
     }
 
     results = {}
-    for model_name, model_class in model_variants.items():
+    for model_name, (model_class, model_kwargs) in model_variants.items():
         print(f"\n[ROAR Test: {model_name}]")
 
-        model = model_class()
+        model = model_class(**model_kwargs)
         model.fit(X_train, y_train)
         adapter = SklearnAdapter(model, class_names=class_names)
 
@@ -342,8 +344,8 @@ def test_roar_multiple_models():
         for e in lime_exps + shap_exps:
             e.feature_names = feature_names
 
-        roar_lime = compute_roar(model_class, X_train, y_train, X_test, y_test, lime_exps, top_k=2)
-        roar_shap = compute_roar(model_class, X_train, y_train, X_test, y_test, shap_exps, top_k=2)
+        roar_lime = compute_roar(model_class, X_train, y_train, X_test, y_test, lime_exps, top_k=2, model_kwargs=model_kwargs)
+        roar_shap = compute_roar(model_class, X_train, y_train, X_test, y_test, shap_exps, top_k=2, model_kwargs=model_kwargs)
 
         print(f"  ROAR Drop - LIME: {roar_lime:.4f}")
         print(f"  ROAR Drop - SHAP: {roar_shap:.4f}")
@@ -359,20 +361,20 @@ def test_roar_multiple_models():
 def test_roar_all_supported_models():
     """Comprehensive test of ROAR across all supported model types."""
     model_classes = {
-        "logreg": LogisticRegression,
-        "rf": RandomForestClassifier,
-        "gb": GradientBoostingClassifier,
-        "svc": SVC,
-        "knn": KNeighborsClassifier,
-        "nb": GaussianNB,
+        "logreg": (LogisticRegression, {"max_iter": 1000}),
+        "rf": (RandomForestClassifier, {}),
+        "gb": (GradientBoostingClassifier, {}),
+        "svc": (SVC, {}),
+        "knn": (KNeighborsClassifier, {}),
+        "nb": (GaussianNB, {}),
     }
     
-    model_classes["xgb"] = XGBClassifier
+    model_classes["xgb"] = (XGBClassifier, {})
 
     successful = 0
-    for name, cls in model_classes.items():
+    for name, (cls, kwargs) in model_classes.items():
         try:
-            _test_roar_per_model(cls, name)
+            _test_roar_per_model(cls, name, model_kwargs=kwargs)
             successful += 1
         except Exception as e:
             print(f"  [WARNING] {name} failed: {e}")

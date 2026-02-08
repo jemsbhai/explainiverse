@@ -15,6 +15,8 @@ Phase 1 metrics for exceeding OpenXAI/Quantus:
 - ROAD (Rong et al., 2022)
 - Insertion AUC (Petsiuk et al., 2018)
 - Deletion AUC (Petsiuk et al., 2018)
+
+All 12 Phase 1 faithfulness metrics are now complete.
 """
 import numpy as np
 import re
@@ -158,7 +160,7 @@ def _noisy_linear_impute(
             
             # Predict for the instance
             x_aug = np.column_stack([x_remaining, np.ones(1)])
-            predicted = float(x_aug @ coeffs)
+            predicted = float((x_aug @ coeffs).item())
             
             # Compute residual standard deviation
             y_pred_train = X_aug @ coeffs
@@ -522,6 +524,569 @@ def compute_batch_road(
 
 
 # =============================================================================
+# Metric 11: Deletion AUC (Petsiuk et al., 2018)
+# =============================================================================
+
+
+def _get_target_class_prediction(
+    model,
+    instance_2d: np.ndarray,
+    target_class: int,
+) -> float:
+    """
+    Get the predicted probability for a specific target class.
+
+    Handles both raw scikit-learn models and explainiverse adapters.
+    Unlike get_prediction_value (which returns the max probability),
+    this function extracts the probability for a *specific* class index.
+
+    Args:
+        model: Model with predict or predict_proba method
+        instance_2d: Input instance reshaped to 2D (1, n_features)
+        target_class: Class index to extract probability for
+
+    Returns:
+        Probability value for the target class (float)
+    """
+    instance_2d = np.asarray(instance_2d)
+    if instance_2d.ndim == 1:
+        instance_2d = instance_2d.reshape(1, -1)
+
+    # Try predict_proba first (raw sklearn model)
+    if hasattr(model, 'predict_proba'):
+        proba = model.predict_proba(instance_2d)
+        if isinstance(proba, np.ndarray):
+            if proba.ndim == 2 and proba.shape[1] > target_class:
+                return float(proba[0, target_class])
+            elif proba.ndim == 1 and len(proba) > target_class:
+                return float(proba[target_class])
+        return float(np.max(proba))
+
+    # Fall back to predict (adapter returns probs from predict)
+    pred = model.predict(instance_2d)
+    if isinstance(pred, np.ndarray):
+        if pred.ndim == 2 and pred.shape[1] > target_class:
+            return float(pred[0, target_class])
+        elif pred.ndim == 1 and len(pred) > target_class:
+            return float(pred[target_class])
+    return float(pred)
+
+
+def _resolve_target_class(
+    model,
+    instance: np.ndarray,
+) -> int:
+    """
+    Determine the target class as the model's predicted class for this instance.
+
+    Args:
+        model: Model adapter
+        instance: 1D input instance
+
+    Returns:
+        Predicted class index
+    """
+    instance_2d = np.asarray(instance).reshape(1, -1)
+
+    if hasattr(model, 'predict_proba'):
+        proba = model.predict_proba(instance_2d)
+        if isinstance(proba, np.ndarray):
+            if proba.ndim == 2:
+                return int(np.argmax(proba[0]))
+            return int(np.argmax(proba))
+
+    pred = model.predict(instance_2d)
+    if isinstance(pred, np.ndarray):
+        if pred.ndim == 2:
+            return int(np.argmax(pred[0]))
+        elif pred.ndim == 1 and len(pred) > 1:
+            return int(np.argmax(pred))
+    return 0
+
+
+def compute_deletion_auc(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    use_absolute: bool = True,
+    n_steps: int = None,
+    return_curve: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    """
+    Compute Deletion AUC score (Petsiuk et al., 2018).
+
+    Progressively removes features from the original input in order of
+    decreasing attribution (most important first), recording the model's
+    predicted probability for the target class at each step. The Deletion
+    AUC is the Area Under this degradation Curve (AUC), normalized to [0, 1].
+
+    A faithful explanation identifies features that, when removed, cause a
+    rapid drop in the target class probability. Therefore, **lower Deletion
+    AUC indicates a better explanation**.
+
+    The metric differs from Pixel Flipping in its formulation:
+    - Pixel Flipping normalizes predictions relative to the original value.
+    - Deletion AUC tracks raw class probabilities on the y-axis (as in the
+      original RISE paper), giving a more interpretable curve whose y-axis
+      represents actual prediction confidence.
+
+    When ``n_steps`` is specified the metric uses percentage-based steps
+    (removing a fraction of features at each step) rather than one feature
+    at a time, which is useful for high-dimensional inputs.
+
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature removal ("mean", "median", scalar,
+            array, or callable). Removed features are replaced with the
+            corresponding baseline value.
+        background_data: Reference data for computing baseline
+            (required when ``baseline`` is "mean" or "median")
+        target_class: Target class index whose probability is tracked.
+            Default: model's predicted class for this instance.
+        use_absolute: If True, sort features by absolute attribution value
+        n_steps: Number of evenly spaced removal steps. If None, removes
+            one feature at a time (n_steps = n_features). If specified,
+            features are removed in chunks of size ceil(n_features/n_steps).
+        return_curve: If True, return full curve details
+
+    Returns:
+        If return_curve=False:
+            Deletion AUC (float, 0 to 1). **Lower is better.**
+        If return_curve=True:
+            Dictionary with:
+            - 'auc': float — Area under deletion curve
+            - 'curve': np.ndarray — Predicted probability at each step
+            - 'fractions': np.ndarray — Fraction of features removed at
+              each step (from 0 to 1)
+            - 'feature_order': np.ndarray — Feature indices in removal
+              order
+            - 'n_features': int — Total number of features
+            - 'target_class': int — Class tracked
+            - 'original_prediction': float — Prediction before any removal
+
+    References:
+        Petsiuk, V., Das, A., & Saenko, K. (2018). RISE: Randomized Input
+        Sampling for Explanation of Black-box Models. Proceedings of the
+        British Machine Vision Conference (BMVC).
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+
+    # Extract and sort attributions
+    attr_array = _extract_attribution_array(explanation, n_features)
+    if use_absolute:
+        sorted_indices = np.argsort(-np.abs(attr_array))
+    else:
+        sorted_indices = np.argsort(-attr_array)
+
+    # Determine target class
+    if target_class is None:
+        target_class = _resolve_target_class(model, instance)
+
+    # Determine removal schedule
+    if n_steps is not None:
+        # Percentage-based steps: remove features in chunks
+        n_steps = max(1, min(n_steps, n_features))
+        step_sizes = np.round(
+            np.linspace(0, n_features, n_steps + 1)
+        ).astype(int)
+        # step_sizes[i] = cumulative number of features removed after step i
+        removal_counts = step_sizes[1:]  # exclude the 0
+    else:
+        # One feature at a time
+        removal_counts = np.arange(1, n_features + 1)
+
+    # Get original prediction (step 0: no features removed)
+    original_pred = _get_target_class_prediction(
+        model, instance.reshape(1, -1), target_class
+    )
+
+    # Build the deletion curve
+    predictions = [original_pred]
+    fractions = [0.0]
+    current = instance.copy()
+    prev_count = 0
+
+    for count in removal_counts:
+        # Remove features from prev_count to count
+        for idx in sorted_indices[prev_count:count]:
+            current[idx] = baseline_values[idx]
+        prev_count = count
+
+        # Record prediction
+        pred_val = _get_target_class_prediction(
+            model, current.reshape(1, -1), target_class
+        )
+        predictions.append(pred_val)
+        fractions.append(float(count) / float(n_features))
+
+    predictions = np.array(predictions)
+    fractions = np.array(fractions)
+
+    # Compute AUC using trapezoidal rule
+    # x-axis: fraction of features removed [0, 1]
+    # y-axis: target class probability
+    auc = float(np.trapz(predictions, fractions))
+
+    if return_curve:
+        return {
+            "auc": auc,
+            "curve": predictions,
+            "fractions": fractions,
+            "feature_order": sorted_indices,
+            "n_features": n_features,
+            "target_class": target_class,
+            "original_prediction": original_pred,
+        }
+
+    return auc
+
+
+def compute_batch_deletion_auc(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    use_absolute: bool = True,
+    n_steps: int = None,
+) -> Dict[str, float]:
+    """
+    Compute average Deletion AUC over a batch of instances.
+
+    Args:
+        model: Model adapter
+        X: Input data (2D array, one row per instance)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature removal
+        max_samples: Maximum number of samples to evaluate
+        use_absolute: If True, sort features by absolute attribution value
+        n_steps: Number of removal steps per instance (None = one per feature)
+
+    Returns:
+        Dictionary with mean, std, min, max, and n_samples of valid scores.
+        Lower mean indicates better explanations on average.
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+
+    scores = []
+
+    for i in range(n_samples):
+        try:
+            score = compute_deletion_auc(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                use_absolute=use_absolute,
+                n_steps=n_steps,
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
+# Metric 12: Insertion AUC (Petsiuk et al., 2018)
+# =============================================================================
+
+
+def compute_insertion_auc(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    use_absolute: bool = True,
+    n_steps: int = None,
+    return_curve: bool = False,
+) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    """
+    Compute Insertion AUC score (Petsiuk et al., 2018).
+
+    Starts from a baseline input (all features at baseline values) and
+    progressively inserts features in order of decreasing attribution
+    (most important first), recording the model's predicted probability
+    for the target class at each step. The Insertion AUC is the Area Under
+    this recovery Curve, normalized to [0, 1].
+
+    A faithful explanation identifies features that, when inserted, cause a
+    rapid rise in the target class probability. Therefore, **higher Insertion
+    AUC indicates a better explanation**.
+
+    The Insertion metric is the natural complement to the Deletion metric.
+    Together they provide a comprehensive view of explanation faithfulness:
+    Deletion measures whether attributed features are truly needed, while
+    Insertion measures whether they are truly sufficient.
+
+    When ``n_steps`` is specified the metric uses percentage-based steps
+    (inserting a fraction of features at each step) rather than one feature
+    at a time.
+
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for the starting state ("mean", "median",
+            scalar, array, or callable). The initial input is set entirely
+            to baseline values.
+        background_data: Reference data for computing baseline
+            (required when ``baseline`` is "mean" or "median")
+        target_class: Target class index whose probability is tracked.
+            Default: model's predicted class for the original instance.
+        use_absolute: If True, sort features by absolute attribution value
+        n_steps: Number of evenly spaced insertion steps. If None, inserts
+            one feature at a time (n_steps = n_features). If specified,
+            features are inserted in chunks of size ceil(n_features/n_steps).
+        return_curve: If True, return full curve details
+
+    Returns:
+        If return_curve=False:
+            Insertion AUC (float, 0 to 1). **Higher is better.**
+        If return_curve=True:
+            Dictionary with:
+            - 'auc': float — Area under insertion curve
+            - 'curve': np.ndarray — Predicted probability at each step
+            - 'fractions': np.ndarray — Fraction of features inserted at
+              each step (from 0 to 1)
+            - 'feature_order': np.ndarray — Feature indices in insertion
+              order
+            - 'n_features': int — Total number of features
+            - 'target_class': int — Class tracked
+            - 'baseline_prediction': float — Prediction from baseline state
+            - 'final_prediction': float — Prediction after all features
+              inserted (should match original prediction)
+
+    References:
+        Petsiuk, V., Das, A., & Saenko, K. (2018). RISE: Randomized Input
+        Sampling for Explanation of Black-box Models. Proceedings of the
+        British Machine Vision Conference (BMVC).
+    """
+    instance = np.asarray(instance).flatten()
+    n_features = len(instance)
+
+    # Get baseline values
+    baseline_values = compute_baseline_values(
+        baseline, background_data, n_features
+    )
+
+    # Extract and sort attributions
+    attr_array = _extract_attribution_array(explanation, n_features)
+    if use_absolute:
+        sorted_indices = np.argsort(-np.abs(attr_array))
+    else:
+        sorted_indices = np.argsort(-attr_array)
+
+    # Determine target class from the ORIGINAL instance
+    if target_class is None:
+        target_class = _resolve_target_class(model, instance)
+
+    # Determine insertion schedule
+    if n_steps is not None:
+        n_steps = max(1, min(n_steps, n_features))
+        step_sizes = np.round(
+            np.linspace(0, n_features, n_steps + 1)
+        ).astype(int)
+        insertion_counts = step_sizes[1:]  # cumulative features inserted
+    else:
+        insertion_counts = np.arange(1, n_features + 1)
+
+    # Start from baseline (all features at baseline)
+    current = baseline_values.copy()
+
+    # Get baseline prediction (step 0: no features from original)
+    baseline_pred = _get_target_class_prediction(
+        model, current.reshape(1, -1), target_class
+    )
+
+    # Build the insertion curve
+    predictions = [baseline_pred]
+    fractions = [0.0]
+    prev_count = 0
+
+    for count in insertion_counts:
+        # Insert features from prev_count to count
+        for idx in sorted_indices[prev_count:count]:
+            current[idx] = instance[idx]
+        prev_count = count
+
+        # Record prediction
+        pred_val = _get_target_class_prediction(
+            model, current.reshape(1, -1), target_class
+        )
+        predictions.append(pred_val)
+        fractions.append(float(count) / float(n_features))
+
+    predictions = np.array(predictions)
+    fractions = np.array(fractions)
+
+    # Compute AUC using trapezoidal rule
+    # x-axis: fraction of features inserted [0, 1]
+    # y-axis: target class probability
+    auc = float(np.trapz(predictions, fractions))
+
+    if return_curve:
+        return {
+            "auc": auc,
+            "curve": predictions,
+            "fractions": fractions,
+            "feature_order": sorted_indices,
+            "n_features": n_features,
+            "target_class": target_class,
+            "baseline_prediction": baseline_pred,
+            "final_prediction": float(predictions[-1]),
+        }
+
+    return auc
+
+
+def compute_batch_insertion_auc(
+    model,
+    X: np.ndarray,
+    explanations: List[Explanation],
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    max_samples: int = None,
+    use_absolute: bool = True,
+    n_steps: int = None,
+) -> Dict[str, float]:
+    """
+    Compute average Insertion AUC over a batch of instances.
+
+    Args:
+        model: Model adapter
+        X: Input data (2D array, one row per instance)
+        explanations: List of Explanation objects (one per instance)
+        baseline: Baseline for feature insertion starting state
+        max_samples: Maximum number of samples to evaluate
+        use_absolute: If True, sort features by absolute attribution value
+        n_steps: Number of insertion steps per instance (None = one per feature)
+
+    Returns:
+        Dictionary with mean, std, min, max, and n_samples of valid scores.
+        Higher mean indicates better explanations on average.
+    """
+    n_samples = len(explanations)
+    if max_samples:
+        n_samples = min(n_samples, max_samples)
+
+    scores = []
+
+    for i in range(n_samples):
+        try:
+            score = compute_insertion_auc(
+                model, X[i], explanations[i],
+                baseline=baseline, background_data=X,
+                use_absolute=use_absolute,
+                n_steps=n_steps,
+            )
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            continue
+
+    if not scores:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "n_samples": 0}
+
+    return {
+        "mean": float(np.mean(scores)),
+        "std": float(np.std(scores)),
+        "min": float(np.min(scores)),
+        "max": float(np.max(scores)),
+        "n_samples": len(scores),
+    }
+
+
+# =============================================================================
+# Combined Insertion-Deletion convenience function
+# =============================================================================
+
+
+def compute_insertion_deletion_auc(
+    model,
+    instance: np.ndarray,
+    explanation: Explanation,
+    baseline: Union[str, float, np.ndarray, Callable] = "mean",
+    background_data: np.ndarray = None,
+    target_class: int = None,
+    use_absolute: bool = True,
+    n_steps: int = None,
+) -> Dict[str, float]:
+    """
+    Compute both Insertion and Deletion AUC in a single call.
+
+    Provides a comprehensive faithfulness assessment by combining the two
+    complementary metrics from Petsiuk et al. (2018). Also returns their
+    difference (Insertion − Deletion), which summarizes overall explanation
+    quality as a single number: higher difference indicates better faithfulness.
+
+    Args:
+        model: Model adapter with predict/predict_proba method
+        instance: Input instance (1D array)
+        explanation: Explanation object with feature_attributions
+        baseline: Baseline for feature operations
+        background_data: Reference data for computing baseline
+        target_class: Target class index (default: predicted class)
+        use_absolute: If True, sort features by absolute attribution value
+        n_steps: Number of steps per curve (None = one per feature)
+
+    Returns:
+        Dictionary with:
+        - 'insertion_auc': float — Insertion AUC (higher is better)
+        - 'deletion_auc': float — Deletion AUC (lower is better)
+        - 'delta': float — insertion_auc − deletion_auc (higher is better)
+
+    References:
+        Petsiuk, V., Das, A., & Saenko, K. (2018). RISE: Randomized Input
+        Sampling for Explanation of Black-box Models. BMVC.
+    """
+    ins = compute_insertion_auc(
+        model, instance, explanation,
+        baseline=baseline,
+        background_data=background_data,
+        target_class=target_class,
+        use_absolute=use_absolute,
+        n_steps=n_steps,
+    )
+    dele = compute_deletion_auc(
+        model, instance, explanation,
+        baseline=baseline,
+        background_data=background_data,
+        target_class=target_class,
+        use_absolute=use_absolute,
+        n_steps=n_steps,
+    )
+
+    return {
+        "insertion_auc": float(ins),
+        "deletion_auc": float(dele),
+        "delta": float(ins) - float(dele),
+    }
+
+
+# =============================================================================
 # Metric 1: Faithfulness Estimate (Alvarez-Melis & Jaakkola, 2018)
 # =============================================================================
 
@@ -602,6 +1167,10 @@ def compute_faithfulness_estimate(
         
         if len(prediction_changes) < 2:
             return 0.0  # Not enough data points for correlation
+        
+        # Check for constant arrays (would produce undefined correlation)
+        if np.std(attribution_values) < 1e-10 or np.std(prediction_changes) < 1e-10:
+            return 0.0
         
         # Compute Pearson correlation
         corr, _ = stats.pearsonr(attribution_values, prediction_changes)

@@ -568,7 +568,7 @@ class TestTreeSHAP:
         X, y = iris.data, iris.target
         X_train, X_test, _, _ = train_test_split(X, y, test_size=0.3, random_state=42)
         
-        model = XGBClassifier(n_estimators=50, random_state=42, use_label_encoder=False, eval_metric='mlogloss')
+        model = XGBClassifier(n_estimators=50, random_state=42, eval_metric='mlogloss')
         model.fit(X_train, y[:len(X_train)])
         
         explainer = TreeShapExplainer(

@@ -62,6 +62,8 @@ Example:
     explanation = explainer.explain(instance)
 """
 
+from __future__ import annotations
+
 import numpy as np
 from typing import List, Optional, Dict, Any, Tuple, Union
 from collections import OrderedDict
