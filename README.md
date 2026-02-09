@@ -876,7 +876,7 @@ If you use Explainiverse in your research, please cite:
   author = {Syed, Muntaser},
   year = {2025},
   url = {https://github.com/jemsbhai/explainiverse},
-  version = {0.8.4}
+  version = {0.9.1}
 }
 ```
 

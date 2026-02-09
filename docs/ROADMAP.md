@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.8.11
+- **Current Version:** v0.9.1
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -86,7 +86,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 
 | Phase | Version | Category | New Metrics | Running Total |
 |-------|---------|----------|-------------|---------------|
-| 1 | v0.9.0 | Faithfulness | +6 | 22 |
+| 1 | v0.9.x | Faithfulness | +6 | 22 |
 | 2 | v0.10.0 | Robustness | +7 | 28 |
 | 3 | v0.11.0 | Localisation | +8 | 36 |
 | 4 | v0.12.0 | Complexity | +4 | 40 |
@@ -98,7 +98,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 
 ## Phase 1: Faithfulness Metrics (In Progress)
 
-**Target:** v0.9.0 with 12 additional faithfulness metrics (10/12 complete, 83%)
+**Target:** v0.9.x with 12 additional faithfulness metrics (10/12 complete, 83%)
 
 | # | Metric | Reference | Status | Version |
 |---|--------|-----------|--------|---------|
@@ -232,6 +232,8 @@ explainiverse/
 | v0.8.9 | Feb 2025 | IROF metric (Rieger & Hansen, 2020) |
 | v0.8.10 | Feb 2025 | Infidelity metric (Yeh et al., 2019) |
 | v0.8.11 | Feb 2025 | ROAD metric (Rong et al., 2022) |
+| v0.9.0 | Feb 2025 | Warning elimination (0 warnings), dependency audit, xgboost <4.0 support |
+| v0.9.1 | Feb 2025 | Fix xgboost 3.x compatibility with SHAP TreeExplainer (base_score array parsing) |
 
 ---
 
@@ -257,4 +259,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.8.11)*
+*Last updated: February 2025 (v0.9.1)*

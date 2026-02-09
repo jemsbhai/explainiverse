@@ -144,7 +144,7 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.8.11)
+### Current Strengths (v0.9.1)
 
 | Strength | Description |
 |----------|-------------|
@@ -157,8 +157,9 @@
 | **Anchors** | Rule-based explanations - only Alibi has this |
 | **ProtoDash** | Example-based with importance weights - only AIX360 has this |
 | **Clean API** | Consistent BaseExplainer interface across all methods |
+| **xgboost 3.x Support** | Compatible with xgboost 1.7–3.x via automatic SHAP compatibility patching |
 
-### Current Implementation (v0.8.11)
+### Current Implementation (v0.9.1)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -279,5 +280,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.8.11)*
+*Last updated: February 2025 (v0.9.1)*
 *Next review: After Phase 1 completion*
