@@ -17,12 +17,17 @@ Supported Models:
     - CatBoost: CatBoostClassifier, CatBoostRegressor (if installed)
 """
 
+import json
+import logging
+
 import numpy as np
 import shap
 from typing import List, Optional, Union
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+
+logger = logging.getLogger(__name__)
 
 
 # Tree-based model types that TreeSHAP supports
@@ -64,6 +69,94 @@ def _get_raw_model(model):
     if hasattr(model, 'model'):
         return model.model
     return model
+
+
+def _patch_shap_xgboost3_compat():
+    """
+    Monkey-patch SHAP's ``XGBTreeModelLoader`` for xgboost >= 3.0 compat.
+
+    In xgboost 3.x, multiclass models serialize ``base_score`` as a JSON
+    array string (e.g. ``'[4.76E-1,4.76E-1,4.76E-2]'``), but SHAP <= 0.50
+    calls ``float(base_score)`` in ``XGBTreeModelLoader.__init__`` and
+    raises ``ValueError``.
+
+    This function wraps that ``__init__`` so the ``ValueError`` is caught
+    and the array is parsed correctly.  The per-class base scores are
+    stored as ``loader.original_base_scores`` for downstream use.
+
+    The patch is idempotent — calling it multiple times is safe.
+
+    Notes
+    -----
+    This workaround is needed until SHAP adds native xgboost 3.x support.
+    See https://github.com/shap/shap/issues/3750
+    """
+    try:
+        from shap.explainers._tree import XGBTreeModelLoader
+    except ImportError:
+        return
+
+    if getattr(XGBTreeModelLoader, '_explainiverse_patched', False):
+        return
+
+    _original_init = XGBTreeModelLoader.__init__
+
+    def _patched_init(self, xgb_model):
+        """Wrap original init to handle xgboost 3.x array base_score."""
+        try:
+            _original_init(self, xgb_model)
+            self.original_base_scores = None
+        except ValueError as exc:
+            if "could not convert string to float" not in str(exc):
+                raise
+
+            # ----- Fix the data and retry the original init -----
+            # xgboost 3.x serializes multiclass base_score as a JSON array
+            # string (e.g. '[0.476,0.476,0.048]') inside the UBJ model
+            # dump.  SHAP's init calls float() on it and fails.
+            #
+            # Strategy: temporarily monkey-patch decode_ubjson_buffer so
+            # that the base_score is replaced with its scalar mean *before*
+            # the original init reads it.  This lets ALL of the original
+            # attribute-setting code run unmodified (node_cleft, values,
+            # thresholds, categories, etc.).
+            import shap.explainers._tree as _tree_mod
+
+            _orig_decode = _tree_mod.decode_ubjson_buffer
+            _captured_base_scores = [None]  # mutable closure for per-class scores
+
+            def _fixed_decode(fd):
+                result = _orig_decode(fd)
+                bs = result["learner"]["learner_model_param"]["base_score"]
+                if isinstance(bs, str) and bs.startswith("["):
+                    per_class = [float(v) for v in json.loads(bs)]
+                    _captured_base_scores[0] = per_class
+                    scalar_mean = float(np.mean(per_class))
+                    result["learner"]["learner_model_param"][
+                        "base_score"
+                    ] = str(scalar_mean)
+                return result
+
+            _tree_mod.decode_ubjson_buffer = _fixed_decode
+            try:
+                _original_init(self, xgb_model)
+            finally:
+                _tree_mod.decode_ubjson_buffer = _orig_decode
+
+            self.original_base_scores = _captured_base_scores[0]
+
+            logger.info(
+                "Applied xgboost 3.x base_score fix: parsed %d-class "
+                "array to scalar %.6f",
+                len(self.original_base_scores) if self.original_base_scores else 0,
+                self.base_score,
+            )
+
+    XGBTreeModelLoader.__init__ = _patched_init
+    XGBTreeModelLoader._explainiverse_patched = True
+    logger.debug(
+        "Patched SHAP XGBTreeModelLoader for xgboost 3.x compatibility"
+    )
 
 
 class TreeShapExplainer(BaseExplainer):
@@ -148,7 +241,12 @@ class TreeShapExplainer(BaseExplainer):
         if model_output != "auto":
             explainer_kwargs["model_output"] = model_output
         
+        # Patch SHAP's XGBTreeModelLoader to handle xgboost 3.x array
+        # base_score before constructing TreeExplainer.  Idempotent.
+        _patch_shap_xgboost3_compat()
+        
         self.explainer = shap.TreeExplainer(raw_model, **explainer_kwargs)
+        
         self.background_data = background_data
     
     def explain(

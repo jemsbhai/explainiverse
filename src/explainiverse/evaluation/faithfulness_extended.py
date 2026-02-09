@@ -23,6 +23,9 @@ import re
 from typing import Union, Callable, List, Dict, Optional, Tuple
 from scipy import stats
 
+# NumPy 2.0 compatibility: np.trapz was renamed to np.trapezoid
+_trapezoid = getattr(np, 'trapezoid', np.trapz)
+
 from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation._utils import (
     get_sorted_feature_indices,
@@ -736,7 +739,7 @@ def compute_deletion_auc(
     # Compute AUC using trapezoidal rule
     # x-axis: fraction of features removed [0, 1]
     # y-axis: target class probability
-    auc = float(np.trapz(predictions, fractions))
+    auc = float(_trapezoid(predictions, fractions))
 
     if return_curve:
         return {
@@ -946,7 +949,7 @@ def compute_insertion_auc(
     # Compute AUC using trapezoidal rule
     # x-axis: fraction of features inserted [0, 1]
     # y-axis: target class probability
-    auc = float(np.trapz(predictions, fractions))
+    auc = float(_trapezoid(predictions, fractions))
 
     if return_curve:
         return {
@@ -1414,7 +1417,7 @@ def compute_irof(
     # y-axis: prediction drop (original - perturbed)
     # Higher AOC = more area above baseline = better explanation
     x = np.linspace(0, 1, len(prediction_drops))
-    aoc = np.trapz(prediction_drops, x)
+    aoc = _trapezoid(prediction_drops, x)
     
     if return_details:
         return {
@@ -2539,7 +2542,7 @@ def compute_region_perturbation(
     # x-axis: fraction of regions perturbed (0 to 1)
     # y-axis: relative prediction value
     x = np.linspace(0, 1, len(predictions))
-    auc = np.trapz(curve, x)
+    auc = _trapezoid(curve, x)
     
     if return_curve:
         return {
@@ -2717,7 +2720,7 @@ def compute_pixel_flipping(
     # x-axis: fraction of features removed (0 to 1)
     # y-axis: relative prediction value
     x = np.linspace(0, 1, len(predictions))
-    auc = np.trapz(curve, x)
+    auc = _trapezoid(curve, x)
     
     if return_curve:
         return {
