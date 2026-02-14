@@ -7,6 +7,6 @@ export default defineConfig({
     test: {
         environment: 'jsdom',
         globals: true, // needed for jest-dom matchers if extended globally?
-        // setupFiles: ['./tests/setup.ts'],
+        setupFiles: ['./tests/setup.ts'],
     },
 });
