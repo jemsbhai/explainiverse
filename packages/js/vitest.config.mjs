@@ -5,8 +5,8 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
     plugins: [react()],
     test: {
-        environment: 'jsdom',
-        globals: true, // needed for jest-dom matchers if extended globally?
+        environment: 'happy-dom',
+        globals: true,
         setupFiles: ['./tests/setup.ts'],
     },
 });
