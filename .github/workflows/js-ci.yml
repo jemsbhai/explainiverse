@@ -1,0 +1,41 @@
+name: JS Package CI
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+    paths:
+      - 'packages/js/**'
+  pull_request:
+    branches: [ "main", "develop" ]
+    paths:
+      - 'packages/js/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/js
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+        cache-dependency-path: packages/js/package-lock.json
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run tests
+      run: npm test
+      
+    - name: Build
+      run: npm run build
