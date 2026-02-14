@@ -71,6 +71,10 @@ describe('ExplainerRegistry', () => {
         expect(local.length).toBe(2);
 
         expect(registry.filter({ data_type: 'image' })).toEqual(['image1']);
-        expect(registry.filter({ model_type: 'tree' })).toEqual(['local1']);
+
+        const treeCompatible = registry.filter({ model_type: 'tree' });
+        expect(treeCompatible).toContain('local1');
+        expect(treeCompatible).toContain('global1'); // 'any' matches 'tree'
+        expect(treeCompatible.length).toBe(2);
     });
 });
