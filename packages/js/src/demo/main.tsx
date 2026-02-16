@@ -64,9 +64,11 @@ function DemoApp() {
     }, [selectedTask]);
 
     useEffect(() => {
-        if (selectedClass && MOCK_DATA[selectedTask].defaultFeatures[selectedClass as any]) {
-            // @ts-ignore
-            setFeatures({ ...MOCK_DATA[selectedTask].defaultFeatures[selectedClass] });
+        const taskData = MOCK_DATA[selectedTask];
+        const defaultFeatures = taskData.defaultFeatures as Record<string, Record<string, number>>;
+
+        if (selectedClass && defaultFeatures[selectedClass]) {
+            setFeatures({ ...defaultFeatures[selectedClass] });
         } else {
             setFeatures({});
         }
