@@ -219,12 +219,51 @@ class LRPExplainer(BaseExplainer):
                 return False
         return False
     
+    def _get_model_device(self) -> torch.device:
+        """
+        Detect the device (CPU/CUDA) of the underlying PyTorch model.
+        
+        Returns:
+            torch.device the model parameters reside on
+        """
+        model = self._get_pytorch_model()
+        try:
+            return next(model.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
+    
+    def _has_unflatten_before_conv(self) -> bool:
+        """
+        Check if the model contains an Unflatten or Reshape layer before
+        the first Conv2d. If so, the model expects flat input and handles
+        reshaping internally — we should NOT pre-reshape.
+        
+        Returns:
+            True if Unflatten/Reshape appears before first Conv2d
+        """
+        model = self._get_pytorch_model()
+        if isinstance(model, nn.Sequential):
+            for module in model.children():
+                if isinstance(module, nn.Unflatten):
+                    return True
+                if isinstance(module, nn.Conv2d):
+                    return False
+        else:
+            for module in model.modules():
+                if isinstance(module, nn.Unflatten):
+                    return True
+                if isinstance(module, nn.Conv2d):
+                    return False
+        return False
+    
     def _prepare_input_tensor(self, instance: np.ndarray) -> torch.Tensor:
         """
-        Prepare input tensor with correct shape for the model.
+        Prepare input tensor with correct shape and device for the model.
         
         For CNN models, preserves the spatial dimensions.
         For MLP models, flattens to 2D.
+        Handles models with Unflatten layers that expect flat input.
+        Automatically places tensors on the same device as the model.
         
         Args:
             instance: Input array (1D for tabular, 3D for images)
@@ -236,6 +275,7 @@ class LRPExplainer(BaseExplainer):
         original_shape = instance.shape
         
         model = self._get_pytorch_model()
+        device = self._get_model_device()
         
         # Find first weighted layer to determine input type
         first_layer = None
@@ -244,23 +284,23 @@ class LRPExplainer(BaseExplainer):
                 first_layer = module
                 break
         
-        if isinstance(first_layer, nn.Conv2d):
-            # CNN model - need 4D input (batch, channels, height, width)
+        if isinstance(first_layer, nn.Conv2d) and not self._has_unflatten_before_conv():
+            # CNN model without Unflatten - need 4D input (batch, channels, height, width)
             in_channels = first_layer.in_channels
             
             if len(original_shape) >= 3:
                 # Already (C, H, W) format - just add batch dimension
-                x = torch.tensor(instance).unsqueeze(0)
+                x = torch.tensor(instance, device=device).unsqueeze(0)
             elif len(original_shape) == 2:
                 # (H, W) - assume single channel, add channel and batch dimensions
-                x = torch.tensor(instance).unsqueeze(0).unsqueeze(0)
+                x = torch.tensor(instance, device=device).unsqueeze(0).unsqueeze(0)
             else:
                 # Flattened - try to infer spatial dimensions
                 n_features = instance.size
                 if n_features % in_channels == 0:
                     spatial_size = int(np.sqrt(n_features // in_channels))
                     if spatial_size * spatial_size * in_channels == n_features:
-                        x = torch.tensor(instance.flatten()).reshape(
+                        x = torch.tensor(instance.flatten(), device=device).reshape(
                             1, in_channels, spatial_size, spatial_size
                         )
                     else:
@@ -274,8 +314,8 @@ class LRPExplainer(BaseExplainer):
                         f"input channels ({in_channels})"
                     )
         else:
-            # MLP model - need 2D input (batch, features)
-            x = torch.tensor(instance.flatten()).reshape(1, -1)
+            # MLP model or CNN with Unflatten (model handles reshaping) - need 2D input
+            x = torch.tensor(instance.flatten(), device=device).reshape(1, -1)
         
         return x.float()
     
@@ -754,7 +794,16 @@ class LRPExplainer(BaseExplainer):
         Propagate relevance through MaxPool2d.
         
         Relevance is distributed to the max locations (winner-take-all).
+        Uses the full 4D activation shape as output_size for max_unpool2d
+        to ensure correct spatial reconstruction.
         """
+        # Ensure activation is 4D (batch, channels, height, width)
+        if activation.dim() != 4:
+            raise ValueError(
+                f"MaxPool2d propagation requires 4D activation tensor, "
+                f"got {activation.dim()}D with shape {activation.shape}"
+            )
+        
         # Forward pass to get indices
         _, indices = F.max_pool2d(
             activation,
@@ -766,14 +815,19 @@ class LRPExplainer(BaseExplainer):
             ceil_mode=layer.ceil_mode
         )
         
+        # Ensure relevance matches pooled output shape
+        if relevance.shape != indices.shape:
+            relevance = relevance.reshape(indices.shape)
+        
         # Unpool: place relevance at max locations
+        # output_size must be the full 4D tensor shape (batch, channels, H, W)
         unpooled = F.max_unpool2d(
             relevance,
             indices,
             kernel_size=layer.kernel_size,
             stride=layer.stride,
             padding=layer.padding,
-            output_size=activation.shape
+            output_size=activation.shape  # Full 4D shape
         )
         
         return unpooled

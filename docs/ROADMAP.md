@@ -237,6 +237,7 @@ explainiverse/
 | v0.9.0 | Feb 2025 | Warning elimination (0 warnings), dependency audit, xgboost <4.0 support |
 | v0.9.1 | Feb 2025 | Fix xgboost 3.x compatibility with SHAP TreeExplainer (base_score array parsing) |
 | v0.9.2 | Feb 2025 | LIME default num_features changed to all features; Phase 1 ROADMAP cleanup |
+| v0.9.3 | Feb 2025 | Fix LRP device mismatch (CPU/CUDA), LRP double reshape (Unflatten+Conv2d), LRP MaxPool2d unpooling, GradCAM flat input for Unflatten models, scikit-learn >=1.6 lower bound |
 
 ---
 
@@ -262,4 +263,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.9.2)*
+*Last updated: February 2025 (v0.9.3)*

@@ -217,6 +217,21 @@ class GradCAMExplainer(BaseExplainer):
         
         return resized
     
+    def _model_has_unflatten(self) -> bool:
+        """
+        Check if the underlying model has an Unflatten layer.
+        Models with Unflatten expect flat input and handle reshaping internally.
+        """
+        try:
+            import torch.nn as nn
+            model = self.model.model
+            for module in model.modules():
+                if isinstance(module, nn.Unflatten):
+                    return True
+        except (AttributeError, ImportError):
+            pass
+        return False
+    
     def explain(
         self,
         image: np.ndarray,
@@ -231,6 +246,7 @@ class GradCAMExplainer(BaseExplainer):
                    - (C, H, W) for single image
                    - (1, C, H, W) for batched single image
                    - (H, W, C) will be transposed automatically
+                   - (N,) or (1, N) flat input for models with Unflatten layers
             target_class: Class to explain. If None, uses predicted class.
             resize_to_input: If True, resize heatmap to match input size.
         
@@ -248,10 +264,41 @@ class GradCAMExplainer(BaseExplainer):
                 image = np.transpose(image, (2, 0, 1))[np.newaxis, ...]
         elif image.ndim == 4:
             pass  # Already (N, C, H, W)
+        elif image.ndim <= 2 and self._model_has_unflatten():
+            # Flat input for models with Unflatten layers that reshape internally
+            # Keep as 2D (batch, features) - the model handles spatial reshaping
+            if image.ndim == 1:
+                image = image[np.newaxis, ...]  # Add batch dim: (1, N)
         else:
-            raise ValueError(f"Expected 3D or 4D input, got shape {image.shape}")
+            raise ValueError(
+                f"Expected 3D or 4D input (or flat input for models with Unflatten), "
+                f"got shape {image.shape}"
+            )
         
-        input_size = (image.shape[2], image.shape[3])  # (H, W)
+        # Determine input_size for heatmap resizing
+        if image.ndim == 4:
+            input_size = (image.shape[2], image.shape[3])  # (H, W)
+        else:
+            # For flat input, infer spatial size from the model's Unflatten layer
+            input_size = None
+            try:
+                import torch.nn as nn
+                for module in self.model.model.modules():
+                    if isinstance(module, nn.Unflatten):
+                        dims = module.unflattened_size
+                        if len(dims) >= 2:
+                            input_size = (dims[-2], dims[-1])  # (H, W)
+                        break
+            except (AttributeError, ImportError):
+                pass
+            if input_size is None:
+                # Fallback: try to infer from feature count
+                n_features = image.shape[-1]
+                side = int(np.sqrt(n_features))
+                if side * side == n_features:
+                    input_size = (side, side)
+                else:
+                    input_size = (1, n_features)  # Can't infer spatial dims
         
         # Get activations and gradients for target layer
         activations, gradients = self.model.get_layer_gradients(
