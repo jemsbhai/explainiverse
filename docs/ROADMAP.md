@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (19 total)
+### Evaluation Metrics (21 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -55,6 +55,8 @@
 | | IROF | ✅ Complete | v0.8.9 | Rieger & Hansen, 2020 |
 | | Infidelity | ✅ Complete | v0.8.10 | Yeh et al., 2019 |
 | | ROAD | ✅ Complete | v0.8.11 | Rong et al., 2022 |
+| | Insertion AUC | ✅ Complete | v0.9.1 | Petsiuk et al., 2018 |
+| | Deletion AUC | ✅ Complete | v0.9.1 | Petsiuk et al., 2018 |
 | **Stability** | RIS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | ROS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | Lipschitz Estimate | ✅ Complete | v0.3.0 | Alvarez-Melis & Jaakkola, 2018 |
@@ -96,9 +98,9 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 
 ---
 
-## Phase 1: Faithfulness Metrics (In Progress)
+## Phase 1: Faithfulness Metrics (✅ Complete)
 
-**Target:** v0.9.x with 12 additional faithfulness metrics (10/12 complete, 83%)
+**Target:** v0.9.x with 12 additional faithfulness metrics (12/12 complete, 100%)
 
 | # | Metric | Reference | Status | Version |
 |---|--------|-----------|--------|---------|
@@ -112,8 +114,8 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 | 8 | IROF | Rieger & Hansen, 2020 | ✅ Complete | v0.8.9 |
 | 9 | Infidelity | Yeh et al., 2019 | ✅ Complete | v0.8.10 |
 | 10 | ROAD | Rong et al., 2022 | ✅ Complete | v0.8.11 |
-| 11 | Insertion AUC | Petsiuk et al., 2018 | ❌ Planned | - |
-| 12 | Deletion AUC | Petsiuk et al., 2018 | ❌ Planned | - |
+| 11 | Insertion AUC | Petsiuk et al., 2018 | ✅ Complete | v0.9.1 |
+| 12 | Deletion AUC | Petsiuk et al., 2018 | ✅ Complete | v0.9.1 |
 
 ---
 
@@ -234,6 +236,7 @@ explainiverse/
 | v0.8.11 | Feb 2025 | ROAD metric (Rong et al., 2022) |
 | v0.9.0 | Feb 2025 | Warning elimination (0 warnings), dependency audit, xgboost <4.0 support |
 | v0.9.1 | Feb 2025 | Fix xgboost 3.x compatibility with SHAP TreeExplainer (base_score array parsing) |
+| v0.9.2 | Feb 2025 | LIME default num_features changed to all features; Phase 1 ROADMAP cleanup |
 
 ---
 
@@ -259,4 +262,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.9.1)*
+*Last updated: February 2025 (v0.9.2)*

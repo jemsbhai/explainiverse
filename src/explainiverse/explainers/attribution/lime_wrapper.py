@@ -112,7 +112,7 @@ class LimeExplainer(BaseExplainer):
     def explain(
         self,
         instance: np.ndarray,
-        num_features: int = 5,
+        num_features: Optional[int] = None,
         top_labels: int = 1
     ) -> Explanation:
         """
@@ -120,13 +120,18 @@ class LimeExplainer(BaseExplainer):
 
         Args:
             instance: 1D numpy array (single row) to explain
-            num_features: Number of top features to include in explanation
+            num_features: Number of top features to include in explanation.
+                Defaults to None, which uses all features. This ensures
+                evaluation metrics receive complete attribution vectors.
             top_labels: Number of top predicted labels to explain
 
         Returns:
             Explanation object with feature attributions
         """
         instance = np.asarray(instance).flatten()
+        
+        if num_features is None:
+            num_features = len(self.feature_names)
         
         lime_exp = self.explainer.explain_instance(
             data_row=instance,
@@ -149,7 +154,7 @@ class LimeExplainer(BaseExplainer):
     def explain_batch(
         self,
         X: np.ndarray,
-        num_features: int = 5,
+        num_features: Optional[int] = None,
         top_labels: int = 1
     ) -> List[Explanation]:
         """
@@ -157,7 +162,8 @@ class LimeExplainer(BaseExplainer):
         
         Args:
             X: 2D numpy array of instances
-            num_features: Number of features per explanation
+            num_features: Number of features per explanation.
+                Defaults to None, which uses all features.
             top_labels: Number of top labels to explain
             
         Returns:
