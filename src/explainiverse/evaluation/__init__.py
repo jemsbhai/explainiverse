@@ -9,6 +9,7 @@ Includes:
 - Extended faithfulness metrics (Phase 1 expansion)
 - Insertion/Deletion AUC (Petsiuk et al., 2018)
 - Robustness metrics (Max-Sensitivity, Avg-Sensitivity, Continuity) — Phase 2
+- Complexity metrics (Sparseness, Complexity, Effective Complexity) — Phase 4
 """
 
 from explainiverse.evaluation.metrics import (
@@ -45,6 +46,15 @@ from explainiverse.evaluation.robustness import (
     compute_batch_avg_sensitivity,
     compute_continuity,
     compute_batch_continuity,
+)
+
+from explainiverse.evaluation.complexity import (
+    compute_sparseness,
+    compute_batch_sparseness,
+    compute_complexity,
+    compute_batch_complexity,
+    compute_effective_complexity,
+    compute_batch_effective_complexity,
 )
 
 from explainiverse.evaluation.faithfulness_extended import (
@@ -139,4 +149,11 @@ __all__ = [
     "compute_batch_avg_sensitivity",
     "compute_continuity",
     "compute_batch_continuity",
+    # Complexity metrics (Phase 4)
+    "compute_sparseness",
+    "compute_batch_sparseness",
+    "compute_complexity",
+    "compute_batch_complexity",
+    "compute_effective_complexity",
+    "compute_batch_effective_complexity",
 ]

@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.9.1
+- **Current Version:** v0.9.5
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (21 total)
+### Evaluation Metrics (27 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -60,6 +60,12 @@
 | **Stability** | RIS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | ROS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
 | | Lipschitz Estimate | ✅ Complete | v0.3.0 | Alvarez-Melis & Jaakkola, 2018 |
+| **Robustness** | Max-Sensitivity | ✅ Complete | v0.9.4 | Yeh et al., 2019 |
+| | Avg-Sensitivity | ✅ Complete | v0.9.4 | Yeh et al., 2019 |
+| | Continuity | ✅ Complete | v0.9.4 | Montavon et al., 2018 |
+| **Complexity** | Sparseness | ✅ Complete | v0.9.5 | Chalasani et al., 2020 |
+| | Complexity | ✅ Complete | v0.9.5 | Bhatt et al., 2020 |
+| | Effective Complexity | ✅ Complete | v0.9.5 | Nguyen & Martínez, 2020 |
 
 ### Infrastructure
 
@@ -82,7 +88,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 24 → **54** | 24 implemented (Phase 1 ✅ + Phase 2 in progress) |
+| **Explainiverse** | 27 → **52** | 27 implemented (Phase 1 ✅, Phase 2 partial, Phase 4 ✅) |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
@@ -91,10 +97,10 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 | 1 | v0.9.x | Faithfulness | +6 | 22 |
 | 2 | v0.10.0 | Robustness | +7 | 28 |
 | 3 | v0.11.0 | Localisation | +8 | 36 |
-| 4 | v0.12.0 | Complexity | +4 | 40 |
-| 5 | v0.13.0 | Randomisation | +5 | 45 |
-| 6 | v0.14.0 | Axiomatic | +4 | 49 |
-| 7 | v0.15.0 | Fairness | +4 | 53 |
+| 4 | v0.12.0 | Complexity | +3 | 39 |
+| 5 | v0.13.0 | Randomisation | +5 | 44 |
+| 6 | v0.14.0 | Axiomatic | +4 | 48 |
+| 7 | v0.15.0 | Fairness | +4 | 52 |
 
 ---
 
@@ -139,11 +145,10 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 - AUC (localisation)
 - Bounding Box metrics
 
-### Phase 4: Complexity Metrics (v0.12.0)
-- Sparseness
-- Complexity
-- Effective Complexity
-- Entropy
+### Phase 4: Complexity Metrics (v0.12.0) — In Progress
+- ✅ Sparseness (Chalasani et al., 2020) (v0.9.5)
+- ✅ Complexity (Bhatt et al., 2020) (v0.9.5)
+- ✅ Effective Complexity (Nguyen & Martínez, 2020) (v0.9.5)
 
 ### Phase 5: Randomisation Metrics (v0.13.0)
 - Model Parameter Randomisation
@@ -187,6 +192,8 @@ explainiverse/
 │   ├── faithfulness.py       # Core faithfulness metrics
 │   ├── faithfulness_extended.py  # Extended faithfulness (Phase 1)
 │   ├── stability.py          # Stability metrics
+│   ├── robustness.py         # Phase 2 robustness metrics
+│   ├── complexity.py         # Phase 4 complexity metrics
 │   ├── metrics.py            # AOPC, ROAR
 │   └── _utils.py             # Shared utilities
 └── engine/
@@ -239,6 +246,7 @@ explainiverse/
 | v0.9.2 | Feb 2025 | LIME default num_features changed to all features; Phase 1 ROADMAP cleanup |
 | v0.9.3 | Feb 2025 | Fix LRP device mismatch (CPU/CUDA), LRP double reshape (Unflatten+Conv2d), LRP MaxPool2d unpooling, GradCAM flat input for Unflatten models, scikit-learn >=1.6 lower bound |
 | v0.9.4 | Feb 2025 | Phase 2 robustness metrics: Max-Sensitivity, Avg-Sensitivity, Continuity (Yeh et al., 2019; Montavon et al., 2018) |
+| v0.9.5 | Feb 2025 | Phase 4 complexity metrics: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020) |
 
 ---
 
@@ -264,4 +272,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.9.4)*
+*Last updated: February 2025 (v0.9.5)*

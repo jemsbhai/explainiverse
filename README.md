@@ -13,7 +13,7 @@
 | Feature | Description |
 |---------|-------------|
 | **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
-| **19 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity, Sensitivity-n, IROF, Infidelity, ROAD) and Stability (RIS, ROS, Lipschitz) |
+| **27 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity, Sensitivity-n, IROF, Infidelity, ROAD, Insertion AUC, Deletion AUC), Stability (RIS, ROS, Lipschitz), Robustness (Max-Sensitivity, Avg-Sensitivity, Continuity), Complexity (Sparseness, Complexity, Effective Complexity) |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
 | **Framework Support** | Adapters for scikit-learn and PyTorch (with gradient computation) |

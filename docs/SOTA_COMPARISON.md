@@ -171,10 +171,13 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**19 Evaluation Metrics:**
+**27 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
 - Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n, IROF, Infidelity, ROAD
+- Insertion/Deletion: Insertion AUC, Deletion AUC (Petsiuk et al., 2018)
 - Stability: RIS, ROS, Lipschitz Estimate
+- Robustness: Max-Sensitivity, Avg-Sensitivity (Yeh et al., 2019), Continuity (Montavon et al., 2018)
+- Complexity: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020)
 
 ---
 
@@ -192,8 +195,8 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 19 metrics)
-Target:  Explainiverse at (18 methods, 54 metrics) - Best in class for metrics!
+Current: Explainiverse at (18 methods, 27 metrics)
+Target:  Explainiverse at (18 methods, 52 metrics) - Best in class for metrics!
 ```
 
 **Key Insight:** Explainiverse is uniquely positioned to become the **only framework** combining:
@@ -220,16 +223,32 @@ No other framework currently achieves both.
 | 8 | IROF | ✅ v0.8.9 |
 | 9 | Infidelity | ✅ v0.8.10 |
 | 10 | ROAD | ✅ v0.8.11 |
-| 11 | Insertion AUC | ❌ |
-| 12 | Deletion AUC | ❌ |
+| 11 | Insertion AUC | ✅ v0.9.1 |
+| 12 | Deletion AUC | ✅ v0.9.1 |
+
+### Phase 2: Robustness (v0.9.4) - PARTIAL
+
+| # | Metric | Status |
+|---|--------|--------|
+| 1 | Max-Sensitivity | ✅ v0.9.4 |
+| 2 | Avg-Sensitivity | ✅ v0.9.4 |
+| 3 | Continuity | ✅ v0.9.4 |
+| 4-7 | Remaining (Consistency, Local Lipschitz, etc.) | ❌ Planned |
+
+### Phase 4: Complexity (v0.9.5) - COMPLETE
+
+| # | Metric | Status |
+|---|--------|--------|
+| 1 | Sparseness | ✅ v0.9.5 |
+| 2 | Complexity | ✅ v0.9.5 |
+| 3 | Effective Complexity | ✅ v0.9.5 |
 
 ### Future Phases
 
 | Phase | Version | Category | New Metrics |
 |-------|---------|----------|-------------|
-| 2 | v0.10.0 | Robustness | +7 |
+| 2 (remaining) | v0.10.0 | Robustness | +4 |
 | 3 | v0.11.0 | Localisation | +8 |
-| 4 | v0.12.0 | Complexity | +4 |
 | 5 | v0.13.0 | Randomisation | +5 |
 | 6 | v0.14.0 | Axiomatic | +4 |
 | 7 | v0.15.0 | Fairness | +4 |
@@ -242,10 +261,9 @@ No other framework currently achieves both.
 
 | Gap | Priority | Notes |
 |-----|----------|-------|
-| Complete Phase 1 Faithfulness | 🔴 Critical | 2 more metrics to implement |
-| Robustness metrics | 🔴 High | Phase 2 |
-| Localisation metrics | 🟡 Medium | Phase 3 |
-| Complexity metrics | 🟡 Medium | Phase 4 |
+| Complete Phase 2 Robustness | 🔴 High | 4 remaining metrics |
+| Localisation metrics | 🟡 Medium | Phase 3 (8 metrics) |
+| Randomisation metrics | 🟡 Medium | Phase 5 (5 metrics) |
 
 ### For Methods Coverage (LOWER PRIORITY)
 
@@ -280,5 +298,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.9.1)*
-*Next review: After Phase 1 completion*
+*Last updated: February 2025 (v0.9.5)*
+*Next review: After Phase 2 completion*
