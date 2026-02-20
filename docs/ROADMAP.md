@@ -82,7 +82,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 16 → **54** | Target after Phase 1-7 |
+| **Explainiverse** | 24 → **54** | 24 implemented (Phase 1 ✅ + Phase 2 in progress) |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
@@ -121,11 +121,11 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 
 ## Future Phases (Planned)
 
-### Phase 2: Robustness Metrics (v0.10.0)
-- Local Lipschitz Estimate
-- Max-Sensitivity
-- Avg-Sensitivity
-- Continuity
+### Phase 2: Robustness Metrics (v0.10.0) — In Progress
+- ✅ Local Lipschitz Estimate (v0.7.0)
+- ✅ Max-Sensitivity (Yeh et al., 2019) (v0.9.4)
+- ✅ Avg-Sensitivity (Yeh et al., 2019) (v0.9.4)
+- ✅ Continuity (Montavon et al., 2018; Alvarez-Melis & Jaakkola, 2018) (v0.9.4)
 - Consistency
 - Relative Input/Output Stability extensions
 
@@ -238,6 +238,7 @@ explainiverse/
 | v0.9.1 | Feb 2025 | Fix xgboost 3.x compatibility with SHAP TreeExplainer (base_score array parsing) |
 | v0.9.2 | Feb 2025 | LIME default num_features changed to all features; Phase 1 ROADMAP cleanup |
 | v0.9.3 | Feb 2025 | Fix LRP device mismatch (CPU/CUDA), LRP double reshape (Unflatten+Conv2d), LRP MaxPool2d unpooling, GradCAM flat input for Unflatten models, scikit-learn >=1.6 lower bound |
+| v0.9.4 | Feb 2025 | Phase 2 robustness metrics: Max-Sensitivity, Avg-Sensitivity, Continuity (Yeh et al., 2019; Montavon et al., 2018) |
 
 ---
 
@@ -263,4 +264,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.9.3)*
+*Last updated: February 2025 (v0.9.4)*
