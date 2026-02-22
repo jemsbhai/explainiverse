@@ -11,6 +11,7 @@ Includes:
 - Robustness metrics (Max-Sensitivity, Avg-Sensitivity, Continuity, Consistency,
   Relative Input/Representation/Output Stability) — Phase 2
 - Complexity metrics (Sparseness, Complexity, Effective Complexity) — Phase 4
+- Agreement metrics (Feature Agreement, Rank Agreement) — Phase 2
 """
 
 from explainiverse.evaluation.metrics import (
@@ -57,6 +58,13 @@ from explainiverse.evaluation.robustness import (
     compute_batch_relative_output_stability,
     compute_relative_stability,
     compute_batch_relative_stability,
+)
+
+from explainiverse.evaluation.agreement import (
+    compute_feature_agreement,
+    compute_batch_feature_agreement,
+    compute_rank_agreement,
+    compute_batch_rank_agreement,
 )
 
 from explainiverse.evaluation.complexity import (
@@ -171,6 +179,11 @@ __all__ = [
     "compute_batch_relative_output_stability",
     "compute_relative_stability",
     "compute_batch_relative_stability",
+    # Agreement metrics (Krishna et al., 2022)
+    "compute_feature_agreement",
+    "compute_batch_feature_agreement",
+    "compute_rank_agreement",
+    "compute_batch_rank_agreement",
     # Complexity metrics (Phase 4)
     "compute_sparseness",
     "compute_batch_sparseness",

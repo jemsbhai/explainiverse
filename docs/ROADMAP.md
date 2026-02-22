@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.9.6
+- **Current Version:** v0.9.7
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (29 total)
+### Evaluation Metrics (31 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -67,6 +67,8 @@
 | | Relative Input Stability (RIS) | ✅ Complete | v0.9.6 | Agarwal et al., 2022 (Eq 2) |
 | | Relative Representation Stability (RRS) | ✅ Complete | v0.9.6 | Agarwal et al., 2022 (Eq 3) |
 | | Relative Output Stability (ROS) | ✅ Complete | v0.9.6 | Agarwal et al., 2022 (Eq 5) |
+| **Agreement** | Feature Agreement | ✅ Complete | v0.9.7 | Krishna et al., 2022 |
+| | Rank Agreement | ✅ Complete | v0.9.7 | Krishna et al., 2022 |
 | **Complexity** | Sparseness | ✅ Complete | v0.9.5 | Chalasani et al., 2020 |
 | | Complexity | ✅ Complete | v0.9.5 | Bhatt et al., 2020 |
 | | Effective Complexity | ✅ Complete | v0.9.5 | Nguyen & Martínez, 2020 |
@@ -92,7 +94,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 29 → **52** | 29 implemented (Phase 1 ✅, Phase 2 ✅ mostly, Phase 4 ✅) |
+| **Explainiverse** | 31 → **52** | 31 implemented (Phase 1 ✅, Phase 2 ✅, Phase 4 ✅) |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
@@ -131,7 +133,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 
 ## Future Phases (Planned)
 
-### Phase 2: Robustness Metrics — Mostly Complete
+### Phase 2: Robustness & Agreement Metrics — ✅ Complete
 - ✅ Local Lipschitz Estimate (v0.7.0)
 - ✅ Max-Sensitivity (Yeh et al., 2019) (v0.9.4)
 - ✅ Avg-Sensitivity (Yeh et al., 2019) (v0.9.4)
@@ -140,8 +142,8 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 - ✅ Relative Input Stability / RIS (Agarwal et al., 2022, Eq 2) (v0.9.6)
 - ✅ Relative Representation Stability / RRS (Agarwal et al., 2022, Eq 3) (v0.9.6)
 - ✅ Relative Output Stability / ROS (Agarwal et al., 2022, Eq 5) (v0.9.6)
-- ⏳ Feature Agreement (planned)
-- ⏳ Rank Agreement (planned)
+- ✅ Feature Agreement (Krishna et al., 2022) (v0.9.7)
+- ✅ Rank Agreement (Krishna et al., 2022) (v0.9.7)
 
 ### Phase 3: Localisation Metrics (v0.11.0)
 - Pointing Game
@@ -256,6 +258,7 @@ explainiverse/
 | v0.9.4 | Feb 2025 | Phase 2 robustness metrics: Max-Sensitivity, Avg-Sensitivity, Continuity (Yeh et al., 2019; Montavon et al., 2018) |
 | v0.9.5 | Feb 2025 | Phase 4 complexity metrics: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020) |
 | v0.9.6 | Feb 2025 | Phase 2 robustness: Consistency (Dasgupta et al., 2022), Relative Input Stability (Agarwal et al., 2022, Eq 2), Relative Representation Stability (Agarwal et al., 2022, Eq 3), Relative Output Stability (Agarwal et al., 2022, Eq 5), code quality fixes, low-validity warnings |
+| v0.9.7 | Feb 2025 | Phase 2 complete: Feature Agreement, Rank Agreement (Krishna et al., 2022) |
 
 ---
 
@@ -281,4 +284,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.9.6)*
+*Last updated: February 2025 (v0.9.7)*

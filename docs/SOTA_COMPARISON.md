@@ -108,6 +108,9 @@
 | Relative Input Stability (RIS) | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | Relative Representation Stability (RRS) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Relative Output Stability (ROS) | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **Agreement** |
+| Feature Agreement | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Rank Agreement | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Localisation** |
 | Pointing Game | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Top-K Intersection | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -143,7 +146,7 @@
 | Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
 |--------|:-------------:|:-------:|:-------:|:------:|:-------:|
 | **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
-| **Evaluation Metrics** | 29 → **52** | 37 | 0 | 0 | 22 |
+| **Evaluation Metrics** | 31 → **52** | 37 | 0 | 0 | 22 |
 | **Data Types** | 2 | N/A | 4 | 4 | 1 |
 | **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
 
@@ -151,12 +154,12 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.9.6)
+### Current Strengths (v0.9.7)
 
 | Strength | Description |
 |----------|-------------|
 | **Unified Registry** | Plugin architecture with rich metadata, filtering by scope/model/data type |
-| **Growing Evaluation Suite** | 29 metrics now, targeting 52 (will exceed Quantus's 37) |
+| **Growing Evaluation Suite** | 31 metrics now, targeting 52 (will exceed Quantus's 37) |
 | **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
 | **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 | **SAGE** | Global Shapley importance - rare in other frameworks |
@@ -166,7 +169,7 @@
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 | **xgboost 3.x Support** | Compatible with xgboost 1.7–3.x via automatic SHAP compatibility patching |
 
-### Current Implementation (v0.9.6)
+### Current Implementation (v0.9.7)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -178,12 +181,13 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**29 Evaluation Metrics:**
+**31 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
 - Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n, IROF, Infidelity, ROAD
 - Insertion/Deletion: Insertion AUC, Deletion AUC (Petsiuk et al., 2018)
 - Stability (legacy): RIS (simple), ROS (simple), Lipschitz Estimate
 - Robustness: Max-Sensitivity, Avg-Sensitivity (Yeh et al., 2019), Continuity (Montavon et al., 2018), Consistency (Dasgupta et al., 2022), Relative Input Stability / RIS (Agarwal et al., 2022, Eq 2), Relative Representation Stability / RRS (Agarwal et al., 2022, Eq 3), Relative Output Stability / ROS (Agarwal et al., 2022, Eq 5)
+- Agreement: Feature Agreement, Rank Agreement (Krishna et al., 2022)
 - Complexity: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020)
 
 ---
@@ -202,7 +206,7 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 29 metrics)
+Current: Explainiverse at (18 methods, 31 metrics)
 Target:  Explainiverse at (18 methods, 52 metrics) - Best in class for metrics!
 ```
 
@@ -233,7 +237,7 @@ No other framework currently achieves both.
 | 11 | Insertion AUC | ✅ v0.9.1 |
 | 12 | Deletion AUC | ✅ v0.9.1 |
 
-### Phase 2: Robustness - Mostly Complete
+### Phase 2: Robustness & Agreement - ✅ COMPLETE
 
 | # | Metric | Status |
 |---|--------|--------|
@@ -244,7 +248,8 @@ No other framework currently achieves both.
 | 5 | Relative Input Stability (RIS) | ✅ v0.9.6 |
 | 6 | Relative Representation Stability (RRS) | ✅ v0.9.6 |
 | 7 | Relative Output Stability (ROS) | ✅ v0.9.6 |
-| 8-9 | Feature Agreement, Rank Agreement | ⏳ Planned |
+| 8 | Feature Agreement | ✅ v0.9.7 |
+| 9 | Rank Agreement | ✅ v0.9.7 |
 
 ### Phase 4: Complexity (v0.9.5) - COMPLETE
 
@@ -258,7 +263,7 @@ No other framework currently achieves both.
 
 | Phase | Version | Category | New Metrics |
 |-------|---------|----------|-------------|
-| 2 (remaining) | v0.10.0 | Robustness | +2 (Feature/Rank Agreement) |
+| ~~2~~ | ~~v0.10.0~~ | ~~Robustness~~ | ✅ Complete |
 | 3 | v0.11.0 | Localisation | +8 |
 | 5 | v0.13.0 | Randomisation | +5 |
 | 6 | v0.14.0 | Axiomatic | +4 |
@@ -272,7 +277,7 @@ No other framework currently achieves both.
 
 | Gap | Priority | Notes |
 |-----|----------|-------|
-| Complete Phase 2 Robustness | 🔴 High | 2 remaining metrics (Feature/Rank Agreement) |
+| ~~Complete Phase 2 Robustness~~ | ✅ Done | All 9 metrics implemented |
 | Localisation metrics | 🟡 Medium | Phase 3 (8 metrics) |
 | Randomisation metrics | 🟡 Medium | Phase 5 (5 metrics) |
 
@@ -309,5 +314,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.9.6)*
-*Next review: After Phase 2 completion*
+*Last updated: February 2025 (v0.9.7)*
+*Next review: After Phase 3 (Localisation) begins*
