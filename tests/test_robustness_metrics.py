@@ -707,6 +707,581 @@ class TestBatchContinuity:
 
 
 # =============================================================================
+# Consistency Tests (Dasgupta et al., 2022 — ICML)
+# =============================================================================
+
+class _ConstantModel:
+    """Mock model that always predicts the same class."""
+    def __init__(self, predicted_class=0, n_classes=2):
+        self.predicted_class = predicted_class
+        self.n_classes = n_classes
+
+    def predict(self, X):
+        X = np.asarray(X)
+        if X.ndim == 1:
+            return np.array([self.predicted_class])
+        return np.full(X.shape[0], self.predicted_class)
+
+    def predict_proba(self, X):
+        X = np.asarray(X)
+        n = 1 if X.ndim == 1 else X.shape[0]
+        proba = np.zeros((n, self.n_classes))
+        proba[:, self.predicted_class] = 1.0
+        return proba
+
+
+class _FeatureThresholdModel:
+    """
+    Mock model that predicts class based on whether feature 0 > threshold.
+    Useful for testing consistency: instances in the same feature-0 region
+    get the same prediction.
+    """
+    def __init__(self, threshold=0.0):
+        self.threshold = threshold
+
+    def predict(self, X):
+        X = np.asarray(X)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        return (X[:, 0] > self.threshold).astype(int)
+
+    def predict_proba(self, X):
+        X = np.asarray(X)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        preds = (X[:, 0] > self.threshold).astype(float)
+        return np.column_stack([1.0 - preds, preds])
+
+
+class _IndexBasedModel:
+    """
+    Mock model that assigns class = hash(instance) % n_classes.
+    Produces varied predictions so some pairs agree and others don't.
+    """
+    def __init__(self, n_classes=2):
+        self.n_classes = n_classes
+
+    def predict(self, X):
+        X = np.asarray(X)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        preds = []
+        for row in X:
+            h = hash(tuple(np.round(row, 8).tolist()))
+            preds.append(abs(h) % self.n_classes)
+        return np.array(preds)
+
+
+class TestConsistency:
+    """Tests for compute_consistency (Dasgupta et al., 2022)."""
+
+    def test_returns_float(self, feature_names):
+        """Consistency returns a float."""
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)  # same top-k for all
+        model = _ConstantModel()  # same prediction for all
+        X = np.random.default_rng(42).standard_normal((10, 4))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert isinstance(score, float)
+
+    def test_range_zero_to_one(self, feature_names):
+        """Consistency is in [0, 1]."""
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((10, 4))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert 0.0 <= score <= 1.0
+
+    def test_perfect_consistency_constant_model(self, feature_names):
+        """
+        If the model always predicts the same class, consistency = 1.0
+        for any explainer (all pairs trivially agree on prediction).
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel(predicted_class=1)
+        X = np.random.default_rng(42).standard_normal((20, 4))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert score == pytest.approx(1.0)
+
+    def test_perfect_consistency_constant_explainer_constant_model(self, feature_names):
+        """
+        Constant explainer + constant model → all instances grouped together
+        and all predictions match → consistency = 1.0.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names, values=[5.0, 3.0, 1.0, 0.5])
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((15, 4))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert score == pytest.approx(1.0)
+
+    def test_low_consistency_random_model(self, feature_names):
+        """
+        A constant explainer groups all instances together.
+        If the model gives varied predictions, consistency drops below 1.0.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        # Constant explainer: all instances get the same top-k
+        explainer = _ConstantExplainer(feature_names, values=[5.0, 3.0, 1.0, 0.5])
+        # Threshold model: different predictions based on feature 0
+        model = _FeatureThresholdModel(threshold=0.0)
+        # Data spanning both sides of threshold
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((30, 4))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        # Not all pairs agree since the model separates by feature 0
+        assert score < 1.0
+
+    def test_nan_for_single_instance(self, feature_names):
+        """Returns NaN for fewer than 2 instances."""
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.array([[1.0, 2.0, 3.0, 4.0]])
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert np.isnan(score)
+
+    def test_nan_for_no_matching_pairs(self, feature_names):
+        """
+        If every instance has a unique top-k set (no matching pairs),
+        returns NaN.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        # Deterministic explainer with scale: each instance gets different attributions
+        # With top_k=1, each picks its single largest feature, which can vary
+        explainer = _DeterministicExplainer(feature_names)
+        model = _ConstantModel()
+
+        # Construct data where each instance has a different top-1 feature
+        X = np.array([
+            [10.0, 0.0, 0.0, 0.0],  # top-1 = f0
+            [0.0, 10.0, 0.0, 0.0],  # top-1 = f1
+            [0.0, 0.0, 10.0, 0.0],  # top-1 = f2
+            [0.0, 0.0, 0.0, 10.0],  # top-1 = f3
+        ])
+        score = compute_consistency(explainer, model, X, top_k=1)
+        assert np.isnan(score)
+
+    def test_matching_pairs_exist(self, feature_names):
+        """
+        When some instances share top-k features, pairs are formed.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _DeterministicExplainer(feature_names)
+        model = _ConstantModel()
+
+        # Two pairs of instances with the same top-1 feature
+        X = np.array([
+            [10.0, 0.1, 0.0, 0.0],  # top-1 = f0
+            [5.0, 0.1, 0.0, 0.0],   # top-1 = f0 (same group)
+            [0.0, 10.0, 0.0, 0.0],  # top-1 = f1
+            [0.0, 5.0, 0.0, 0.0],   # top-1 = f1 (same group)
+        ])
+        score = compute_consistency(explainer, model, X, top_k=1)
+        # Constant model: all predictions match, so consistency = 1.0
+        assert score == pytest.approx(1.0)
+
+    def test_top_k_validation_zero(self, feature_names):
+        """top_k < 1 raises ValueError."""
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((5, 4))
+
+        with pytest.raises(ValueError, match="top_k must be >= 1"):
+            compute_consistency(explainer, model, X, top_k=0)
+
+    def test_top_k_validation_too_large(self, feature_names):
+        """top_k >= n_features raises ValueError."""
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((5, 4))
+
+        with pytest.raises(ValueError, match="top_k.*must be < n_features"):
+            compute_consistency(explainer, model, X, top_k=4)
+
+    def test_max_pairs_limits_computation(self, feature_names):
+        """
+        max_pairs limits the number of evaluated pairs.
+        With a constant explainer, all n*(n-1)/2 pairs are in one group.
+        max_pairs should subsample.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((20, 4))
+
+        # 20 instances → 190 pairs. Limit to 10.
+        score = compute_consistency(
+            explainer, model, X, top_k=2, max_pairs=10, seed=42
+        )
+        # Should still return a valid score
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 1.0
+
+    def test_seed_reproducibility(self, feature_names):
+        """Same seed produces the same result when max_pairs is set."""
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _FeatureThresholdModel(threshold=0.0)
+        X = np.random.default_rng(42).standard_normal((30, 4))
+
+        s1 = compute_consistency(
+            explainer, model, X, top_k=2, max_pairs=20, seed=42
+        )
+        s2 = compute_consistency(
+            explainer, model, X, top_k=2, max_pairs=20, seed=42
+        )
+        assert s1 == pytest.approx(s2, rel=1e-10)
+
+    def test_different_seeds_may_differ(self, feature_names):
+        """
+        Different seeds may produce different results when subsampling.
+        (Not guaranteed to differ but tests the pathway.)
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _FeatureThresholdModel(threshold=0.0)
+        X = np.random.default_rng(42).standard_normal((50, 4))
+
+        s1 = compute_consistency(
+            explainer, model, X, top_k=2, max_pairs=10, seed=42
+        )
+        s2 = compute_consistency(
+            explainer, model, X, top_k=2, max_pairs=10, seed=99
+        )
+        # Both are valid scores
+        assert 0.0 <= s1 <= 1.0
+        assert 0.0 <= s2 <= 1.0
+
+    def test_higher_top_k_more_matching_pairs(self, feature_names):
+        """
+        With higher top_k, explanations have more features in common,
+        potentially changing grouping.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        explainer = _DeterministicExplainer(feature_names)
+        model = _ConstantModel()
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((30, 4))
+
+        s1 = compute_consistency(explainer, model, X, top_k=1)
+        s3 = compute_consistency(explainer, model, X, top_k=3)
+        # Both should be valid (or NaN if no pairs)
+        assert isinstance(s1, float)
+        assert isinstance(s3, float)
+
+    def test_semantic_grouped_correctly(self):
+        """
+        Verify that instances are grouped by top-k features correctly.
+        2 features, top_k=1: instances with same max-abs feature index
+        are in the same group.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        fnames = ["f0", "f1"]
+        # Constant explainer always returns [5.0, 3.0] → top-1 = f0
+        explainer = _ConstantExplainer(fnames, values=[5.0, 3.0])
+        model = _ConstantModel()
+        X = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+
+        # All instances share top-1 = {f0}, all predictions same → 1.0
+        score = compute_consistency(explainer, model, X, top_k=1)
+        assert score == pytest.approx(1.0)
+
+    def test_consistency_with_mixed_predictions(self):
+        """
+        When all instances are grouped together but predictions differ,
+        consistency < 1.0. Exact value depends on pair counts.
+        """
+        from explainiverse.evaluation import compute_consistency
+
+        fnames = ["f0", "f1", "f2"]
+        # All instances get the same explanation
+        explainer = _ConstantExplainer(fnames, values=[5.0, 3.0, 1.0])
+        # Threshold on feature 0: half above, half below
+        model = _FeatureThresholdModel(threshold=0.0)
+
+        # 4 instances: 2 above threshold (class 1), 2 below (class 0)
+        X = np.array([
+            [1.0, 0.0, 0.0],   # class 1
+            [2.0, 0.0, 0.0],   # class 1
+            [-1.0, 0.0, 0.0],  # class 0
+            [-2.0, 0.0, 0.0],  # class 0
+        ])
+
+        score = compute_consistency(explainer, model, X, top_k=1)
+        # 6 total pairs: (0,1)=agree, (0,2)=disagree, (0,3)=disagree,
+        #                (1,2)=disagree, (1,3)=disagree, (2,3)=agree
+        # 2 agree / 6 total = 1/3
+        assert score == pytest.approx(1.0 / 3.0, abs=1e-10)
+
+    def test_predict_proba_model(self, feature_names):
+        """Works with models that only have predict_proba."""
+        from explainiverse.evaluation import compute_consistency
+
+        class _ProbaOnlyModel:
+            def predict_proba(self, X):
+                X = np.asarray(X)
+                if X.ndim == 1:
+                    X = X.reshape(1, -1)
+                return np.column_stack([np.ones(len(X)), np.zeros(len(X))])
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ProbaOnlyModel()
+        X = np.random.default_rng(42).standard_normal((10, 4))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert score == pytest.approx(1.0)
+
+    def test_predict_only_model(self, feature_names):
+        """Works with models that only have predict."""
+        from explainiverse.evaluation import compute_consistency
+
+        class _PredictOnlyModel:
+            def predict(self, X):
+                X = np.asarray(X)
+                if X.ndim == 1:
+                    return np.array([0])
+                return np.zeros(len(X), dtype=int)
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _PredictOnlyModel()
+        X = np.random.default_rng(42).standard_normal((10, 4))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert score == pytest.approx(1.0)
+
+    def test_model_without_predict_raises(self, feature_names):
+        """Model without predict/predict_proba raises ValueError."""
+        from explainiverse.evaluation.robustness import _get_model_prediction
+
+        class _EmptyModel:
+            pass
+
+        with pytest.raises(ValueError, match="predict"):
+            _get_model_prediction(_EmptyModel(), np.array([1.0, 2.0, 3.0, 4.0]))
+
+    def test_with_real_model_and_explainer(self, trained_model_and_explainer):
+        """Integration test with real sklearn model and LIME explainer."""
+        from explainiverse.evaluation import compute_consistency
+
+        model, explainer, X = trained_model_and_explainer
+        score = compute_consistency(
+            explainer, model, X[:20], top_k=2
+        )
+        assert isinstance(score, float)
+        # Either a valid score or NaN (if no matching pairs)
+        assert (0.0 <= score <= 1.0) or np.isnan(score)
+
+    def test_multiclass(self):
+        """Works with multiclass models."""
+        from explainiverse.evaluation import compute_consistency
+
+        fnames = ["f0", "f1", "f2", "f3", "f4"]
+
+        class _MulticlassModel:
+            def predict(self, X):
+                X = np.asarray(X)
+                if X.ndim == 1:
+                    X = X.reshape(1, -1)
+                return (X[:, 0] * 3).astype(int) % 3
+
+        explainer = _ConstantExplainer(fnames, values=[5.0, 4.0, 3.0, 2.0, 1.0])
+        model = _MulticlassModel()
+        X = np.random.default_rng(42).standard_normal((20, 5))
+
+        score = compute_consistency(explainer, model, X, top_k=2)
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 1.0
+
+
+class TestBatchConsistency:
+    """Tests for compute_batch_consistency."""
+
+    def test_returns_dict(self, feature_names):
+        """Returns dict with expected keys."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((15, 4))
+
+        result = compute_batch_consistency(explainer, model, X)
+        assert isinstance(result, dict)
+        assert "scores" in result
+        assert "mean" in result
+        assert "top_k_values" in result
+        assert "n_instances" in result
+
+    def test_scores_per_k(self, feature_names):
+        """Returns a score for each top-k value."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((15, 4))
+
+        result = compute_batch_consistency(
+            explainer, model, X, top_k_values=[1, 2, 3]
+        )
+        assert set(result["scores"].keys()) == {1, 2, 3}
+
+    def test_filters_invalid_k(self, feature_names):
+        """Filters out top-k values >= n_features."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        explainer = _ConstantExplainer(feature_names)  # 4 features
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((10, 4))
+
+        result = compute_batch_consistency(
+            explainer, model, X, top_k_values=[1, 2, 4, 10]
+        )
+        assert set(result["scores"].keys()) == {1, 2}
+
+    def test_default_k_values(self, feature_names):
+        """Default k values are [1, 2, 3] for 4-feature data."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((10, 4))
+
+        result = compute_batch_consistency(explainer, model, X)
+        # Default is [1, 2, 3, 5] filtered by < n_features=4 → [1, 2, 3]
+        assert set(result["top_k_values"]) == {1, 2, 3}
+
+    def test_mean_is_average_of_valid_scores(self, feature_names):
+        """Mean is the average of non-NaN scores."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((15, 4))
+
+        result = compute_batch_consistency(
+            explainer, model, X, top_k_values=[1, 2]
+        )
+        valid = [s for s in result["scores"].values() if not np.isnan(s)]
+        if valid:
+            assert result["mean"] == pytest.approx(np.mean(valid), rel=1e-10)
+
+    def test_constant_model_perfect_batch(self, feature_names):
+        """Constant model gives perfect consistency at every k."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        explainer = _ConstantExplainer(feature_names)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((15, 4))
+
+        result = compute_batch_consistency(
+            explainer, model, X, top_k_values=[1, 2, 3]
+        )
+        for k, score in result["scores"].items():
+            if not np.isnan(score):
+                assert score == pytest.approx(1.0)
+
+    def test_empty_k_values_returns_nan(self):
+        """If all k values are filtered out, returns NaN mean."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        fnames = ["f0", "f1"]  # only 2 features
+        explainer = _ConstantExplainer(fnames)
+        model = _ConstantModel()
+        X = np.random.default_rng(42).standard_normal((10, 2))
+
+        # All k values >= 2 (n_features), so none are valid
+        result = compute_batch_consistency(
+            explainer, model, X, top_k_values=[2, 3, 5]
+        )
+        assert result["scores"] == {}
+        assert np.isnan(result["mean"])
+
+    def test_with_real_model_and_explainer(self, trained_model_and_explainer):
+        """Integration test with real model."""
+        from explainiverse.evaluation import compute_batch_consistency
+
+        model, explainer, X = trained_model_and_explainer
+        result = compute_batch_consistency(
+            explainer, model, X[:20], top_k_values=[1, 2]
+        )
+        assert isinstance(result["mean"], float)
+
+
+class TestConsistencyHelpers:
+    """Tests for Consistency helper functions."""
+
+    def test_get_top_k_features_basic(self):
+        from explainiverse.evaluation.robustness import _get_top_k_features
+
+        attrs = np.array([1.0, 5.0, 3.0, 0.5])
+        result = _get_top_k_features(attrs, k=2)
+        assert result == frozenset({1, 2})  # f1=5.0 and f2=3.0
+
+    def test_get_top_k_features_negative_values(self):
+        """Uses absolute values for ranking."""
+        from explainiverse.evaluation.robustness import _get_top_k_features
+
+        attrs = np.array([-10.0, 1.0, 3.0, 0.5])
+        result = _get_top_k_features(attrs, k=1)
+        assert result == frozenset({0})  # |-10| is largest
+
+    def test_get_top_k_features_k_exceeds_length(self):
+        """k larger than array length is clamped."""
+        from explainiverse.evaluation.robustness import _get_top_k_features
+
+        attrs = np.array([1.0, 2.0])
+        result = _get_top_k_features(attrs, k=10)
+        assert result == frozenset({0, 1})
+
+    def test_get_top_k_features_returns_frozenset(self):
+        """Returns frozenset (hashable for grouping)."""
+        from explainiverse.evaluation.robustness import _get_top_k_features
+
+        attrs = np.array([1.0, 2.0, 3.0])
+        result = _get_top_k_features(attrs, k=2)
+        assert isinstance(result, frozenset)
+
+    def test_get_model_prediction_predict(self):
+        from explainiverse.evaluation.robustness import _get_model_prediction
+
+        model = _ConstantModel(predicted_class=1)
+        pred = _get_model_prediction(model, np.array([1.0, 2.0]))
+        assert pred == 1
+
+    def test_get_model_prediction_proba(self):
+        from explainiverse.evaluation.robustness import _get_model_prediction
+
+        model = _ConstantModel(predicted_class=0, n_classes=3)
+        pred = _get_model_prediction(model, np.array([1.0, 2.0]))
+        assert pred == 0
+
+
+# =============================================================================
 # Cross-Metric Relationship Tests
 # =============================================================================
 
@@ -851,6 +1426,14 @@ class TestImports:
     def test_import_batch_continuity(self):
         from explainiverse.evaluation import compute_batch_continuity
         assert callable(compute_batch_continuity)
+
+    def test_import_consistency(self):
+        from explainiverse.evaluation import compute_consistency
+        assert callable(compute_consistency)
+
+    def test_import_batch_consistency(self):
+        from explainiverse.evaluation import compute_batch_consistency
+        assert callable(compute_batch_consistency)
 
 
 if __name__ == "__main__":

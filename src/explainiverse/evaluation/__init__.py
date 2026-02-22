@@ -8,7 +8,8 @@ Includes:
 - Perturbation metrics (AOPC, ROAR)
 - Extended faithfulness metrics (Phase 1 expansion)
 - Insertion/Deletion AUC (Petsiuk et al., 2018)
-- Robustness metrics (Max-Sensitivity, Avg-Sensitivity, Continuity) — Phase 2
+- Robustness metrics (Max-Sensitivity, Avg-Sensitivity, Continuity, Consistency,
+  Relative Input/Representation/Output Stability) — Phase 2
 - Complexity metrics (Sparseness, Complexity, Effective Complexity) — Phase 4
 """
 
@@ -46,6 +47,16 @@ from explainiverse.evaluation.robustness import (
     compute_batch_avg_sensitivity,
     compute_continuity,
     compute_batch_continuity,
+    compute_consistency,
+    compute_batch_consistency,
+    compute_relative_input_stability,
+    compute_batch_relative_input_stability,
+    compute_relative_representation_stability,
+    compute_batch_relative_representation_stability,
+    compute_relative_output_stability,
+    compute_batch_relative_output_stability,
+    compute_relative_stability,
+    compute_batch_relative_stability,
 )
 
 from explainiverse.evaluation.complexity import (
@@ -149,6 +160,17 @@ __all__ = [
     "compute_batch_avg_sensitivity",
     "compute_continuity",
     "compute_batch_continuity",
+    "compute_consistency",
+    "compute_batch_consistency",
+    # Relative Stability metrics (Agarwal et al., 2022)
+    "compute_relative_input_stability",
+    "compute_batch_relative_input_stability",
+    "compute_relative_representation_stability",
+    "compute_batch_relative_representation_stability",
+    "compute_relative_output_stability",
+    "compute_batch_relative_output_stability",
+    "compute_relative_stability",
+    "compute_batch_relative_stability",
     # Complexity metrics (Phase 4)
     "compute_sparseness",
     "compute_batch_sparseness",

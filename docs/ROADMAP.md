@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.9.5
+- **Current Version:** v0.9.6
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (27 total)
+### Evaluation Metrics (29 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -57,12 +57,16 @@
 | | ROAD | ✅ Complete | v0.8.11 | Rong et al., 2022 |
 | | Insertion AUC | ✅ Complete | v0.9.1 | Petsiuk et al., 2018 |
 | | Deletion AUC | ✅ Complete | v0.9.1 | Petsiuk et al., 2018 |
-| **Stability** | RIS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
-| | ROS | ✅ Complete | v0.3.0 | Agarwal et al., 2022 |
+| **Stability (legacy)** | RIS (simple) | ✅ Complete | v0.3.0 | Agarwal et al., 2022 (simplified) |
+| | ROS (simple) | ✅ Complete | v0.3.0 | Agarwal et al., 2022 (simplified) |
 | | Lipschitz Estimate | ✅ Complete | v0.3.0 | Alvarez-Melis & Jaakkola, 2018 |
 | **Robustness** | Max-Sensitivity | ✅ Complete | v0.9.4 | Yeh et al., 2019 |
 | | Avg-Sensitivity | ✅ Complete | v0.9.4 | Yeh et al., 2019 |
 | | Continuity | ✅ Complete | v0.9.4 | Montavon et al., 2018 |
+| | Consistency | ✅ Complete | v0.9.6 | Dasgupta et al., 2022 |
+| | Relative Input Stability (RIS) | ✅ Complete | v0.9.6 | Agarwal et al., 2022 (Eq 2) |
+| | Relative Representation Stability (RRS) | ✅ Complete | v0.9.6 | Agarwal et al., 2022 (Eq 3) |
+| | Relative Output Stability (ROS) | ✅ Complete | v0.9.6 | Agarwal et al., 2022 (Eq 5) |
 | **Complexity** | Sparseness | ✅ Complete | v0.9.5 | Chalasani et al., 2020 |
 | | Complexity | ✅ Complete | v0.9.5 | Bhatt et al., 2020 |
 | | Effective Complexity | ✅ Complete | v0.9.5 | Nguyen & Martínez, 2020 |
@@ -88,7 +92,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 27 → **52** | 27 implemented (Phase 1 ✅, Phase 2 partial, Phase 4 ✅) |
+| **Explainiverse** | 29 → **52** | 29 implemented (Phase 1 ✅, Phase 2 ✅ mostly, Phase 4 ✅) |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
@@ -127,13 +131,17 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 
 ## Future Phases (Planned)
 
-### Phase 2: Robustness Metrics (v0.10.0) — In Progress
+### Phase 2: Robustness Metrics — Mostly Complete
 - ✅ Local Lipschitz Estimate (v0.7.0)
 - ✅ Max-Sensitivity (Yeh et al., 2019) (v0.9.4)
 - ✅ Avg-Sensitivity (Yeh et al., 2019) (v0.9.4)
 - ✅ Continuity (Montavon et al., 2018; Alvarez-Melis & Jaakkola, 2018) (v0.9.4)
-- Consistency
-- Relative Input/Output Stability extensions
+- ✅ Consistency (Dasgupta et al., 2022) (v0.9.6)
+- ✅ Relative Input Stability / RIS (Agarwal et al., 2022, Eq 2) (v0.9.6)
+- ✅ Relative Representation Stability / RRS (Agarwal et al., 2022, Eq 3) (v0.9.6)
+- ✅ Relative Output Stability / ROS (Agarwal et al., 2022, Eq 5) (v0.9.6)
+- ⏳ Feature Agreement (planned)
+- ⏳ Rank Agreement (planned)
 
 ### Phase 3: Localisation Metrics (v0.11.0)
 - Pointing Game
@@ -145,7 +153,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 - AUC (localisation)
 - Bounding Box metrics
 
-### Phase 4: Complexity Metrics (v0.12.0) — In Progress
+### Phase 4: Complexity Metrics — ✅ Complete
 - ✅ Sparseness (Chalasani et al., 2020) (v0.9.5)
 - ✅ Complexity (Bhatt et al., 2020) (v0.9.5)
 - ✅ Effective Complexity (Nguyen & Martínez, 2020) (v0.9.5)
@@ -247,6 +255,7 @@ explainiverse/
 | v0.9.3 | Feb 2025 | Fix LRP device mismatch (CPU/CUDA), LRP double reshape (Unflatten+Conv2d), LRP MaxPool2d unpooling, GradCAM flat input for Unflatten models, scikit-learn >=1.6 lower bound |
 | v0.9.4 | Feb 2025 | Phase 2 robustness metrics: Max-Sensitivity, Avg-Sensitivity, Continuity (Yeh et al., 2019; Montavon et al., 2018) |
 | v0.9.5 | Feb 2025 | Phase 4 complexity metrics: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020) |
+| v0.9.6 | Feb 2025 | Phase 2 robustness: Consistency (Dasgupta et al., 2022), Relative Input Stability (Agarwal et al., 2022, Eq 2), Relative Representation Stability (Agarwal et al., 2022, Eq 3), Relative Output Stability (Agarwal et al., 2022, Eq 5), code quality fixes, low-validity warnings |
 
 ---
 
@@ -272,4 +281,4 @@ explainiverse/
 
 ---
 
-*Last updated: February 2025 (v0.9.5)*
+*Last updated: February 2025 (v0.9.6)*
