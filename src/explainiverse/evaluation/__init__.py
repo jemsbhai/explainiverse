@@ -12,6 +12,9 @@ Includes:
   Relative Input/Representation/Output Stability) — Phase 2
 - Complexity metrics (Sparseness, Complexity, Effective Complexity) — Phase 4
 - Agreement metrics (Feature Agreement, Rank Agreement) — Phase 2
+- Localisation metrics (Pointing Game, Attribution Localisation, Top-K Intersection,
+  Relevance Mass Accuracy, Relevance Rank Accuracy, AUC, Energy-Based Pointing Game,
+  Focus, Attribution IoU) — Phase 3
 """
 
 from explainiverse.evaluation.metrics import (
@@ -74,6 +77,28 @@ from explainiverse.evaluation.complexity import (
     compute_batch_complexity,
     compute_effective_complexity,
     compute_batch_effective_complexity,
+)
+
+from explainiverse.evaluation.localisation import (
+    LocalisationMask,
+    compute_pointing_game,
+    compute_batch_pointing_game,
+    compute_attribution_localisation,
+    compute_batch_attribution_localisation,
+    compute_top_k_intersection,
+    compute_batch_top_k_intersection,
+    compute_relevance_mass_accuracy,
+    compute_batch_relevance_mass_accuracy,
+    compute_relevance_rank_accuracy,
+    compute_batch_relevance_rank_accuracy,
+    compute_auc,
+    compute_batch_auc,
+    compute_energy_based_pointing_game,
+    compute_batch_energy_based_pointing_game,
+    compute_focus,
+    compute_batch_focus,
+    compute_attribution_iou,
+    compute_batch_attribution_iou,
 )
 
 from explainiverse.evaluation.faithfulness_extended import (
@@ -191,4 +216,24 @@ __all__ = [
     "compute_batch_complexity",
     "compute_effective_complexity",
     "compute_batch_effective_complexity",
+    # Localisation metrics (Phase 3)
+    "LocalisationMask",
+    "compute_pointing_game",
+    "compute_batch_pointing_game",
+    "compute_attribution_localisation",
+    "compute_batch_attribution_localisation",
+    "compute_top_k_intersection",
+    "compute_batch_top_k_intersection",
+    "compute_relevance_mass_accuracy",
+    "compute_batch_relevance_mass_accuracy",
+    "compute_relevance_rank_accuracy",
+    "compute_batch_relevance_rank_accuracy",
+    "compute_auc",
+    "compute_batch_auc",
+    "compute_energy_based_pointing_game",
+    "compute_batch_energy_based_pointing_game",
+    "compute_focus",
+    "compute_batch_focus",
+    "compute_attribution_iou",
+    "compute_batch_attribution_iou",
 ]

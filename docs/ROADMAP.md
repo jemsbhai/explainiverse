@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.9.7
+- **Current Version:** v0.9.8
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (31 total)
+### Evaluation Metrics (40 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -72,6 +72,15 @@
 | **Complexity** | Sparseness | ✅ Complete | v0.9.5 | Chalasani et al., 2020 |
 | | Complexity | ✅ Complete | v0.9.5 | Bhatt et al., 2020 |
 | | Effective Complexity | ✅ Complete | v0.9.5 | Nguyen & Martínez, 2020 |
+| **Localisation** | Pointing Game | ✅ Complete | v0.9.8 | Zhang et al., 2018 |
+| | Attribution Localisation | ✅ Complete | v0.9.8 | Kohlbrenner et al., 2020 |
+| | Top-K Intersection | ✅ Complete | v0.9.8 | Theiner et al., 2021 |
+| | Relevance Mass Accuracy | ✅ Complete | v0.9.8 | Arras et al., 2022 |
+| | Relevance Rank Accuracy | ✅ Complete | v0.9.8 | Arras et al., 2022 |
+| | AUC (localisation) | ✅ Complete | v0.9.8 | Fawcett, 2006 |
+| | Energy-Based Pointing Game | ✅ Complete | v0.9.8 | Wang et al., 2020 |
+| | Focus | ✅ Complete | v0.9.8 | Arias-Duart et al., 2022 |
+| | Attribution IoU | ✅ Complete | v0.9.8 | — |
 
 ### Infrastructure
 
@@ -94,19 +103,19 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 31 → **52** | 31 implemented (Phase 1 ✅, Phase 2 ✅, Phase 4 ✅) |
+| **Explainiverse** | 40 → **52** | 40 implemented (Phase 1 ✅, Phase 2 ✅, Phase 3 ✅, Phase 4 ✅) |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
-| Phase | Version | Category | New Metrics | Running Total |
-|-------|---------|----------|-------------|---------------|
-| 1 | v0.9.x | Faithfulness | +6 | 22 |
-| 2 | v0.10.0 | Robustness | +7 | 28 |
-| 3 | v0.11.0 | Localisation | +8 | 36 |
-| 4 | v0.12.0 | Complexity | +3 | 39 |
-| 5 | v0.13.0 | Randomisation | +5 | 44 |
-| 6 | v0.14.0 | Axiomatic | +4 | 48 |
-| 7 | v0.15.0 | Fairness | +4 | 52 |
+| Phase | Version | Category | New Metrics | Running Total | Status |
+|-------|---------|----------|-------------|---------------|--------|
+| 1 | v0.8.x–v0.9.1 | Faithfulness | +6 | 22 | ✅ Complete |
+| 2 | v0.9.4–v0.9.7 | Robustness & Agreement | +9 | 31 | ✅ Complete |
+| 3 | v0.9.8 | Localisation | +9 | 40 | ✅ Complete |
+| 4 | v0.9.5 | Complexity | +3 | (included above) | ✅ Complete |
+| 5 | v0.10.0 | Randomisation | +5 | 45 | ⏳ Planned |
+| 6 | v0.11.0 | Axiomatic | +4 | 49 | ⏳ Planned |
+| 7 | v0.12.0 | Fairness | +4 | 53 | ⏳ Planned |
 
 ---
 
@@ -145,15 +154,16 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 - ✅ Feature Agreement (Krishna et al., 2022) (v0.9.7)
 - ✅ Rank Agreement (Krishna et al., 2022) (v0.9.7)
 
-### Phase 3: Localisation Metrics (v0.11.0)
-- Pointing Game
-- Top-K Intersection
-- Relevance Mass Accuracy
-- Relevance Rank Accuracy
-- Attribution Localisation
-- Focus
-- AUC (localisation)
-- Bounding Box metrics
+### Phase 3: Localisation Metrics — ✅ Complete
+- ✅ Pointing Game (Zhang et al., 2018) (v0.9.8)
+- ✅ Attribution Localisation (Kohlbrenner et al., 2020) (v0.9.8)
+- ✅ Top-K Intersection (Theiner et al., 2021) (v0.9.8)
+- ✅ Relevance Mass Accuracy (Arras et al., 2022) (v0.9.8)
+- ✅ Relevance Rank Accuracy (Arras et al., 2022) (v0.9.8)
+- ✅ AUC — localisation (Fawcett, 2006) (v0.9.8)
+- ✅ Energy-Based Pointing Game (Wang et al., 2020) (v0.9.8)
+- ✅ Focus (Arias-Duart et al., 2022) (v0.9.8)
+- ✅ Attribution IoU (v0.9.8)
 
 ### Phase 4: Complexity Metrics — ✅ Complete
 - ✅ Sparseness (Chalasani et al., 2020) (v0.9.5)
@@ -204,6 +214,7 @@ explainiverse/
 │   ├── stability.py          # Stability metrics
 │   ├── robustness.py         # Phase 2 robustness metrics
 │   ├── complexity.py         # Phase 4 complexity metrics
+│   ├── localisation.py       # Phase 3 localisation metrics
 │   ├── metrics.py            # AOPC, ROAR
 │   └── _utils.py             # Shared utilities
 └── engine/
@@ -259,6 +270,7 @@ explainiverse/
 | v0.9.5 | Feb 2025 | Phase 4 complexity metrics: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020) |
 | v0.9.6 | Feb 2025 | Phase 2 robustness: Consistency (Dasgupta et al., 2022), Relative Input Stability (Agarwal et al., 2022, Eq 2), Relative Representation Stability (Agarwal et al., 2022, Eq 3), Relative Output Stability (Agarwal et al., 2022, Eq 5), code quality fixes, low-validity warnings |
 | v0.9.7 | Feb 2025 | Phase 2 complete: Feature Agreement, Rank Agreement (Krishna et al., 2022) |
+| v0.9.8 | Feb 2025 | Phase 3 complete: 9 Localisation metrics — Pointing Game (Zhang et al., 2018), Attribution Localisation (Kohlbrenner et al., 2020), Top-K Intersection (Theiner et al., 2021), Relevance Mass Accuracy (Arras et al., 2022), Relevance Rank Accuracy (Arras et al., 2022), AUC (Fawcett, 2006), Energy-Based Pointing Game (Wang et al., 2020), Focus (Arias-Duart et al., 2022), Attribution IoU. Now at 40 metrics total — exceeds Quantus (37). |
 
 ---
 
@@ -281,7 +293,14 @@ explainiverse/
 - Infidelity: Yeh et al., 2019
 - ROAD: Rong et al., 2022
 - Insertion/Deletion: Petsiuk et al., 2018
+- Pointing Game: Zhang et al., 2018
+- Attribution Localisation: Kohlbrenner et al., 2020
+- Top-K Intersection: Theiner et al., 2021
+- Relevance Mass/Rank Accuracy: Arras et al., 2022
+- ROC-AUC: Fawcett, 2006
+- Energy-Based Pointing Game (Score-CAM): Wang et al., 2020
+- Focus: Arias-Duart et al., 2022
 
 ---
 
-*Last updated: February 2025 (v0.9.7)*
+*Last updated: February 2025 (v0.9.8)*

@@ -112,8 +112,15 @@
 | Feature Agreement | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Rank Agreement | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Localisation** |
-| Pointing Game | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Top-K Intersection | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Pointing Game | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Attribution Localisation | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Top-K Intersection | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Relevance Mass Accuracy | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Relevance Rank Accuracy | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| AUC (localisation) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Energy-Based Pointing Game | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Focus | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Attribution IoU | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Complexity** |
 | Sparseness | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Complexity | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -146,7 +153,7 @@
 | Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
 |--------|:-------------:|:-------:|:-------:|:------:|:-------:|
 | **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
-| **Evaluation Metrics** | 31 → **52** | 37 | 0 | 0 | 22 |
+| **Evaluation Metrics** | **40** → 53 | 37 | 0 | 0 | 22 |
 | **Data Types** | 2 | N/A | 4 | 4 | 1 |
 | **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
 
@@ -154,12 +161,12 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.9.7)
+### Current Strengths (v0.9.8)
 
 | Strength | Description |
 |----------|-------------|
 | **Unified Registry** | Plugin architecture with rich metadata, filtering by scope/model/data type |
-| **Growing Evaluation Suite** | 31 metrics now, targeting 52 (will exceed Quantus's 37) |
+| **Evaluation Suite Leadership** | 40 metrics — exceeds Quantus (37), targeting 53. Most comprehensive XAI evaluation framework. |
 | **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
 | **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 | **SAGE** | Global Shapley importance - rare in other frameworks |
@@ -169,7 +176,7 @@
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 | **xgboost 3.x Support** | Compatible with xgboost 1.7–3.x via automatic SHAP compatibility patching |
 
-### Current Implementation (v0.9.7)
+### Current Implementation (v0.9.8)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -181,7 +188,7 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**31 Evaluation Metrics:**
+**40 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
 - Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n, IROF, Infidelity, ROAD
 - Insertion/Deletion: Insertion AUC, Deletion AUC (Petsiuk et al., 2018)
@@ -189,6 +196,7 @@
 - Robustness: Max-Sensitivity, Avg-Sensitivity (Yeh et al., 2019), Continuity (Montavon et al., 2018), Consistency (Dasgupta et al., 2022), Relative Input Stability / RIS (Agarwal et al., 2022, Eq 2), Relative Representation Stability / RRS (Agarwal et al., 2022, Eq 3), Relative Output Stability / ROS (Agarwal et al., 2022, Eq 5)
 - Agreement: Feature Agreement, Rank Agreement (Krishna et al., 2022)
 - Complexity: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020)
+- Localisation: Pointing Game (Zhang et al., 2018), Attribution Localisation (Kohlbrenner et al., 2020), Top-K Intersection (Theiner et al., 2021), Relevance Mass Accuracy (Arras et al., 2022), Relevance Rank Accuracy (Arras et al., 2022), AUC (Fawcett, 2006), Energy-Based Pointing Game (Wang et al., 2020), Focus (Arias-Duart et al., 2022), Attribution IoU
 
 ---
 
@@ -206,8 +214,8 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 31 metrics)
-Target:  Explainiverse at (18 methods, 52 metrics) - Best in class for metrics!
+Current: Explainiverse at (18 methods, 40 metrics) - EXCEEDS Quantus (37)!
+Target:  Explainiverse at (18 methods, 53 metrics) - Undisputed leader for metrics!
 ```
 
 **Key Insight:** Explainiverse is uniquely positioned to become the **only framework** combining:
@@ -261,13 +269,13 @@ No other framework currently achieves both.
 
 ### Future Phases
 
-| Phase | Version | Category | New Metrics |
-|-------|---------|----------|-------------|
-| ~~2~~ | ~~v0.10.0~~ | ~~Robustness~~ | ✅ Complete |
-| 3 | v0.11.0 | Localisation | +8 |
-| 5 | v0.13.0 | Randomisation | +5 |
-| 6 | v0.14.0 | Axiomatic | +4 |
-| 7 | v0.15.0 | Fairness | +4 |
+| Phase | Version | Category | New Metrics | Status |
+|-------|---------|----------|-------------|--------|
+| ~~2~~ | ~~v0.10.0~~ | ~~Robustness~~ | ~~+9~~ | ✅ Complete |
+| ~~3~~ | ~~v0.11.0~~ | ~~Localisation~~ | ~~+9~~ | ✅ Complete |
+| 5 | v0.10.0 | Randomisation | +5 | ⏳ Planned |
+| 6 | v0.11.0 | Axiomatic | +4 | ⏳ Planned |
+| 7 | v0.12.0 | Fairness | +4 | ⏳ Planned |
 
 ---
 
@@ -278,7 +286,7 @@ No other framework currently achieves both.
 | Gap | Priority | Notes |
 |-----|----------|-------|
 | ~~Complete Phase 2 Robustness~~ | ✅ Done | All 9 metrics implemented |
-| Localisation metrics | 🟡 Medium | Phase 3 (8 metrics) |
+| ~~Localisation metrics~~ | ✅ Done | All 9 metrics implemented (Phase 3) |
 | Randomisation metrics | 🟡 Medium | Phase 5 (5 metrics) |
 
 ### For Methods Coverage (LOWER PRIORITY)
@@ -314,5 +322,5 @@ No other framework currently achieves both.
 
 ---
 
-*Last updated: February 2025 (v0.9.7)*
-*Next review: After Phase 3 (Localisation) begins*
+*Last updated: February 2025 (v0.9.8)*
+*Next review: After Phase 5 (Randomisation) begins*
