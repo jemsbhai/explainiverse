@@ -17,6 +17,8 @@ Includes:
   Focus, Attribution IoU) — Phase 3
 - Randomisation metrics (MPRT, Random Logit, Smooth MPRT, Efficient MPRT,
   Data Randomisation) — Phase 5
+- Axiomatic metrics (Completeness, Non-Sensitivity, Input Invariance,
+  Symmetry) — Phase 6
 """
 
 from explainiverse.evaluation.metrics import (
@@ -95,6 +97,22 @@ from explainiverse.evaluation.randomisation import (
     compute_data_randomisation,
     compute_data_randomisation_score,
     compute_batch_data_randomisation,
+)
+
+from explainiverse.evaluation.axiomatic import (
+    compute_completeness,
+    compute_completeness_score,
+    compute_batch_completeness,
+    compute_non_sensitivity,
+    compute_non_sensitivity_score,
+    compute_batch_non_sensitivity,
+    compute_input_invariance,
+    compute_input_invariance_pytorch,
+    compute_batch_input_invariance,
+    compute_batch_input_invariance_pytorch,
+    compute_symmetry,
+    compute_symmetry_score,
+    compute_batch_symmetry,
 )
 
 from explainiverse.evaluation.localisation import (
@@ -268,4 +286,18 @@ __all__ = [
     "compute_data_randomisation",
     "compute_data_randomisation_score",
     "compute_batch_data_randomisation",
+    # Axiomatic metrics (Phase 6)
+    "compute_completeness",
+    "compute_completeness_score",
+    "compute_batch_completeness",
+    "compute_non_sensitivity",
+    "compute_non_sensitivity_score",
+    "compute_batch_non_sensitivity",
+    "compute_input_invariance",
+    "compute_input_invariance_pytorch",
+    "compute_batch_input_invariance",
+    "compute_batch_input_invariance_pytorch",
+    "compute_symmetry",
+    "compute_symmetry_score",
+    "compute_batch_symmetry",
 ]

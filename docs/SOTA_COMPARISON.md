@@ -132,8 +132,10 @@
 | Efficient MPRT | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Data Randomisation Test | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Axiomatic** |
-| Completeness | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Non-Sensitivity | ⏳ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Completeness | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Non-Sensitivity | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Input Invariance | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Symmetry | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 **Legend:** ✅ = Implemented | ⏳ = Planned | ❌ = Not available
 
@@ -156,7 +158,7 @@
 | Metric | Explainiverse | Quantus | OmniXAI | Captum | OpenXAI |
 |--------|:-------------:|:-------:|:-------:|:------:|:-------:|
 | **Explanation Methods** | 18 | 0 | ~25 | ~20 | ~10 |
-| **Evaluation Metrics** | **45** → 53 | 37 | 0 | 0 | 22 |
+| **Evaluation Metrics** | **49** → 53 | 37 | 0 | 0 | 22 |
 | **Data Types** | 2 | N/A | 4 | 4 | 1 |
 | **ML Frameworks** | 2 | N/A | 3 | 1 | 1 |
 
@@ -164,12 +166,12 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.10.0)
+### Current Strengths (v0.11.0)
 
 | Strength | Description |
 |----------|-------------|
 | **Unified Registry** | Plugin architecture with rich metadata, filtering by scope/model/data type |
-| **Evaluation Suite Leadership** | 45 metrics — exceeds Quantus (37) by 22%, targeting 53. Most comprehensive XAI evaluation framework. |
+| **Evaluation Suite Leadership** | 49 metrics — exceeds Quantus (37) by 32%, targeting 53. Most comprehensive XAI evaluation framework. |
 | **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
 | **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 | **SAGE** | Global Shapley importance - rare in other frameworks |
@@ -179,7 +181,7 @@
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 | **xgboost 3.x Support** | Compatible with xgboost 1.7–3.x via automatic SHAP compatibility patching |
 
-### Current Implementation (v0.10.0)
+### Current Implementation (v0.11.0)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -191,7 +193,7 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**45 Evaluation Metrics:**
+**49 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
 - Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n, IROF, Infidelity, ROAD
 - Insertion/Deletion: Insertion AUC, Deletion AUC (Petsiuk et al., 2018)
@@ -201,6 +203,7 @@
 - Complexity: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020)
 - Localisation: Pointing Game (Zhang et al., 2018), Attribution Localisation (Kohlbrenner et al., 2020), Top-K Intersection (Theiner et al., 2021), Relevance Mass Accuracy (Arras et al., 2022), Relevance Rank Accuracy (Arras et al., 2022), AUC (Fawcett, 2006), Energy-Based Pointing Game (Wang et al., 2020), Focus (Arias-Duart et al., 2022), Attribution IoU
 - Randomisation: MPRT (Adebayo et al., 2018), Random Logit Test (Sixt et al., 2020), Smooth MPRT (Hedström et al., 2023), Efficient MPRT (Hedström et al., 2023), Data Randomisation Test (Adebayo et al., 2018)
+- Axiomatic: Completeness (Sundararajan et al., 2017), Non-Sensitivity (Nguyen & Martínez, 2020), Input Invariance — simplified + PyTorch (Kindermans et al., 2017), Symmetry (Sundararajan et al., 2017)
 
 ---
 
@@ -218,7 +221,7 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 45 metrics) - EXCEEDS Quantus (37) by 22%!
+Current: Explainiverse at (18 methods, 49 metrics) - EXCEEDS Quantus (37) by 32%!
 Target:  Explainiverse at (18 methods, 53 metrics) - Undisputed leader for metrics!
 ```
 
@@ -278,7 +281,7 @@ No other framework currently achieves both.
 | ~~2~~ | ~~v0.10.0~~ | ~~Robustness~~ | ~~+9~~ | ✅ Complete |
 | ~~3~~ | ~~v0.11.0~~ | ~~Localisation~~ | ~~+9~~ | ✅ Complete |
 | 5 | v0.10.0 | Randomisation | +5 | ✅ Complete |
-| 6 | v0.11.0 | Axiomatic | +4 | ⏳ Planned |
+| 6 | v0.11.0 | Axiomatic | +4 | ✅ Complete |
 | 7 | v0.12.0 | Fairness | +4 | ⏳ Planned |
 
 ---
@@ -326,8 +329,11 @@ No other framework currently achieves both.
 - MPRT / Data Randomisation: Adebayo et al., 2018
 - Random Logit Test: Sixt et al., 2020
 - Smooth MPRT / Efficient MPRT: Hedström et al., 2023
+- Completeness / Symmetry: Sundararajan et al., 2017 - "Axiomatic Attribution for Deep Networks"
+- Non-Sensitivity: Nguyen & Martínez, 2020 - "On Quantitative Aspects of Model Interpretability"
+- Input Invariance: Kindermans et al., 2017 - "The (Un)reliability of Saliency Methods"
 
 ---
 
-*Last updated: February 2025 (v0.10.0)*
-*Next review: After Phase 6 (Axiomatic) begins*
+*Last updated: February 2025 (v0.11.0)*
+*Next review: After Phase 7 (Fairness) begins*

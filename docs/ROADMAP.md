@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.10.0
+- **Current Version:** v0.11.0
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (45 total)
+### Evaluation Metrics (49 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -86,6 +86,10 @@
 | | Smooth MPRT | ✅ Complete | v0.10.0 | Hedström et al., 2023 |
 | | Efficient MPRT | ✅ Complete | v0.10.0 | Hedström et al., 2023 |
 | | Data Randomisation Test | ✅ Complete | v0.10.0 | Adebayo et al., 2018 |
+| **Axiomatic** | Completeness | ✅ Complete | v0.11.0 | Sundararajan et al., 2017 |
+| | Non-Sensitivity | ✅ Complete | v0.11.0 | Nguyen & Martínez, 2020 |
+| | Input Invariance | ✅ Complete | v0.11.0 | Kindermans et al., 2017 |
+| | Symmetry | ✅ Complete | v0.11.0 | Sundararajan et al., 2017 |
 
 ### Infrastructure
 
@@ -108,7 +112,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 |-----------|----------------|-------|
 | **Quantus** | 37 | Current SOTA for metrics |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 45 → **53** | 45 implemented (Phase 1–5 ✅) |
+| **Explainiverse** | 49 → **53** | 49 implemented (Phase 1–6 ✅) |
 
 ### Master Metrics Implementation Plan (7 Phases)
 
@@ -119,7 +123,7 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 | 3 | v0.9.8 | Localisation | +9 | 40 | ✅ Complete |
 | 4 | v0.9.5 | Complexity | +3 | (included above) | ✅ Complete |
 | 5 | v0.10.0 | Randomisation | +5 | 45 | ✅ Complete |
-| 6 | v0.11.0 | Axiomatic | +4 | 49 | ⏳ Planned |
+| 6 | v0.11.0 | Axiomatic | +4 | 49 | ✅ Complete |
 | 7 | v0.12.0 | Fairness | +4 | 53 | ⏳ Planned |
 
 ---
@@ -182,11 +186,11 @@ Explainiverse aims to provide the most comprehensive evaluation metrics suite am
 - ✅ Efficient MPRT (Hedström et al., 2023) (v0.10.0)
 - ✅ Data Randomisation Test (Adebayo et al., 2018) (v0.10.0)
 
-### Phase 6: Axiomatic Metrics (v0.14.0)
-- Completeness
-- Non-Sensitivity
-- Input Invariance
-- Symmetry
+### Phase 6: Axiomatic Metrics — ✅ Complete
+- ✅ Completeness (Sundararajan et al., 2017) (v0.11.0)
+- ✅ Non-Sensitivity (Nguyen & Martínez, 2020) (v0.11.0)
+- ✅ Input Invariance — simplified + PyTorch with model compensation (Kindermans et al., 2017) (v0.11.0)
+- ✅ Symmetry (Sundararajan et al., 2017) (v0.11.0)
 
 ### Phase 7: Fairness Metrics (v0.15.0)
 - Group Fairness
@@ -222,6 +226,7 @@ explainiverse/
 │   ├── complexity.py         # Phase 4 complexity metrics
 │   ├── localisation.py       # Phase 3 localisation metrics
 │   ├── randomisation.py      # Phase 5 randomisation metrics
+│   ├── axiomatic.py          # Phase 6 axiomatic metrics
 │   ├── metrics.py            # AOPC, ROAR
 │   └── _utils.py             # Shared utilities
 └── engine/
@@ -279,6 +284,7 @@ explainiverse/
 | v0.9.7 | Feb 2025 | Phase 2 complete: Feature Agreement, Rank Agreement (Krishna et al., 2022) |
 | v0.9.8 | Feb 2025 | Phase 3 complete: 9 Localisation metrics — Pointing Game (Zhang et al., 2018), Attribution Localisation (Kohlbrenner et al., 2020), Top-K Intersection (Theiner et al., 2021), Relevance Mass Accuracy (Arras et al., 2022), Relevance Rank Accuracy (Arras et al., 2022), AUC (Fawcett, 2006), Energy-Based Pointing Game (Wang et al., 2020), Focus (Arias-Duart et al., 2022), Attribution IoU. Now at 40 metrics total — exceeds Quantus (37). |
 | v0.10.0 | Feb 2025 | Phase 5 complete: 5 Randomisation metrics — MPRT (Adebayo et al., 2018), Random Logit Test (Sixt et al., 2020), Smooth MPRT (Hedström et al., 2023), Efficient MPRT (Hedström et al., 2023), Data Randomisation Test (Adebayo et al., 2018). scikit-image optional dependency. 45 metrics total. |
+| v0.11.0 | Feb 2025 | Phase 6 complete: 4 Axiomatic metrics — Completeness (Sundararajan et al., 2017), Non-Sensitivity with auto-detection + user override (Nguyen & Martínez, 2020), Input Invariance simplified + PyTorch with model compensation (Kindermans et al., 2017), Symmetry (Sundararajan et al., 2017). 49 metrics total, 32% ahead of Quantus. |
 
 ---
 
@@ -311,7 +317,10 @@ explainiverse/
 - MPRT / Data Randomisation: Adebayo et al., 2018 - "Sanity Checks for Saliency Maps"
 - Random Logit Test: Sixt et al., 2020 - "When Explanations Lie"
 - Smooth MPRT / Efficient MPRT: Hedström et al., 2023 - "Sanity Checks Revisited"
+- Completeness / Symmetry: Sundararajan et al., 2017 - "Axiomatic Attribution for Deep Networks"
+- Non-Sensitivity: Nguyen & Martínez, 2020 - "On Quantitative Aspects of Model Interpretability"
+- Input Invariance: Kindermans et al., 2017 - "The (Un)reliability of Saliency Methods"
 
 ---
 
-*Last updated: February 2025 (v0.10.0)*
+*Last updated: February 2025 (v0.11.0)*
