@@ -15,6 +15,8 @@ Includes:
 - Localisation metrics (Pointing Game, Attribution Localisation, Top-K Intersection,
   Relevance Mass Accuracy, Relevance Rank Accuracy, AUC, Energy-Based Pointing Game,
   Focus, Attribution IoU) — Phase 3
+- Randomisation metrics (MPRT, Random Logit, Smooth MPRT, Efficient MPRT,
+  Data Randomisation) — Phase 5
 """
 
 from explainiverse.evaluation.metrics import (
@@ -77,6 +79,22 @@ from explainiverse.evaluation.complexity import (
     compute_batch_complexity,
     compute_effective_complexity,
     compute_batch_effective_complexity,
+)
+
+from explainiverse.evaluation.randomisation import (
+    compute_mprt,
+    compute_mprt_score,
+    compute_batch_mprt,
+    compute_random_logit,
+    compute_random_logit_score,
+    compute_batch_random_logit,
+    compute_smooth_mprt,
+    compute_batch_smooth_mprt,
+    compute_efficient_mprt,
+    compute_batch_efficient_mprt,
+    compute_data_randomisation,
+    compute_data_randomisation_score,
+    compute_batch_data_randomisation,
 )
 
 from explainiverse.evaluation.localisation import (
@@ -236,4 +254,18 @@ __all__ = [
     "compute_batch_focus",
     "compute_attribution_iou",
     "compute_batch_attribution_iou",
+    # Randomisation metrics (Phase 5)
+    "compute_mprt",
+    "compute_mprt_score",
+    "compute_batch_mprt",
+    "compute_random_logit",
+    "compute_random_logit_score",
+    "compute_batch_random_logit",
+    "compute_smooth_mprt",
+    "compute_batch_smooth_mprt",
+    "compute_efficient_mprt",
+    "compute_batch_efficient_mprt",
+    "compute_data_randomisation",
+    "compute_data_randomisation_score",
+    "compute_batch_data_randomisation",
 ]
