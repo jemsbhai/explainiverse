@@ -4,7 +4,7 @@ Shared utility functions for evaluation metrics.
 """
 import numpy as np
 import re
-from typing import Union, Callable, List, Tuple
+from typing import Union, Callable, List, Tuple, Optional
 from explainiverse.core.explanation import Explanation
 
 
@@ -240,56 +240,94 @@ def resolve_k(k: Union[int, float], n_features: int) -> int:
         raise ValueError(f"k must be positive int or float in (0, 1], got {k}")
 
 
+def _get_prediction_proba_vector(
+    model,
+    instance: np.ndarray,
+) -> np.ndarray:
+    """
+    Get the full probability vector from a model for a single instance.
+
+    Works with both raw sklearn models (predict_proba) and explainiverse
+    adapters (predict returns probabilities).
+
+    Args:
+        model: Model adapter or raw sklearn model
+        instance: Single instance (1D or 2D array)
+
+    Returns:
+        1D numpy array of class probabilities, or 1-element array for
+        regression / single-output models.
+    """
+    instance_2d = np.asarray(instance)
+    if instance_2d.ndim == 1:
+        instance_2d = instance_2d.reshape(1, -1)
+
+    # Try predict_proba first (raw sklearn model)
+    if hasattr(model, 'predict_proba'):
+        proba = model.predict_proba(instance_2d)
+        proba = np.asarray(proba)
+        if proba.ndim == 2:
+            return proba[0]
+        return proba.flatten()
+
+    # Fall back to predict (adapter returns probs from predict)
+    pred = model.predict(instance_2d)
+    pred = np.asarray(pred)
+    if pred.ndim == 2:
+        return pred[0]
+    elif pred.ndim == 1:
+        # Could be single-output (regression) or class probabilities
+        return pred
+    return np.array([float(pred)])
+
+
 def get_prediction_value(
     model,
     instance: np.ndarray,
-    output_type: str = "probability"
+    output_type: str = "probability",
+    target_class: Optional[int] = None,
 ) -> float:
     """
     Get a scalar prediction value from a model.
-    
+
     Works with both raw sklearn models and explainiverse adapters.
-    For adapters, .predict() typically returns probabilities.
-    
+
+    IMPORTANT: When comparing predictions across original and perturbed
+    instances, always pass ``target_class`` so that the *same* class
+    probability is tracked.  Without ``target_class``, this function
+    returns P(argmax), which can hide class flips — if the model flips
+    to a different class with similar confidence, the returned value
+    barely changes even though the prediction is completely different.
+
     Args:
         model: Model adapter with predict/predict_proba methods
-        instance: Single instance (1D array)
-        output_type: "probability" (max prob) or "class" (predicted class)
-        
+        instance: Single instance (1D or 2D array)
+        output_type: "probability" or "class"
+        target_class: If provided, return P(target_class) instead of
+            P(argmax).  This is critical for faithfulness metrics that
+            compare original vs perturbed predictions.
+
     Returns:
         Scalar prediction value
     """
-    instance_2d = instance.reshape(1, -1)
-    
     if output_type == "probability":
-        # Try predict_proba first (raw sklearn model)
-        if hasattr(model, 'predict_proba'):
-            proba = model.predict_proba(instance_2d)
-            if isinstance(proba, np.ndarray):
-                if proba.ndim == 2:
-                    return float(np.max(proba[0]))
-                return float(np.max(proba))
-            return float(np.max(proba[0]))
-        
-        # Fall back to predict (adapter returns probs from predict)
-        pred = model.predict(instance_2d)
-        if isinstance(pred, np.ndarray):
-            if pred.ndim == 2:
-                return float(np.max(pred[0]))
-            elif pred.ndim == 1:
-                return float(np.max(pred))
-        return float(pred[0]) if hasattr(pred, '__getitem__') else float(pred)
-    
+        proba = _get_prediction_proba_vector(model, instance)
+
+        if target_class is not None:
+            # Return probability of the specified class
+            if target_class < len(proba):
+                return float(proba[target_class])
+            # Fallback: regression or single-output
+            return float(proba[0])
+
+        # No target_class — return probability of the predicted class
+        # (which equals max probability)
+        return float(np.max(proba))
+
     elif output_type == "class":
-        # For class prediction, use argmax of probabilities
-        if hasattr(model, 'predict_proba'):
-            proba = model.predict_proba(instance_2d)
-            return float(np.argmax(proba[0]))
-        pred = model.predict(instance_2d)
-        if isinstance(pred, np.ndarray) and pred.ndim == 2:
-            return float(np.argmax(pred[0]))
-        return float(pred[0]) if hasattr(pred, '__getitem__') else float(pred)
-    
+        proba = _get_prediction_proba_vector(model, instance)
+        return float(np.argmax(proba))
+
     else:
         raise ValueError(f"Unknown output_type: {output_type}")
 
@@ -302,19 +340,38 @@ def compute_prediction_change(
 ) -> float:
     """
     Compute the change in prediction between original and perturbed instances.
-    
+
+    Tracks the probability of the **originally predicted class** for both
+    instances.  This correctly detects class flips: if removing features
+    causes the model to confidently predict a *different* class, the
+    change in P(original_class) will be large, as it should be.
+
+    Previous implementation used max(P) independently for each instance,
+    which hid class flips — if the model switched from P(A)=0.9 to
+    P(B)=0.85, max(P) only changed by 0.05, when P(A) actually dropped
+    from 0.9 to ~0.1.
+
     Args:
         model: Model adapter
-        original: Original instance
-        perturbed: Perturbed instance
+        original: Original instance (1D array)
+        perturbed: Perturbed instance (1D array)
         metric: "absolute" for |p1 - p2|, "relative" for |p1 - p2| / p1
-        
+
     Returns:
         Prediction change value
     """
-    orig_pred = get_prediction_value(model, original)
-    pert_pred = get_prediction_value(model, perturbed)
-    
+    # Get full probability vector for the original instance
+    orig_proba = _get_prediction_proba_vector(model, original)
+
+    # Determine the originally predicted class
+    original_class = int(np.argmax(orig_proba))
+    orig_pred = float(orig_proba[original_class])
+
+    # Get P(original_class) for the perturbed instance
+    pert_pred = get_prediction_value(
+        model, perturbed, target_class=original_class
+    )
+
     if metric == "absolute":
         return abs(orig_pred - pert_pred)
     elif metric == "relative":
