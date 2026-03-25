@@ -126,7 +126,8 @@ class LimeExplainer(BaseExplainer):
             top_labels: Number of top predicted labels to explain
 
         Returns:
-            Explanation object with feature attributions
+            Explanation object with feature attributions keyed by original
+            feature names (not LIME's discretized feature strings).
         """
         instance = np.asarray(instance).flatten()
         
@@ -142,7 +143,20 @@ class LimeExplainer(BaseExplainer):
 
         label_index = lime_exp.top_labels[0]
         label_name = self.class_names[label_index]
-        attributions = dict(lime_exp.as_list(label=label_index))
+
+        # Use as_map() to get (feature_index, weight) pairs.
+        # This avoids the as_list() issue where LIME returns discretized
+        # feature strings like "petal width (cm) <= 0.80" instead of
+        # the original feature name "petal width (cm)".
+        index_weight_pairs = lime_exp.as_map()[label_index]
+
+        # Build attributions dict keyed by original feature names.
+        # Initialize all features to 0.0 so we always return a
+        # complete attribution vector even when num_features < total.
+        attributions = {fname: 0.0 for fname in self.feature_names}
+        for feat_idx, weight in index_weight_pairs:
+            if 0 <= feat_idx < len(self.feature_names):
+                attributions[self.feature_names[feat_idx]] = float(weight)
 
         return Explanation(
             explainer_name="LIME",
