@@ -1,19 +1,18 @@
-[tool.poetry]
+[project]
 name = "explainiverse"
 version = "0.12.0"
 description = "Unified, extensible explainability framework supporting 18 XAI methods including LIME, SHAP, LRP, TCAV, GradCAM, and more"
-authors = ["Muntaser Syed <jemsbhai@gmail.com>"]
+authors = [
+    { name = "Muntaser Syed", email = "jemsbhai@gmail.com" },
+]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/jemsbhai/explainiverse"
-homepage = "https://github.com/jemsbhai/explainiverse"
-packages = [{ include = "explainiverse", from = "src" }]
+requires-python = ">=3.10,<3.14"
 keywords = ["xai", "explainability", "interpretability", "machine-learning", "lime", "shap", "anchors"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -21,23 +20,27 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = [
+    "numpy>=1.24,<3.0",
+    "lime>=0.2.0.1,<1.0",
+    "scikit-learn>=1.6,<2.0",
+    "shap>=0.46,<1.0",
+    "pandas>=1.5,<3.0",
+    "scipy>=1.10,<3.0",
+    "xgboost>=1.7,<4.0",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<3.14"
-numpy = ">=1.24,<3.0"
-lime = ">=0.2.0.1,<1.0"
-scikit-learn = ">=1.6,<2.0"  # >=1.6 required for umap-learn compatibility
-shap = ">=0.46,<1.0"
-pandas = ">=1.5,<3.0"
-scipy = ">=1.10,<3.0"
-xgboost = ">=1.7,<4.0"
-torch = { version = ">=2.0", optional = true }
-scikit-image = { version = ">=0.20", optional = true }
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+image = ["scikit-image>=0.20"]
+all = ["torch>=2.0", "scikit-image>=0.20"]
 
-[tool.poetry.extras]
-torch = ["torch"]
-image = ["scikit-image"]
-all = ["torch", "scikit-image"]
+[project.urls]
+Homepage = "https://github.com/jemsbhai/explainiverse"
+Repository = "https://github.com/jemsbhai/explainiverse"
+
+[tool.poetry]
+packages = [{ include = "explainiverse", from = "src" }]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
@@ -64,7 +67,3 @@ line_length = 100
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
-
-[project.urls]
-"Bug Tracker" = "https://github.com/jemsbhai/explainiverse/issues"
-"Documentation" = "https://github.com/jemsbhai/explainiverse#readme"
