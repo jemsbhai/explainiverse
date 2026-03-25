@@ -395,7 +395,8 @@ class DeepLIFTExplainer(BaseExplainer):
         return Explanation(
             explainer_name="DeepLIFT",
             target_class=label_name,
-            explanation_data=explanation_data
+            explanation_data=explanation_data,
+            feature_names=self.feature_names,
         )
     
     def explain_batch(
@@ -484,6 +485,7 @@ class DeepLIFTExplainer(BaseExplainer):
         return Explanation(
             explainer_name="DeepLIFT_MultiBaseline",
             target_class=label_name,
+            feature_names=self.feature_names,
             explanation_data={
                 "feature_attributions": attributions,
                 "attributions_raw": avg_attributions.tolist(),
@@ -741,5 +743,6 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
         return Explanation(
             explainer_name="DeepSHAP",
             target_class=label_name,
-            explanation_data=explanation_data
+            explanation_data=explanation_data,
+            feature_names=self.feature_names,
         )
