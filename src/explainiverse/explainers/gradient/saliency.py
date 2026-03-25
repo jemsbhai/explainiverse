@@ -213,7 +213,8 @@ class SaliencyExplainer(BaseExplainer):
         return Explanation(
             explainer_name=explainer_name,
             target_class=label_name,
-            explanation_data=explanation_data
+            explanation_data=explanation_data,
+            feature_names=self.feature_names,
         )
     
     def explain_batch(
