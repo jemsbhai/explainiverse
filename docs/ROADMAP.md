@@ -40,11 +40,11 @@
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
-| **Faithfulness (Core)** | PGI | ✅ Complete | v0.3.0 | - |
-| | PGU | ✅ Complete | v0.3.0 | - |
+| **Faithfulness (Core)** | PGI | ✅ Complete | v0.3.0 | — |
+| | PGU | ✅ Complete | v0.3.0 | — |
 | | Comprehensiveness | ✅ Complete | v0.3.0 | DeYoung et al., 2020 |
 | | Sufficiency | ✅ Complete | v0.3.0 | DeYoung et al., 2020 |
-| | Faithfulness Correlation | ✅ Complete | v0.3.0 | - |
+| | Faithfulness Correlation | ✅ Complete | v0.3.0 | — |
 | **Faithfulness (Extended)** | Faithfulness Estimate | ✅ Complete | v0.8.1 | Alvarez-Melis et al., 2018 |
 | | Monotonicity | ✅ Complete | v0.8.2 | Arya et al., 2019 |
 | | Monotonicity-Nguyen | ✅ Complete | v0.8.3 | Nguyen et al., 2020 |
@@ -71,7 +71,7 @@
 | | Rank Agreement | ✅ Complete | v0.9.7 | Krishna et al., 2022 |
 | **Complexity** | Sparseness | ✅ Complete | v0.9.5 | Chalasani et al., 2020 |
 | | Complexity | ✅ Complete | v0.9.5 | Bhatt et al., 2020 |
-| | Effective Complexity | ✅ Complete | v0.9.5 | Nguyen & Martínez, 2020 |
+| | Effective Complexity | ✅ Complete | v0.9.5 | Nguyen & Martinez, 2020 |
 | **Localisation** | Pointing Game | ✅ Complete | v0.9.8 | Zhang et al., 2018 |
 | | Attribution Localisation | ✅ Complete | v0.9.8 | Kohlbrenner et al., 2020 |
 | | Top-K Intersection | ✅ Complete | v0.9.8 | Theiner et al., 2021 |
@@ -83,13 +83,19 @@
 | | Attribution IoU | ✅ Complete | v0.9.8 | — |
 | **Randomisation** | MPRT | ✅ Complete | v0.10.0 | Adebayo et al., 2018 |
 | | Random Logit Test | ✅ Complete | v0.10.0 | Sixt et al., 2020 |
-| | Smooth MPRT | ✅ Complete | v0.10.0 | Hedström et al., 2023 |
-| | Efficient MPRT | ✅ Complete | v0.10.0 | Hedström et al., 2023 |
+| | Smooth MPRT | ✅ Complete | v0.10.0 | Hedstrom et al., 2023 |
+| | Efficient MPRT | ✅ Complete | v0.10.0 | Hedstrom et al., 2023 |
 | | Data Randomisation Test | ✅ Complete | v0.10.0 | Adebayo et al., 2018 |
 | **Axiomatic** | Completeness | ✅ Complete | v0.11.0 | Sundararajan et al., 2017 |
-| | Non-Sensitivity | ✅ Complete | v0.11.0 | Nguyen & Martínez, 2020 |
+| | Non-Sensitivity | ✅ Complete | v0.11.0 | Nguyen & Martinez, 2020 |
 | | Input Invariance | ✅ Complete | v0.11.0 | Kindermans et al., 2017 |
 | | Symmetry | ✅ Complete | v0.11.0 | Sundararajan et al., 2017 |
+| **Fairness** | Group Fairness | ✅ Complete | v0.12.0 | Dai et al., 2022 |
+| | Individual Fairness | ✅ Complete | v0.12.0 | Dwork et al., 2012 |
+| | Counterfactual Explanation Fairness | ✅ Complete | v0.12.0 | Kusner et al., 2017 |
+| | Fidelity Disparity | ✅ Complete | v0.12.0 | Balagopalan et al., 2022 |
+| | Attribution Parity | ✅ Complete | v0.12.0 | Avodji et al., 2019 |
+| | Conditional Fairness | ✅ Complete | v0.12.0 | Hardt et al., 2016 |
 
 ### Infrastructure
 
@@ -98,6 +104,7 @@
 | BaseExplainer | ✅ Complete | Abstract base class |
 | Explanation | ✅ Complete | Unified output container |
 | ExplainerRegistry | ✅ Complete | Plugin system with metadata |
+| FairnessMetricRegistry | ✅ Complete | Extensible fairness metric registration |
 | SklearnAdapter | ✅ Complete | scikit-learn wrapper |
 | PyTorchAdapter | ✅ Complete | PyTorch wrapper with gradients |
 | ExplanationSuite | ✅ Complete | Multi-explainer comparison |
@@ -106,97 +113,124 @@
 
 ## Strategic Goal: Comprehensive Evaluation Metrics
 
-Explainiverse aims to provide the most comprehensive evaluation metrics suite among XAI frameworks:
+Explainiverse provides the most comprehensive evaluation metrics suite among XAI frameworks:
 
-| Framework | Current Metrics | Notes |
-|-----------|----------------|-------|
-| **Quantus** | 37 | Current SOTA for metrics |
+| Framework | Metrics | Notes |
+|-----------|---------|-------|
+| **Explainiverse** | **55** | All 7 phases complete ✅ |
+| **Quantus** | 37 | Previous SOTA |
 | **OpenXAI** | 22 | Academic benchmark |
-| **Explainiverse** | 49 → **53** | 49 implemented (Phase 1–6 ✅) |
 
-### Master Metrics Implementation Plan (7 Phases)
+**Explainiverse is 49% ahead of Quantus.**
+
+### Master Metrics Implementation Plan (7 Phases) — All Complete ✅
 
 | Phase | Version | Category | New Metrics | Running Total | Status |
 |-------|---------|----------|-------------|---------------|--------|
-| 1 | v0.8.x–v0.9.1 | Faithfulness | +6 | 22 | ✅ Complete |
+| 1 | v0.8.x–v0.9.1 | Faithfulness | +12 | 22 | ✅ Complete |
 | 2 | v0.9.4–v0.9.7 | Robustness & Agreement | +9 | 31 | ✅ Complete |
 | 3 | v0.9.8 | Localisation | +9 | 40 | ✅ Complete |
 | 4 | v0.9.5 | Complexity | +3 | (included above) | ✅ Complete |
 | 5 | v0.10.0 | Randomisation | +5 | 45 | ✅ Complete |
 | 6 | v0.11.0 | Axiomatic | +4 | 49 | ✅ Complete |
-| 7 | v0.12.0 | Fairness | +4 | 53 | ⏳ Planned |
+| 7 | v0.12.0 | Fairness | +6 | 55 | ✅ Complete |
 
 ---
 
 ## Phase 1: Faithfulness Metrics (✅ Complete)
 
-**Target:** v0.9.x with 12 additional faithfulness metrics (12/12 complete, 100%)
-
-| # | Metric | Reference | Status | Version |
-|---|--------|-----------|--------|---------|
-| 1 | Faithfulness Estimate | Alvarez-Melis et al., 2018 | ✅ Complete | v0.8.1 |
-| 2 | Monotonicity | Arya et al., 2019 | ✅ Complete | v0.8.2 |
-| 3 | Monotonicity-Nguyen | Nguyen et al., 2020 | ✅ Complete | v0.8.3 |
-| 4 | Pixel Flipping | Bach et al., 2015 | ✅ Complete | v0.8.4 |
-| 5 | Region Perturbation | Samek et al., 2015 | ✅ Complete | v0.8.5 |
-| 6 | Selectivity (AOPC) | Montavon et al., 2018 | ✅ Complete | v0.8.6 |
-| 7 | Sensitivity-n | Ancona et al., 2018 | ✅ Complete | v0.8.7 |
-| 8 | IROF | Rieger & Hansen, 2020 | ✅ Complete | v0.8.9 |
-| 9 | Infidelity | Yeh et al., 2019 | ✅ Complete | v0.8.10 |
-| 10 | ROAD | Rong et al., 2022 | ✅ Complete | v0.8.11 |
-| 11 | Insertion AUC | Petsiuk et al., 2018 | ✅ Complete | v0.9.1 |
-| 12 | Deletion AUC | Petsiuk et al., 2018 | ✅ Complete | v0.9.1 |
+| # | Metric | Reference | Version |
+|---|--------|-----------|---------|
+| 1 | Faithfulness Estimate | Alvarez-Melis et al., 2018 | v0.8.1 |
+| 2 | Monotonicity | Arya et al., 2019 | v0.8.2 |
+| 3 | Monotonicity-Nguyen | Nguyen et al., 2020 | v0.8.3 |
+| 4 | Pixel Flipping | Bach et al., 2015 | v0.8.4 |
+| 5 | Region Perturbation | Samek et al., 2015 | v0.8.5 |
+| 6 | Selectivity (AOPC) | Montavon et al., 2018 | v0.8.6 |
+| 7 | Sensitivity-n | Ancona et al., 2018 | v0.8.7 |
+| 8 | IROF | Rieger & Hansen, 2020 | v0.8.9 |
+| 9 | Infidelity | Yeh et al., 2019 | v0.8.10 |
+| 10 | ROAD | Rong et al., 2022 | v0.8.11 |
+| 11 | Insertion AUC | Petsiuk et al., 2018 | v0.9.1 |
+| 12 | Deletion AUC | Petsiuk et al., 2018 | v0.9.1 |
 
 ---
 
-## Future Phases (Planned)
+## Phase 2: Robustness & Agreement Metrics (✅ Complete)
 
-### Phase 2: Robustness & Agreement Metrics — ✅ Complete
-- ✅ Local Lipschitz Estimate (v0.7.0)
-- ✅ Max-Sensitivity (Yeh et al., 2019) (v0.9.4)
-- ✅ Avg-Sensitivity (Yeh et al., 2019) (v0.9.4)
-- ✅ Continuity (Montavon et al., 2018; Alvarez-Melis & Jaakkola, 2018) (v0.9.4)
-- ✅ Consistency (Dasgupta et al., 2022) (v0.9.6)
-- ✅ Relative Input Stability / RIS (Agarwal et al., 2022, Eq 2) (v0.9.6)
-- ✅ Relative Representation Stability / RRS (Agarwal et al., 2022, Eq 3) (v0.9.6)
-- ✅ Relative Output Stability / ROS (Agarwal et al., 2022, Eq 5) (v0.9.6)
-- ✅ Feature Agreement (Krishna et al., 2022) (v0.9.7)
-- ✅ Rank Agreement (Krishna et al., 2022) (v0.9.7)
+| # | Metric | Reference | Version |
+|---|--------|-----------|---------|
+| 1 | Max-Sensitivity | Yeh et al., 2019 | v0.9.4 |
+| 2 | Avg-Sensitivity | Yeh et al., 2019 | v0.9.4 |
+| 3 | Continuity | Montavon et al., 2018 | v0.9.4 |
+| 4 | Consistency | Dasgupta et al., 2022 | v0.9.6 |
+| 5 | Relative Input Stability (RIS) | Agarwal et al., 2022 (Eq 2) | v0.9.6 |
+| 6 | Relative Representation Stability (RRS) | Agarwal et al., 2022 (Eq 3) | v0.9.6 |
+| 7 | Relative Output Stability (ROS) | Agarwal et al., 2022 (Eq 5) | v0.9.6 |
+| 8 | Feature Agreement | Krishna et al., 2022 | v0.9.7 |
+| 9 | Rank Agreement | Krishna et al., 2022 | v0.9.7 |
 
-### Phase 3: Localisation Metrics — ✅ Complete
-- ✅ Pointing Game (Zhang et al., 2018) (v0.9.8)
-- ✅ Attribution Localisation (Kohlbrenner et al., 2020) (v0.9.8)
-- ✅ Top-K Intersection (Theiner et al., 2021) (v0.9.8)
-- ✅ Relevance Mass Accuracy (Arras et al., 2022) (v0.9.8)
-- ✅ Relevance Rank Accuracy (Arras et al., 2022) (v0.9.8)
-- ✅ AUC — localisation (Fawcett, 2006) (v0.9.8)
-- ✅ Energy-Based Pointing Game (Wang et al., 2020) (v0.9.8)
-- ✅ Focus (Arias-Duart et al., 2022) (v0.9.8)
-- ✅ Attribution IoU (v0.9.8)
+---
 
-### Phase 4: Complexity Metrics — ✅ Complete
-- ✅ Sparseness (Chalasani et al., 2020) (v0.9.5)
-- ✅ Complexity (Bhatt et al., 2020) (v0.9.5)
-- ✅ Effective Complexity (Nguyen & Martínez, 2020) (v0.9.5)
+## Phase 3: Localisation Metrics (✅ Complete)
 
-### Phase 5: Randomisation Metrics — ✅ Complete
-- ✅ MPRT — Model Parameter Randomisation Test (Adebayo et al., 2018) (v0.10.0)
-- ✅ Random Logit Test (Sixt et al., 2020) (v0.10.0)
-- ✅ Smooth MPRT (Hedström et al., 2023) (v0.10.0)
-- ✅ Efficient MPRT (Hedström et al., 2023) (v0.10.0)
-- ✅ Data Randomisation Test (Adebayo et al., 2018) (v0.10.0)
+| # | Metric | Reference | Version |
+|---|--------|-----------|---------|
+| 1 | Pointing Game | Zhang et al., 2018 | v0.9.8 |
+| 2 | Attribution Localisation | Kohlbrenner et al., 2020 | v0.9.8 |
+| 3 | Top-K Intersection | Theiner et al., 2021 | v0.9.8 |
+| 4 | Relevance Mass Accuracy | Arras et al., 2022 | v0.9.8 |
+| 5 | Relevance Rank Accuracy | Arras et al., 2022 | v0.9.8 |
+| 6 | AUC (localisation) | Fawcett, 2006 | v0.9.8 |
+| 7 | Energy-Based Pointing Game | Wang et al., 2020 | v0.9.8 |
+| 8 | Focus | Arias-Duart et al., 2022 | v0.9.8 |
+| 9 | Attribution IoU | — | v0.9.8 |
 
-### Phase 6: Axiomatic Metrics — ✅ Complete
-- ✅ Completeness (Sundararajan et al., 2017) (v0.11.0)
-- ✅ Non-Sensitivity (Nguyen & Martínez, 2020) (v0.11.0)
-- ✅ Input Invariance — simplified + PyTorch with model compensation (Kindermans et al., 2017) (v0.11.0)
-- ✅ Symmetry (Sundararajan et al., 2017) (v0.11.0)
+---
 
-### Phase 7: Fairness Metrics (v0.15.0)
-- Group Fairness
-- Individual Fairness
-- Counterfactual Fairness
-- Disparity metrics
+## Phase 4: Complexity Metrics (✅ Complete)
+
+| # | Metric | Reference | Version |
+|---|--------|-----------|---------|
+| 1 | Sparseness | Chalasani et al., 2020 | v0.9.5 |
+| 2 | Complexity | Bhatt et al., 2020 | v0.9.5 |
+| 3 | Effective Complexity | Nguyen & Martinez, 2020 | v0.9.5 |
+
+---
+
+## Phase 5: Randomisation Metrics (✅ Complete)
+
+| # | Metric | Reference | Version |
+|---|--------|-----------|---------|
+| 1 | MPRT | Adebayo et al., 2018 | v0.10.0 |
+| 2 | Random Logit Test | Sixt et al., 2020 | v0.10.0 |
+| 3 | Smooth MPRT | Hedstrom et al., 2023 | v0.10.0 |
+| 4 | Efficient MPRT | Hedstrom et al., 2023 | v0.10.0 |
+| 5 | Data Randomisation Test | Adebayo et al., 2018 | v0.10.0 |
+
+---
+
+## Phase 6: Axiomatic Metrics (✅ Complete)
+
+| # | Metric | Reference | Version |
+|---|--------|-----------|---------|
+| 1 | Completeness | Sundararajan et al., 2017 | v0.11.0 |
+| 2 | Non-Sensitivity | Nguyen & Martinez, 2020 | v0.11.0 |
+| 3 | Input Invariance | Kindermans et al., 2017 | v0.11.0 |
+| 4 | Symmetry | Sundararajan et al., 2017 | v0.11.0 |
+
+---
+
+## Phase 7: Fairness Metrics (✅ Complete)
+
+| # | Metric | Reference | Version |
+|---|--------|-----------|---------|
+| 1 | Group Fairness | Dai et al., 2022 | v0.12.0 |
+| 2 | Individual Fairness | Dwork et al., 2012 | v0.12.0 |
+| 3 | Counterfactual Explanation Fairness | Kusner et al., 2017 | v0.12.0 |
+| 4 | Fidelity Disparity | Balagopalan et al., 2022 | v0.12.0 |
+| 5 | Attribution Parity | Avodji et al., 2019 | v0.12.0 |
+| 6 | Conditional Fairness | Hardt et al., 2016 | v0.12.0 |
 
 ---
 
@@ -223,10 +257,12 @@ explainiverse/
 │   ├── faithfulness_extended.py  # Extended faithfulness (Phase 1)
 │   ├── stability.py          # Stability metrics
 │   ├── robustness.py         # Phase 2 robustness metrics
+│   ├── agreement.py          # Phase 2 agreement metrics
 │   ├── complexity.py         # Phase 4 complexity metrics
 │   ├── localisation.py       # Phase 3 localisation metrics
 │   ├── randomisation.py      # Phase 5 randomisation metrics
 │   ├── axiomatic.py          # Phase 6 axiomatic metrics
+│   ├── fairness.py           # Phase 7 fairness metrics + FairnessMetricRegistry
 │   ├── metrics.py            # AOPC, ROAR
 │   └── _utils.py             # Shared utilities
 └── engine/
@@ -255,10 +291,10 @@ explainiverse/
 
 | Version | Date | Changes |
 |---------|------|---------|
-| v0.1.0 | - | Initial release: LIME, SHAP, Anchors, PI, PDP |
-| v0.2.0 | - | TreeSHAP, Counterfactual, ALE, SAGE |
-| v0.3.0 | - | Evaluation metrics, IG, DeepLIFT, DeepSHAP, GradCAM |
-| v0.4.0 | - | ProtoDash |
+| v0.1.0 | — | Initial release: LIME, SHAP, Anchors, PI, PDP |
+| v0.2.0 | — | TreeSHAP, Counterfactual, ALE, SAGE |
+| v0.3.0 | — | Evaluation metrics, IG, DeepLIFT, DeepSHAP, GradCAM |
+| v0.4.0 | — | ProtoDash |
 | v0.5.0 | Jan 2025 | SmoothGrad |
 | v0.6.0 | Jan 2025 | Saliency Maps |
 | v0.7.0 | Jan 2025 | TCAV (Concept-Based Explanations) |
@@ -274,36 +310,36 @@ explainiverse/
 | v0.8.9 | Feb 2025 | IROF metric (Rieger & Hansen, 2020) |
 | v0.8.10 | Feb 2025 | Infidelity metric (Yeh et al., 2019) |
 | v0.8.11 | Feb 2025 | ROAD metric (Rong et al., 2022) |
-| v0.9.0 | Feb 2025 | Warning elimination (0 warnings), dependency audit, xgboost <4.0 support |
-| v0.9.1 | Feb 2025 | Fix xgboost 3.x compatibility with SHAP TreeExplainer (base_score array parsing) |
-| v0.9.2 | Feb 2025 | LIME default num_features changed to all features; Phase 1 ROADMAP cleanup |
-| v0.9.3 | Feb 2025 | Fix LRP device mismatch (CPU/CUDA), LRP double reshape (Unflatten+Conv2d), LRP MaxPool2d unpooling, GradCAM flat input for Unflatten models, scikit-learn >=1.6 lower bound |
-| v0.9.4 | Feb 2025 | Phase 2 robustness metrics: Max-Sensitivity, Avg-Sensitivity, Continuity (Yeh et al., 2019; Montavon et al., 2018) |
-| v0.9.5 | Feb 2025 | Phase 4 complexity metrics: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020) |
-| v0.9.6 | Feb 2025 | Phase 2 robustness: Consistency (Dasgupta et al., 2022), Relative Input Stability (Agarwal et al., 2022, Eq 2), Relative Representation Stability (Agarwal et al., 2022, Eq 3), Relative Output Stability (Agarwal et al., 2022, Eq 5), code quality fixes, low-validity warnings |
-| v0.9.7 | Feb 2025 | Phase 2 complete: Feature Agreement, Rank Agreement (Krishna et al., 2022) |
-| v0.9.8 | Feb 2025 | Phase 3 complete: 9 Localisation metrics — Pointing Game (Zhang et al., 2018), Attribution Localisation (Kohlbrenner et al., 2020), Top-K Intersection (Theiner et al., 2021), Relevance Mass Accuracy (Arras et al., 2022), Relevance Rank Accuracy (Arras et al., 2022), AUC (Fawcett, 2006), Energy-Based Pointing Game (Wang et al., 2020), Focus (Arias-Duart et al., 2022), Attribution IoU. Now at 40 metrics total — exceeds Quantus (37). |
-| v0.10.0 | Feb 2025 | Phase 5 complete: 5 Randomisation metrics — MPRT (Adebayo et al., 2018), Random Logit Test (Sixt et al., 2020), Smooth MPRT (Hedström et al., 2023), Efficient MPRT (Hedström et al., 2023), Data Randomisation Test (Adebayo et al., 2018). scikit-image optional dependency. 45 metrics total. |
-| v0.12.0 | Mar 2025 | Phase 7 complete: 6 Fairness metrics � Group Fairness (Dai et al., 2022), Individual Fairness (Dwork et al., 2012), Counterfactual Explanation Fairness (Kusner et al., 2017), Fidelity Disparity (Balagopalan et al., 2022), Attribution Parity (A�vodji et al., 2019), Conditional Fairness (Hardt et al., 2016). FairnessMetricRegistry for extensible custom metrics. 55 metrics total, 49% ahead of Quantus. |
-| v0.11.0 | Feb 2025 | Phase 6 complete: 4 Axiomatic metrics — Completeness (Sundararajan et al., 2017), Non-Sensitivity with auto-detection + user override (Nguyen & Martínez, 2020), Input Invariance simplified + PyTorch with model compensation (Kindermans et al., 2017), Symmetry (Sundararajan et al., 2017). 49 metrics total, 32% ahead of Quantus. |
+| v0.9.0 | Feb 2025 | Warning elimination, dependency audit, xgboost <4.0 support |
+| v0.9.1 | Feb 2025 | Fix xgboost 3.x compatibility with SHAP TreeExplainer |
+| v0.9.2 | Feb 2025 | LIME default num_features changed to all features |
+| v0.9.3 | Feb 2025 | Fix LRP device mismatch, GradCAM flat input, scikit-learn >=1.6 |
+| v0.9.4 | Feb 2025 | Phase 2: Max-Sensitivity, Avg-Sensitivity, Continuity |
+| v0.9.5 | Feb 2025 | Phase 4: Sparseness, Complexity, Effective Complexity |
+| v0.9.6 | Feb 2025 | Phase 2: Consistency, RIS, RRS, ROS (Agarwal et al., 2022) |
+| v0.9.7 | Feb 2025 | Phase 2 complete: Feature Agreement, Rank Agreement |
+| v0.9.8 | Feb 2025 | Phase 3 complete: 9 Localisation metrics. 40 total — exceeds Quantus (37) |
+| v0.10.0 | Feb 2025 | Phase 5 complete: 5 Randomisation metrics. 45 total |
+| v0.11.0 | Feb 2025 | Phase 6 complete: 4 Axiomatic metrics. 49 total, 32% ahead of Quantus |
+| v0.12.0 | Mar 2025 | Phase 7 complete: 6 Fairness metrics + FairnessMetricRegistry. 55 total, 49% ahead of Quantus |
 
 ---
 
 ## References
 
 ### Core Methods
-- LIME: Ribeiro et al., 2016 - "Why Should I Trust You?"
-- SHAP: Lundberg & Lee, 2017 - "A Unified Approach to Interpreting Model Predictions"
-- Integrated Gradients: Sundararajan et al., 2017 - "Axiomatic Attribution for Deep Networks"
-- TCAV: Kim et al., 2018 - "Interpretability Beyond Feature Attribution"
-- LRP: Bach et al., 2015 - "On Pixel-wise Explanations for Non-Linear Classifier Decisions"
+- LIME: Ribeiro et al., 2016 — "Why Should I Trust You?"
+- SHAP: Lundberg & Lee, 2017 — "A Unified Approach to Interpreting Model Predictions"
+- Integrated Gradients: Sundararajan et al., 2017 — "Axiomatic Attribution for Deep Networks"
+- TCAV: Kim et al., 2018 — "Interpretability Beyond Feature Attribution"
+- LRP: Bach et al., 2015 — "On Pixel-wise Explanations for Non-Linear Classifier Decisions"
 
 ### Evaluation Metrics
-- Faithfulness Estimate: Alvarez-Melis & Jaakkola, 2018 - "Towards Robust Interpretability"
-- Monotonicity: Arya et al., 2019 - "One Explanation Does Not Fit All"
-- Monotonicity-Nguyen: Nguyen & Martinez, 2020 - "Quantitative Evaluation of ML Explanations"
+- Faithfulness Estimate: Alvarez-Melis & Jaakkola, 2018 — "Towards Robust Interpretability"
+- Monotonicity: Arya et al., 2019 — "One Explanation Does Not Fit All"
+- Monotonicity-Nguyen: Nguyen & Martinez, 2020 — "Quantitative Evaluation of ML Explanations"
 - Pixel Flipping: Bach et al., 2015
-- Region Perturbation: Samek et al., 2015 - "Evaluating the Visualization of What a Deep Neural Network has Learned"
+- Region Perturbation: Samek et al., 2015 — "Evaluating the Visualization of What a Deep Neural Network has Learned"
 - IROF: Rieger & Hansen, 2020
 - Infidelity: Yeh et al., 2019
 - ROAD: Rong et al., 2022
@@ -315,19 +351,20 @@ explainiverse/
 - ROC-AUC: Fawcett, 2006
 - Energy-Based Pointing Game (Score-CAM): Wang et al., 2020
 - Focus: Arias-Duart et al., 2022
-- MPRT / Data Randomisation: Adebayo et al., 2018 - "Sanity Checks for Saliency Maps"
-- Random Logit Test: Sixt et al., 2020 - "When Explanations Lie"
-- Smooth MPRT / Efficient MPRT: Hedström et al., 2023 - "Sanity Checks Revisited"
-- Completeness / Symmetry: Sundararajan et al., 2017 - "Axiomatic Attribution for Deep Networks"
-- Non-Sensitivity: Nguyen & Martínez, 2020 - "On Quantitative Aspects of Model Interpretability"
-- Input Invariance: Kindermans et al., 2017 - "The (Un)reliability of Saliency Methods"
+- MPRT / Data Randomisation: Adebayo et al., 2018 — "Sanity Checks for Saliency Maps"
+- Random Logit Test: Sixt et al., 2020 — "When Explanations Lie"
+- Smooth MPRT / Efficient MPRT: Hedstrom et al., 2023 — "Sanity Checks Revisited"
+- Completeness / Symmetry: Sundararajan et al., 2017 — "Axiomatic Attribution for Deep Networks"
+- Non-Sensitivity: Nguyen & Martinez, 2020 — "On Quantitative Aspects of Model Interpretability"
+- Input Invariance: Kindermans et al., 2017 — "The (Un)reliability of Saliency Methods"
+
 ### Fairness Metrics
-- Group Fairness: Dai et al., 2022 - "Fairness via Explanation Quality" (AIES)
-- Individual Fairness: Dwork et al., 2012 - "Fairness Through Awareness" (ITCS)
-- Counterfactual Fairness: Kusner et al., 2017 - "Counterfactual Fairness" (NeurIPS)
-- Fidelity Disparity: Balagopalan et al., 2022 - "The Road to Explainability is Paved with Bias" (FAccT)
-- Attribution Parity: A�vodji et al., 2019 - "Fairwashing: the risk of rationalization" (ICML)
-- Conditional Fairness: Hardt et al., 2016 - "Equality of Opportunity in Supervised Learning" (NeurIPS)
+- Group Fairness: Dai et al., 2022 — "Fairness via Explanation Quality" (AIES)
+- Individual Fairness: Dwork et al., 2012 — "Fairness Through Awareness" (ITCS)
+- Counterfactual Fairness: Kusner et al., 2017 — "Counterfactual Fairness" (NeurIPS)
+- Fidelity Disparity: Balagopalan et al., 2022 — "The Road to Explainability is Paved with Bias" (FAccT)
+- Attribution Parity: Avodji et al., 2019 — "Fairwashing: the risk of rationalization" (ICML)
+- Conditional Fairness: Hardt et al., 2016 — "Equality of Opportunity in Supervised Learning" (NeurIPS)
 
 ---
 

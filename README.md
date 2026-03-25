@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **18 state-of-the-art explanation methods** across local, global, gradient-based, concept-based, and example-based paradigms, along with **55 evaluation metrics** across 8 categories (faithfulness, robustness, localisation, complexity, randomisation, axiomatic, agreement, and fairness) for assessing explanation quality.
+**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **18 state-of-the-art explanation methods** across local, global, gradient-based, concept-based, and example-based paradigms, along with **55 evaluation metrics** across 8 categories for assessing explanation quality — **49% more metrics than Quantus**, the previous state of the art.
 
 ---
 
@@ -13,9 +13,10 @@
 | Feature | Description |
 |---------|-------------|
 | **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
-| **55 Evaluation Metrics** | Faithfulness (PGI, PGU, Comprehensiveness, Sufficiency, Correlation, Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity, Sensitivity-n, IROF, Infidelity, ROAD, Insertion AUC, Deletion AUC), Stability (RIS, ROS, Lipschitz), Robustness (Max-Sensitivity, Avg-Sensitivity, Continuity), Complexity (Sparseness, Complexity, Effective Complexity) |
+| **55 Evaluation Metrics** | Faithfulness (17), Robustness (7), Localisation (9), Fairness (6), Randomisation (5), Axiomatic (4), Stability (3), Complexity (3), Agreement (2) — see detailed tables below |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
+| **Fairness Registry** | Extensible `FairnessMetricRegistry` with decorator-based registration |
 | **Framework Support** | Adapters for scikit-learn and PyTorch (with gradient computation) |
 
 ---
@@ -52,11 +53,11 @@
 
 ---
 
-## Evaluation Metrics
+## Evaluation Metrics (55 total)
 
-Explainiverse includes a comprehensive suite of evaluation metrics based on the XAI literature:
+Explainiverse provides the most comprehensive evaluation metrics suite among XAI frameworks, with 55 metrics across 8 categories — 49% more than Quantus (37 metrics).
 
-### Faithfulness Metrics
+### Faithfulness (17 metrics)
 
 | Metric | Description | Reference |
 |--------|-------------|-----------|
@@ -69,20 +70,93 @@ Explainiverse includes a comprehensive suite of evaluation metrics based on the 
 | **Monotonicity** | Sequential feature addition shows monotonic prediction increase | [Arya et al., 2019](https://arxiv.org/abs/1909.03012) |
 | **Monotonicity-Nguyen** | Spearman correlation between attributions and feature removal impact | [Nguyen & Martinez, 2020](https://arxiv.org/abs/2010.07455) |
 | **Pixel Flipping** | AUC of prediction degradation when removing features by importance | [Bach et al., 2015](https://doi.org/10.1371/journal.pone.0130140) |
-| **Region Perturbation** | AUC of prediction degradation when perturbing feature regions by importance | [Samek et al., 2015](https://arxiv.org/abs/1509.06321) |
-| **Selectivity (AOPC)** | Average prediction drop when sequentially removing features by importance | [Montavon et al., 2018](https://doi.org/10.1016/j.dsp.2017.10.011) |
-| **Sensitivity-n** | Correlation between attribution sums and prediction changes for random feature subsets | [Ancona et al., 2018](https://arxiv.org/abs/1711.06104) |
-| **IROF** | Area over curve measuring prediction degradation when iteratively removing features | [Rieger & Hansen, 2020](https://arxiv.org/abs/2003.08747) |
-| **Infidelity** | Measures how well attributions predict model output changes under perturbation | [Yeh et al., 2019](https://arxiv.org/abs/1901.09392) |
-| **ROAD** | RemOve And Debias - uses noisy linear imputation for out-of-distribution robust evaluation | [Rong et al., 2022](https://proceedings.mlr.press/v162/rong22a.html) |
+| **Region Perturbation** | AUC of prediction degradation when perturbing feature regions | [Samek et al., 2015](https://arxiv.org/abs/1509.06321) |
+| **Selectivity (AOPC)** | Average prediction drop when sequentially removing features | [Montavon et al., 2018](https://doi.org/10.1016/j.dsp.2017.10.011) |
+| **Sensitivity-n** | Correlation between attribution sums and prediction changes for subsets | [Ancona et al., 2018](https://arxiv.org/abs/1711.06104) |
+| **IROF** | Iterative Removal of Features — area over prediction degradation curve | [Rieger & Hansen, 2020](https://arxiv.org/abs/2003.08747) |
+| **Infidelity** | How well attributions predict model output changes under perturbation | [Yeh et al., 2019](https://arxiv.org/abs/1901.09392) |
+| **ROAD** | RemOve And Debias — noisy linear imputation for OOD-robust evaluation | [Rong et al., 2022](https://proceedings.mlr.press/v162/rong22a.html) |
+| **Insertion AUC** | AUC of prediction recovery when inserting features by importance | [Petsiuk et al., 2018](https://arxiv.org/abs/1806.07421) |
+| **Deletion AUC** | AUC of prediction degradation when deleting features by importance | [Petsiuk et al., 2018](https://arxiv.org/abs/1806.07421) |
 
-### Stability Metrics
+### Robustness (7 metrics)
 
 | Metric | Description | Reference |
 |--------|-------------|-----------|
-| **RIS** | Relative Input Stability | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
-| **ROS** | Relative Output Stability | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
-| **Lipschitz Estimate** | Local Lipschitz continuity | [Alvarez-Melis & Jaakkola, 2018](https://arxiv.org/abs/1806.08049) |
+| **Max-Sensitivity** | Maximum explanation change under input perturbation | [Yeh et al., 2019](https://arxiv.org/abs/1901.09392) |
+| **Avg-Sensitivity** | Average explanation change under input perturbation | [Yeh et al., 2019](https://arxiv.org/abs/1901.09392) |
+| **Continuity** | Lipschitz-based smoothness of explanation function | [Montavon et al., 2018](https://doi.org/10.1016/j.dsp.2017.10.011) |
+| **Consistency** | Agreement of explanations across similar inputs with same prediction | [Dasgupta et al., 2022](https://arxiv.org/abs/2202.00734) |
+| **Relative Input Stability (RIS)** | Normalized explanation change relative to input change | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
+| **Relative Representation Stability (RRS)** | Normalized explanation change relative to representation change | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
+| **Relative Output Stability (ROS)** | Normalized explanation change relative to output change | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
+
+### Localisation (9 metrics)
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **Pointing Game** | Whether max attribution falls within ground-truth region | [Zhang et al., 2018](https://arxiv.org/abs/1608.00507) |
+| **Attribution Localisation** | Fraction of positive attributions inside the ground-truth region | [Kohlbrenner et al., 2020](https://arxiv.org/abs/1910.09840) |
+| **Top-K Intersection** | Overlap between top-k attributed features and ground-truth features | [Theiner et al., 2021](https://arxiv.org/abs/2104.14995) |
+| **Relevance Mass Accuracy** | Mass of attribution within the ground-truth region | [Arras et al., 2022](https://arxiv.org/abs/2202.07397) |
+| **Relevance Rank Accuracy** | Rank accuracy of attribution within the ground-truth region | [Arras et al., 2022](https://arxiv.org/abs/2202.07397) |
+| **AUC** | ROC-AUC treating attribution as classifier for ground-truth mask | [Fawcett, 2006](https://doi.org/10.1016/j.patrec.2005.10.010) |
+| **Energy-Based Pointing Game** | Ratio of attribution energy inside vs total | [Wang et al., 2020](https://arxiv.org/abs/1910.01279) |
+| **Focus** | Concentration of attribution mass in relevant regions | [Arias-Duart et al., 2022](https://arxiv.org/abs/2202.03482) |
+| **Attribution IoU** | Intersection-over-Union between thresholded attribution and mask | — |
+
+### Fairness (6 metrics)
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **Group Fairness** | Disparity of explanation quality across demographic groups | [Dai et al., 2022](https://arxiv.org/abs/2205.07277) |
+| **Individual Fairness** | Similar individuals should receive similar explanations | [Dwork et al., 2012](https://arxiv.org/abs/1104.3913) |
+| **Counterfactual Explanation Fairness** | Fairness of counterfactual explanations across protected groups | [Kusner et al., 2017](https://arxiv.org/abs/1703.06856) |
+| **Fidelity Disparity** | Disparity in explanation fidelity across demographic groups | [Balagopalan et al., 2022](https://arxiv.org/abs/2205.03295) |
+| **Attribution Parity** | Equal distribution of feature attributions across groups | [Avodji et al., 2019](https://arxiv.org/abs/1901.09749) |
+| **Conditional Fairness** | Fairness of explanations conditioned on legitimate features | [Hardt et al., 2016](https://arxiv.org/abs/1610.02413) |
+
+### Randomisation (5 metrics)
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **MPRT** | Model Parameter Randomisation Test — sanity check for saliency | [Adebayo et al., 2018](https://arxiv.org/abs/1810.03292) |
+| **Random Logit Test** | Explanation sensitivity to output logit randomisation | [Sixt et al., 2020](https://arxiv.org/abs/1912.09818) |
+| **Smooth MPRT** | Smoothed variant of MPRT for reduced variance | [Hedström et al., 2023](https://arxiv.org/abs/2301.12431) |
+| **Efficient MPRT** | Computationally efficient MPRT approximation | [Hedström et al., 2023](https://arxiv.org/abs/2301.12431) |
+| **Data Randomisation Test** | Explanation sensitivity to training label randomisation | [Adebayo et al., 2018](https://arxiv.org/abs/1810.03292) |
+
+### Axiomatic (4 metrics)
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **Completeness** | Attributions sum to difference between output and baseline | [Sundararajan et al., 2017](https://arxiv.org/abs/1703.01365) |
+| **Non-Sensitivity** | Zero attribution for features that do not influence the output | [Nguyen & Martinez, 2020](https://arxiv.org/abs/2010.07455) |
+| **Input Invariance** | Attributions invariant to input transformations that preserve output | [Kindermans et al., 2017](https://arxiv.org/abs/1711.00867) |
+| **Symmetry** | Symmetric features receive equal attributions | [Sundararajan et al., 2017](https://arxiv.org/abs/1703.01365) |
+
+### Stability (3 metrics)
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **RIS** | Relative Input Stability (simplified) | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
+| **ROS** | Relative Output Stability (simplified) | [Agarwal et al., 2022](https://arxiv.org/abs/2203.06877) |
+| **Lipschitz Estimate** | Local Lipschitz continuity of explanation function | [Alvarez-Melis & Jaakkola, 2018](https://arxiv.org/abs/1806.08049) |
+
+### Complexity (3 metrics)
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **Sparseness** | Gini coefficient of attribution distribution | [Chalasani et al., 2020](https://arxiv.org/abs/1901.09392) |
+| **Complexity** | Entropy-based complexity of the attribution | [Bhatt et al., 2020](https://arxiv.org/abs/2005.00631) |
+| **Effective Complexity** | Number of features with attribution above threshold | [Nguyen & Martinez, 2020](https://arxiv.org/abs/2010.07455) |
+
+### Agreement (2 metrics)
+
+| Metric | Description | Reference |
+|--------|-------------|-----------|
+| **Feature Agreement** | Overlap in top-k features between two explanation methods | [Krishna et al., 2022](https://arxiv.org/abs/2202.01602) |
+| **Rank Agreement** | Rank correlation between two explanation methods | [Krishna et al., 2022](https://arxiv.org/abs/2202.01602) |
 
 ---
 
@@ -122,8 +196,8 @@ adapter = SklearnAdapter(model, class_names=iris.target_names.tolist())
 
 # List all available explainers
 print(default_registry.list_explainers())
-# ['lime', 'shap', 'treeshap', 'integrated_gradients', 'deeplift', 'deepshap', 
-#  'smoothgrad', 'saliency', 'gradcam', 'lrp', 'tcav', 'anchors', 'counterfactual', 
+# ['lime', 'shap', 'treeshap', 'integrated_gradients', 'deeplift', 'deepshap',
+#  'smoothgrad', 'saliency', 'gradcam', 'lrp', 'tcav', 'anchors', 'counterfactual',
 #  'protodash', 'permutation_importance', 'partial_dependence', 'ale', 'sage']
 
 # Create an explainer via registry
@@ -188,7 +262,7 @@ explainer = IntegratedGradientsExplainer(
 # Explain with convergence check
 explanation = explainer.explain(X[0], return_convergence_delta=True)
 print(f"Attributions: {explanation.explanation_data['feature_attributions']}")
-print(f"Convergence δ: {explanation.explanation_data['convergence_delta']:.6f}")
+print(f"Convergence delta: {explanation.explanation_data['convergence_delta']:.6f}")
 ```
 
 ### Layer-wise Relevance Propagation (LRP)
@@ -209,7 +283,7 @@ explainer = LRPExplainer(
 explanation = explainer.explain(X[0], target_class=0)
 print(explanation.explanation_data["feature_attributions"])
 
-# Verify conservation property (sum of attributions ≈ target output)
+# Verify conservation property (sum of attributions ~ target output)
 explanation = explainer.explain(X[0], return_convergence_delta=True)
 print(f"Conservation delta: {explanation.explanation_data['convergence_delta']:.6f}")
 
@@ -244,16 +318,9 @@ explanation = explainer_composite.explain(X[0])
 |------|-------------|----------|
 | `epsilon` | Adds stabilization constant | General purpose (default) |
 | `gamma` | Enhances positive contributions | Image classification |
-| `alpha_beta` | Separates pos/neg (α-β=1) | Fine-grained control |
+| `alpha_beta` | Separates pos/neg (alpha-beta=1) | Fine-grained control |
 | `z_plus` | Only positive weights | Input layers, what's present |
 | `composite` | Different rules per layer | Best practice for deep nets |
-
-**Supported Layers:**
-- Linear, Conv2d
-- BatchNorm1d, BatchNorm2d
-- ReLU, LeakyReLU, ELU, Tanh, Sigmoid, GELU
-- MaxPool2d, AvgPool2d, AdaptiveAvgPool2d
-- Flatten, Dropout
 
 ### DeepLIFT and DeepSHAP
 
@@ -279,41 +346,6 @@ deepshap = DeepLIFTShapExplainer(
 explanation = deepshap.explain(X[0])
 ```
 
-### Saliency Maps
-
-```python
-from explainiverse.explainers.gradient import SaliencyExplainer
-
-# Saliency Maps - simplest and fastest gradient method
-explainer = SaliencyExplainer(
-    model=adapter,
-    feature_names=feature_names,
-    class_names=class_names,
-    absolute_value=True  # Default: absolute gradient magnitudes
-)
-
-# Standard saliency (absolute gradients)
-explanation = explainer.explain(X[0], method="saliency")
-
-# Input × Gradient (gradient scaled by input values)
-explanation = explainer.explain(X[0], method="input_times_gradient")
-
-# Signed saliency (keep gradient direction)
-explainer_signed = SaliencyExplainer(
-    model=adapter,
-    feature_names=feature_names,
-    class_names=class_names,
-    absolute_value=False
-)
-explanation = explainer_signed.explain(X[0])
-
-# Compare all variants
-variants = explainer.compute_all_variants(X[0])
-print(variants["saliency_absolute"])
-print(variants["saliency_signed"])
-print(variants["input_times_gradient"])
-```
-
 ### SmoothGrad
 
 ```python
@@ -337,9 +369,6 @@ explanation = explainer.explain(X[0], method="smoothgrad_squared")
 
 # VarGrad (variance of gradients)
 explanation = explainer.explain(X[0], method="vargrad")
-
-# With absolute values
-explanation = explainer.explain(X[0], absolute_value=True)
 ```
 
 ### GradCAM for CNNs
@@ -359,87 +388,13 @@ explainer = GradCAMExplainer(
 
 explanation = explainer.explain(image)
 heatmap = explanation.explanation_data["heatmap"]
-overlay = explainer.get_overlay(original_image, heatmap, alpha=0.5)
-```
-
-### TCAV (Concept-Based Explanations)
-
-```python
-from explainiverse.explainers.gradient import TCAVExplainer
-
-# For neural network models with concept examples
-adapter = PyTorchAdapter(model, task="classification", class_names=class_names)
-
-# Create TCAV explainer targeting a specific layer
-explainer = TCAVExplainer(
-    model=adapter,
-    layer_name="layer3",  # Target layer for concept analysis
-    class_names=class_names
-)
-
-# Learn a concept from examples (e.g., "striped" pattern)
-explainer.learn_concept(
-    concept_name="striped",
-    concept_examples=striped_images,      # Images with stripes
-    negative_examples=random_images,      # Random images without stripes
-    min_accuracy=0.6                      # Minimum CAV classifier accuracy
-)
-
-# Compute TCAV score: fraction of inputs where concept positively influences prediction
-tcav_score = explainer.compute_tcav_score(
-    test_inputs=test_images,
-    target_class=0,           # e.g., "zebra"
-    concept_name="striped"
-)
-print(f"TCAV score: {tcav_score:.3f}")  # >0.5 means concept positively influences class
-
-# Statistical significance testing against random concepts
-result = explainer.statistical_significance_test(
-    test_inputs=test_images,
-    target_class=0,
-    concept_name="striped",
-    n_random=10,
-    negative_examples=random_images
-)
-print(f"p-value: {result['p_value']:.4f}, significant: {result['significant']}")
-
-# Full explanation with multiple concepts
-explanation = explainer.explain(
-    test_inputs=test_images,
-    target_class=0,
-    run_significance_test=True
-)
-print(explanation.explanation_data["tcav_scores"])
 ```
 
 ---
 
-## Example-Based Explanations
+## Evaluation Examples
 
-### ProtoDash
-
-```python
-from explainiverse.explainers.example_based import ProtoDashExplainer
-
-explainer = ProtoDashExplainer(
-    model=adapter,
-    training_data=X_train,
-    feature_names=feature_names,
-    n_prototypes=5,
-    kernel="rbf",
-    gamma=0.1
-)
-
-explanation = explainer.explain(X_test[0])
-print(explanation.explanation_data["prototype_indices"])
-print(explanation.explanation_data["prototype_weights"])
-```
-
----
-
-## Evaluation Metrics
-
-### Faithfulness Evaluation
+### Faithfulness
 
 ```python
 from explainiverse.evaluation import (
@@ -448,82 +403,88 @@ from explainiverse.evaluation import (
     compute_faithfulness_correlation
 )
 
-# PGI - Higher is better (important features affect predictions)
-pgi = compute_pgi(
-    model=adapter,
-    instance=X[0],
-    attributions=attributions,
-    feature_names=feature_names,
-    top_k=3
-)
+pgi = compute_pgi(model=adapter, instance=X[0], attributions=attributions,
+                  feature_names=feature_names, top_k=3)
 
-# PGU - Lower is better (unimportant features don't affect predictions)
-pgu = compute_pgu(
-    model=adapter,
-    instance=X[0],
-    attributions=attributions,
-    feature_names=feature_names,
-    top_k=3
-)
-
-# Comprehensiveness - Higher is better
-comp = compute_comprehensiveness(
-    model=adapter,
-    instance=X[0],
-    attributions=attributions,
-    feature_names=feature_names,
-    top_k_values=[1, 2, 3, 5]
-)
-
-# Sufficiency - Lower is better
-suff = compute_sufficiency(
-    model=adapter,
-    instance=X[0],
-    attributions=attributions,
-    feature_names=feature_names,
-    top_k_values=[1, 2, 3, 5]
-)
-
-# Faithfulness Correlation
-corr = compute_faithfulness_correlation(
-    model=adapter,
-    instance=X[0],
-    attributions=attributions,
-    feature_names=feature_names
-)
+comp = compute_comprehensiveness(model=adapter, instance=X[0], attributions=attributions,
+                                 feature_names=feature_names, top_k_values=[1, 2, 3, 5])
 ```
 
-### Stability Evaluation
+### Robustness
 
 ```python
 from explainiverse.evaluation import (
-    compute_ris, compute_ros, compute_lipschitz_estimate
+    compute_max_sensitivity, compute_avg_sensitivity,
+    compute_continuity, compute_consistency,
+    compute_relative_input_stability
 )
 
-# RIS - Relative Input Stability (lower is better)
-ris = compute_ris(
-    explainer=explainer,
-    instance=X[0],
-    n_perturbations=10,
-    perturbation_scale=0.1
+max_sens = compute_max_sensitivity(
+    explainer=explainer, instance=X[0],
+    n_perturbations=10, perturbation_scale=0.1
+)
+```
+
+### Localisation
+
+```python
+from explainiverse.evaluation import (
+    LocalisationMask, compute_pointing_game,
+    compute_attribution_localisation, compute_attribution_iou
 )
 
-# ROS - Relative Output Stability (lower is better)
-ros = compute_ros(
-    model=adapter,
-    explainer=explainer,
-    instance=X[0],
-    n_perturbations=10,
-    perturbation_scale=0.1
+mask = LocalisationMask(mask=binary_mask, feature_names=feature_names)
+pg = compute_pointing_game(attributions=attributions, mask=mask)
+iou = compute_attribution_iou(attributions=attributions, mask=mask, threshold=0.5)
+```
+
+### Fairness
+
+```python
+from explainiverse.evaluation import (
+    compute_group_fairness, compute_individual_fairness,
+    compute_counterfactual_fairness, compute_fidelity_disparity,
+    compute_attribution_parity, compute_conditional_fairness
 )
 
-# Lipschitz Estimate (lower is better)
-lipschitz = compute_lipschitz_estimate(
-    explainer=explainer,
-    instance=X[0],
-    n_perturbations=20,
-    perturbation_scale=0.1
+gf = compute_group_fairness(
+    attributions_list=attributions_list,
+    sensitive_features=group_labels,
+    inner_metric=None  # defaults to L1 norm
 )
+
+ind_f = compute_individual_fairness(
+    attributions_list=attributions_list,
+    instances=X, distance_threshold=0.5
+)
+```
+
+### Randomisation
+
+```python
+from explainiverse.evaluation import compute_mprt, compute_random_logit
+
+mprt = compute_mprt(model=pytorch_model, explainer=explainer,
+                    instance=X[0], target_class=0)
+
+rlt = compute_random_logit(model=pytorch_model, explainer=explainer,
+                           instance=X[0], target_class=0)
+```
+
+### Axiomatic
+
+```python
+from explainiverse.evaluation import (
+    compute_completeness, compute_non_sensitivity,
+    compute_input_invariance, compute_symmetry
+)
+
+comp = compute_completeness(model=adapter, instance=X[0],
+                            attributions=attributions, baseline=baseline)
+
+sym = compute_symmetry(model=adapter, instance=X[0],
+                       attributions=attributions,
+                       symmetric_indices=[(0, 1)])
 ```
 
 ---
@@ -540,37 +501,19 @@ from explainiverse.explainers import (
 
 # Permutation Importance
 perm_imp = PermutationImportanceExplainer(
-    model=adapter,
-    X=X_test,
-    y=y_test,
-    feature_names=feature_names,
-    n_repeats=10
+    model=adapter, X=X_test, y=y_test,
+    feature_names=feature_names, n_repeats=10
 )
 explanation = perm_imp.explain()
 
-# Partial Dependence Plot
-pdp = PartialDependenceExplainer(
-    model=adapter,
-    X=X_train,
-    feature_names=feature_names
-)
-explanation = pdp.explain(feature="feature_0", grid_resolution=50)
-
 # ALE (handles correlated features)
-ale = ALEExplainer(
-    model=adapter,
-    X=X_train,
-    feature_names=feature_names
-)
+ale = ALEExplainer(model=adapter, X=X_train, feature_names=feature_names)
 explanation = ale.explain(feature="feature_0", n_bins=20)
 
 # SAGE (global Shapley importance)
 sage = SAGEExplainer(
-    model=adapter,
-    X=X_train,
-    y=y_train,
-    feature_names=feature_names,
-    n_permutations=512
+    model=adapter, X=X_train, y=y_train,
+    feature_names=feature_names, n_permutations=512
 )
 explanation = sage.explain()
 ```
@@ -599,21 +542,7 @@ suite.compare()
 
 ## Custom Explainer Registration
 
-Explainiverse's plugin architecture allows you to register your own custom explainers and have them integrate seamlessly with the registry's discovery, filtering, and recommendation system.
-
-### Why Register Custom Explainers?
-
-| Benefit | Description |
-|---------|-------------|
-| **Discoverability** | Your explainer appears in `list_explainers()` and can be filtered by criteria |
-| **Rich Metadata** | Attach scope, model types, data types, paper references, and complexity info |
-| **Unified API** | Create instances via `default_registry.create("my_explainer", ...)` |
-| **Recommendations** | Your explainer can be recommended based on the user's use case |
-| **Consistency** | Follows the same `BaseExplainer` interface as all built-in methods |
-
-### Method 1: Decorator-Based Registration (Recommended)
-
-The cleanest way to register a custom explainer:
+Explainiverse's plugin architecture allows you to register custom explainers that integrate seamlessly with the registry's discovery, filtering, and recommendation system.
 
 ```python
 from explainiverse import default_registry, BaseExplainer, Explanation
@@ -622,41 +551,25 @@ from explainiverse.core.registry import ExplainerMeta
 @default_registry.register_decorator(
     name="my_explainer",
     meta=ExplainerMeta(
-        scope="local",                              # "local" or "global"
-        model_types=["any"],                        # ["any", "tree", "linear", "neural", "ensemble"]
-        data_types=["tabular"],                     # ["tabular", "image", "text", "time_series"]
+        scope="local",
+        model_types=["any"],
+        data_types=["tabular"],
         task_types=["classification", "regression"],
         description="My custom attribution method",
         paper_reference="Author et al., 2024 - 'My Method' (Conference)",
-        complexity="O(n * d)",                      # Computational complexity
+        complexity="O(n * d)",
         requires_training_data=False,
         supports_batching=True
     )
 )
 class MyExplainer(BaseExplainer):
-    """Custom explainer implementing your attribution method."""
-    
     def __init__(self, model, feature_names, class_names=None, **kwargs):
         super().__init__(model)
         self.feature_names = feature_names
         self.class_names = class_names
-    
+
     def explain(self, instance, target_class=None, **kwargs):
-        """
-        Generate explanation for a single instance.
-        
-        Args:
-            instance: Input to explain (1D array for tabular)
-            target_class: Class to explain (optional)
-            **kwargs: Additional method-specific parameters
-            
-        Returns:
-            Explanation object with feature attributions
-        """
-        # Your attribution logic here
         attributions = self._compute_attributions(instance, target_class)
-        
-        # Return standardized Explanation object
         return Explanation(
             explainer_name="MyExplainer",
             target_class=str(target_class or 0),
@@ -664,124 +577,6 @@ class MyExplainer(BaseExplainer):
             feature_names=self.feature_names,
             metadata={"method": "my_method", "params": kwargs}
         )
-    
-    def _compute_attributions(self, instance, target_class):
-        """Compute feature attributions (implement your method here)."""
-        # Example: simple gradient-like computation
-        import numpy as np
-        attributions = {}
-        for i, name in enumerate(self.feature_names):
-            attributions[name] = float(np.random.randn())  # Replace with real logic
-        return attributions
-```
-
-### Method 2: Programmatic Registration
-
-For dynamic registration or when decorators aren't suitable:
-
-```python
-from explainiverse import default_registry, BaseExplainer, Explanation
-from explainiverse.core.registry import ExplainerMeta, get_default_registry
-
-# Define your explainer class
-class AnotherExplainer(BaseExplainer):
-    def __init__(self, model, feature_names, **kwargs):
-        super().__init__(model)
-        self.feature_names = feature_names
-    
-    def explain(self, instance, **kwargs):
-        # Implementation
-        return Explanation(
-            explainer_name="AnotherExplainer",
-            target_class="0",
-            explanation_data={"feature_attributions": {}},
-            feature_names=self.feature_names
-        )
-
-# Register programmatically
-registry = get_default_registry()
-registry.register(
-    name="another_explainer",
-    explainer_class=AnotherExplainer,
-    meta=ExplainerMeta(
-        scope="local",
-        model_types=["neural"],
-        data_types=["image"],
-        description="Another custom explainer"
-    )
-)
-```
-
-### Using Your Registered Explainer
-
-Once registered, your explainer works like any built-in method:
-
-```python
-# Verify registration
-print(default_registry.list_explainers())  # [..., 'my_explainer', ...]
-
-# Check metadata
-meta = default_registry.get_meta("my_explainer")
-print(meta.description)  # "My custom attribution method"
-
-# Create via registry
-explainer = default_registry.create(
-    "my_explainer",
-    model=adapter,
-    feature_names=feature_names,
-    class_names=class_names
-)
-
-# Generate explanations
-explanation = explainer.explain(X[0])
-print(explanation.get_top_features(k=5))
-
-# Your explainer is now discoverable via filtering
-local_explainers = default_registry.filter(scope="local")
-print("my_explainer" in local_explainers)  # True
-
-# And included in recommendations
-recommended = default_registry.recommend(
-    model_type="any",
-    data_type="tabular",
-    scope_preference="local"
-)
-```
-
-### ExplainerMeta Fields Reference
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `scope` | `str` | **Required.** `"local"` (instance-level) or `"global"` (model-level) |
-| `model_types` | `List[str]` | Compatible models: `["any", "tree", "linear", "neural", "ensemble"]` |
-| `data_types` | `List[str]` | Compatible data: `["tabular", "image", "text", "time_series"]` |
-| `task_types` | `List[str]` | Compatible tasks: `["classification", "regression"]` |
-| `description` | `str` | Human-readable description (shown in `summary()`) |
-| `paper_reference` | `str` | Citation for the method's paper |
-| `complexity` | `str` | Computational complexity (e.g., `"O(n^2)"`) |
-| `requires_training_data` | `bool` | Whether `explain()` needs background/training data |
-| `supports_batching` | `bool` | Whether the explainer can process batches efficiently |
-
-### Managing Registrations
-
-```python
-from explainiverse.core.registry import get_default_registry
-
-registry = get_default_registry()
-
-# Override an existing registration
-registry.register(
-    name="my_explainer",
-    explainer_class=ImprovedExplainer,
-    meta=ExplainerMeta(scope="local", description="Improved version"),
-    override=True  # Required to replace existing
-)
-
-# Unregister an explainer
-registry.unregister("my_explainer")
-
-# View summary of all registered explainers
-print(registry.summary())
 ```
 
 ---
@@ -791,24 +586,34 @@ print(registry.summary())
 ```
 explainiverse/
 ├── core/
-│   ├── explainer.py      # BaseExplainer abstract class
-│   ├── explanation.py    # Unified Explanation container
-│   └── registry.py       # ExplainerRegistry with metadata
+│   ├── explainer.py          # BaseExplainer abstract class
+│   ├── explanation.py        # Unified Explanation container
+│   └── registry.py           # ExplainerRegistry with metadata
 ├── adapters/
-│   ├── sklearn_adapter.py
-│   └── pytorch_adapter.py  # With gradient support
+│   ├── sklearn_adapter.py    # scikit-learn models
+│   └── pytorch_adapter.py    # PyTorch with gradient support
 ├── explainers/
-│   ├── attribution/      # LIME, SHAP, TreeSHAP
-│   ├── gradient/         # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP, TCAV
-│   ├── rule_based/       # Anchors
-│   ├── counterfactual/   # DiCE-style
-│   ├── global_explainers/  # Permutation, PDP, ALE, SAGE
-│   └── example_based/    # ProtoDash
+│   ├── attribution/          # LIME, SHAP, TreeSHAP
+│   ├── gradient/             # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP, TCAV
+│   ├── rule_based/           # Anchors
+│   ├── counterfactual/       # DiCE-style
+│   ├── global_explainers/    # Permutation, PDP, ALE, SAGE
+│   └── example_based/        # ProtoDash
 ├── evaluation/
-│   ├── faithfulness.py   # PGI, PGU, Comprehensiveness, Sufficiency
-│   └── stability.py      # RIS, ROS, Lipschitz
+│   ├── faithfulness.py       # Core faithfulness (PGI, PGU, Comprehensiveness, Sufficiency)
+│   ├── faithfulness_extended.py  # 12 extended faithfulness metrics
+│   ├── stability.py          # RIS, ROS, Lipschitz (simplified)
+│   ├── robustness.py         # 7 robustness metrics (Phase 2)
+│   ├── agreement.py          # Feature Agreement, Rank Agreement (Phase 2)
+│   ├── complexity.py         # Sparseness, Complexity, Effective Complexity (Phase 4)
+│   ├── localisation.py       # 9 localisation metrics (Phase 3)
+│   ├── randomisation.py      # 5 randomisation metrics (Phase 5)
+│   ├── axiomatic.py          # 4 axiomatic metrics (Phase 6)
+│   ├── fairness.py           # 6 fairness metrics + FairnessMetricRegistry (Phase 7)
+│   ├── metrics.py            # AOPC, ROAR
+│   └── _utils.py             # Shared utilities
 └── engine/
-    └── suite.py          # Multi-explainer comparison
+    └── suite.py              # Multi-explainer comparison
 ```
 
 ---
@@ -823,7 +628,7 @@ poetry run pytest
 poetry run pytest --cov=explainiverse --cov-report=html
 
 # Run specific test file
-poetry run pytest tests/test_lrp.py -v
+poetry run pytest tests/test_fairness.py -v
 
 # Run specific test class
 poetry run pytest tests/test_lrp.py::TestLRPConv2d -v
@@ -833,31 +638,15 @@ poetry run pytest tests/test_lrp.py::TestLRPConv2d -v
 
 ## Roadmap
 
-### Completed ✅
+### Completed
 - [x] Core framework (BaseExplainer, Explanation, Registry)
-- [x] Perturbation methods: LIME, KernelSHAP, TreeSHAP
-- [x] Gradient methods: Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++
-- [x] Decomposition methods: Layer-wise Relevance Propagation (LRP) with ε, γ, αβ, z⁺, composite rules
-- [x] Concept-based: TCAV (Testing with Concept Activation Vectors)
-- [x] Rule-based: Anchors
-- [x] Counterfactual: DiCE-style
-- [x] Global: Permutation Importance, PDP, ALE, SAGE
-- [x] Example-based: ProtoDash
-- [x] Evaluation: Faithfulness metrics (PGI, PGU, Comprehensiveness, Sufficiency, Correlation)
-- [x] Evaluation: Stability metrics (RIS, ROS, Lipschitz)
+- [x] 18 explainers across 7 categories
+- [x] 55 evaluation metrics across 8 categories
 - [x] PyTorch adapter with gradient support
+- [x] FairnessMetricRegistry for extensible fairness evaluation
+- [x] Plugin system with decorator-based registration
 
-### In Progress 🔄
-- [ ] **Evaluation metrics expansion** - Adding 42 more metrics across 7 categories to exceed Quantus (37 metrics)
-  - Phase 1: Faithfulness (+12 metrics) - 10/12 complete
-  - Phase 2: Robustness (+7 metrics)
-  - Phase 3: Localisation (+8 metrics)
-  - Phase 4: Complexity (+4 metrics)
-  - Phase 5: Randomisation (+5 metrics)
-  - Phase 6: Axiomatic (+4 metrics)
-  - Phase 7: Fairness (+4 metrics)
-
-### Planned 📋
+### Planned
 - [ ] Attention-based explanations (for Transformers)
 - [ ] TensorFlow/Keras adapter
 - [ ] Interactive visualization dashboard
@@ -876,7 +665,7 @@ If you use Explainiverse in your research, please cite:
   author = {Syed, Muntaser},
   year = {2025},
   url = {https://github.com/jemsbhai/explainiverse},
-  version = {0.9.1}
+  version = {0.12.0}
 }
 ```
 
