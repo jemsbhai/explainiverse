@@ -4,7 +4,7 @@
 
 **Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI) designed for rigorous research and production use.
 
-- **Current Version:** v0.11.0
+- **Current Version:** v0.12.0
 - **Repository:** [github.com/jemsbhai/explainiverse](https://github.com/jemsbhai/explainiverse)
 - **PyPI:** [pypi.org/project/explainiverse](https://pypi.org/project/explainiverse/)
 - **Python:** 3.10+
@@ -36,7 +36,7 @@
 | | ALE | ✅ Complete | v0.2.0 |
 | | SAGE | ✅ Complete | v0.2.0 |
 
-### Evaluation Metrics (49 total)
+### Evaluation Metrics (55 total)
 
 | Category | Metric | Status | Version | Reference |
 |----------|--------|--------|---------|-----------|
@@ -284,6 +284,7 @@ explainiverse/
 | v0.9.7 | Feb 2025 | Phase 2 complete: Feature Agreement, Rank Agreement (Krishna et al., 2022) |
 | v0.9.8 | Feb 2025 | Phase 3 complete: 9 Localisation metrics — Pointing Game (Zhang et al., 2018), Attribution Localisation (Kohlbrenner et al., 2020), Top-K Intersection (Theiner et al., 2021), Relevance Mass Accuracy (Arras et al., 2022), Relevance Rank Accuracy (Arras et al., 2022), AUC (Fawcett, 2006), Energy-Based Pointing Game (Wang et al., 2020), Focus (Arias-Duart et al., 2022), Attribution IoU. Now at 40 metrics total — exceeds Quantus (37). |
 | v0.10.0 | Feb 2025 | Phase 5 complete: 5 Randomisation metrics — MPRT (Adebayo et al., 2018), Random Logit Test (Sixt et al., 2020), Smooth MPRT (Hedström et al., 2023), Efficient MPRT (Hedström et al., 2023), Data Randomisation Test (Adebayo et al., 2018). scikit-image optional dependency. 45 metrics total. |
+| v0.12.0 | Mar 2025 | Phase 7 complete: 6 Fairness metrics � Group Fairness (Dai et al., 2022), Individual Fairness (Dwork et al., 2012), Counterfactual Explanation Fairness (Kusner et al., 2017), Fidelity Disparity (Balagopalan et al., 2022), Attribution Parity (A�vodji et al., 2019), Conditional Fairness (Hardt et al., 2016). FairnessMetricRegistry for extensible custom metrics. 55 metrics total, 49% ahead of Quantus. |
 | v0.11.0 | Feb 2025 | Phase 6 complete: 4 Axiomatic metrics — Completeness (Sundararajan et al., 2017), Non-Sensitivity with auto-detection + user override (Nguyen & Martínez, 2020), Input Invariance simplified + PyTorch with model compensation (Kindermans et al., 2017), Symmetry (Sundararajan et al., 2017). 49 metrics total, 32% ahead of Quantus. |
 
 ---
@@ -320,7 +321,14 @@ explainiverse/
 - Completeness / Symmetry: Sundararajan et al., 2017 - "Axiomatic Attribution for Deep Networks"
 - Non-Sensitivity: Nguyen & Martínez, 2020 - "On Quantitative Aspects of Model Interpretability"
 - Input Invariance: Kindermans et al., 2017 - "The (Un)reliability of Saliency Methods"
+### Fairness Metrics
+- Group Fairness: Dai et al., 2022 - "Fairness via Explanation Quality" (AIES)
+- Individual Fairness: Dwork et al., 2012 - "Fairness Through Awareness" (ITCS)
+- Counterfactual Fairness: Kusner et al., 2017 - "Counterfactual Fairness" (NeurIPS)
+- Fidelity Disparity: Balagopalan et al., 2022 - "The Road to Explainability is Paved with Bias" (FAccT)
+- Attribution Parity: A�vodji et al., 2019 - "Fairwashing: the risk of rationalization" (ICML)
+- Conditional Fairness: Hardt et al., 2016 - "Equality of Opportunity in Supervised Learning" (NeurIPS)
 
 ---
 
-*Last updated: February 2025 (v0.11.0)*
+*Last updated: March 2025 (v0.12.0)*

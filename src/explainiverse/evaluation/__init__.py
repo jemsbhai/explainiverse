@@ -19,6 +19,8 @@ Includes:
   Data Randomisation) — Phase 5
 - Axiomatic metrics (Completeness, Non-Sensitivity, Input Invariance,
   Symmetry) — Phase 6
+- Fairness metrics (Group Fairness, Individual Fairness, Counterfactual Fairness,
+  Fidelity Disparity, Attribution Parity, Conditional Fairness) — Phase 7
 """
 
 from explainiverse.evaluation.metrics import (
@@ -169,6 +171,20 @@ from explainiverse.evaluation.faithfulness_extended import (
     compute_insertion_deletion_auc,
 )
 
+from explainiverse.evaluation.fairness import (
+    FairnessMetricRegistry,
+    FairnessMetricMeta,
+    get_default_fairness_registry,
+    compute_group_fairness,
+    compute_group_fairness_score,
+    compute_batch_group_fairness,
+    compute_individual_fairness,
+    compute_counterfactual_fairness,
+    compute_fidelity_disparity,
+    compute_attribution_parity,
+    compute_conditional_fairness,
+)
+
 __all__ = [
     # Perturbation metrics (existing)
     "compute_aopc",
@@ -300,4 +316,16 @@ __all__ = [
     "compute_symmetry",
     "compute_symmetry_score",
     "compute_batch_symmetry",
+    # Fairness metrics (Phase 7)
+    "FairnessMetricRegistry",
+    "FairnessMetricMeta",
+    "get_default_fairness_registry",
+    "compute_group_fairness",
+    "compute_group_fairness_score",
+    "compute_batch_group_fairness",
+    "compute_individual_fairness",
+    "compute_counterfactual_fairness",
+    "compute_fidelity_disparity",
+    "compute_attribution_parity",
+    "compute_conditional_fairness",
 ]

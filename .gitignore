@@ -53,3 +53,5 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+# Local improvement plans (not for public repo)
+improvements/

@@ -166,12 +166,12 @@
 
 ## Explainiverse Competitive Position
 
-### Current Strengths (v0.11.0)
+### Current Strengths (v0.12.0)
 
 | Strength | Description |
 |----------|-------------|
 | **Unified Registry** | Plugin architecture with rich metadata, filtering by scope/model/data type |
-| **Evaluation Suite Leadership** | 49 metrics — exceeds Quantus (37) by 32%, targeting 53. Most comprehensive XAI evaluation framework. |
+| **Evaluation Suite Leadership** | 55 metrics — exceeds Quantus (37) by 49%, Most comprehensive XAI evaluation framework. |
 | **Complete Gradient Family** | IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP |
 | **LRP with Multiple Rules** | ε, γ, αβ, z⁺, composite - comprehensive propagation rules |
 | **SAGE** | Global Shapley importance - rare in other frameworks |
@@ -181,7 +181,7 @@
 | **Clean API** | Consistent BaseExplainer interface across all methods |
 | **xgboost 3.x Support** | Compatible with xgboost 1.7–3.x via automatic SHAP compatibility patching |
 
-### Current Implementation (v0.11.0)
+### Current Implementation (v0.12.0)
 
 **18 Explainers:**
 - Local Perturbation: LIME, KernelSHAP, TreeSHAP
@@ -193,7 +193,7 @@
 - Example-Based: ProtoDash
 - Global: Permutation Importance, PDP, ALE, SAGE
 
-**49 Evaluation Metrics:**
+**55 Evaluation Metrics:**
 - Faithfulness (Core): PGI, PGU, Comprehensiveness, Sufficiency, Faithfulness Correlation
 - Faithfulness (Extended): Faithfulness Estimate, Monotonicity, Monotonicity-Nguyen, Pixel Flipping, Region Perturbation, Selectivity (AOPC), Sensitivity-n, IROF, Infidelity, ROAD
 - Insertion/Deletion: Insertion AUC, Deletion AUC (Petsiuk et al., 2018)
@@ -203,7 +203,7 @@
 - Complexity: Sparseness (Chalasani et al., 2020), Complexity (Bhatt et al., 2020), Effective Complexity (Nguyen & Martínez, 2020)
 - Localisation: Pointing Game (Zhang et al., 2018), Attribution Localisation (Kohlbrenner et al., 2020), Top-K Intersection (Theiner et al., 2021), Relevance Mass Accuracy (Arras et al., 2022), Relevance Rank Accuracy (Arras et al., 2022), AUC (Fawcett, 2006), Energy-Based Pointing Game (Wang et al., 2020), Focus (Arias-Duart et al., 2022), Attribution IoU
 - Randomisation: MPRT (Adebayo et al., 2018), Random Logit Test (Sixt et al., 2020), Smooth MPRT (Hedström et al., 2023), Efficient MPRT (Hedström et al., 2023), Data Randomisation Test (Adebayo et al., 2018)
-- Axiomatic: Completeness (Sundararajan et al., 2017), Non-Sensitivity (Nguyen & Martínez, 2020), Input Invariance — simplified + PyTorch (Kindermans et al., 2017), Symmetry (Sundararajan et al., 2017)
+- Fairness: Group Fairness (Dai et al., 2022), Individual Fairness (Dwork et al., 2012), Counterfactual Explanation Fairness (Kusner et al., 2017), Fidelity Disparity (Balagopalan et al., 2022), Attribution Parity (A�vodji et al., 2019), Conditional Fairness (Hardt et al., 2016)- Axiomatic: Completeness (Sundararajan et al., 2017), Non-Sensitivity (Nguyen & Martínez, 2020), Input Invariance — simplified + PyTorch (Kindermans et al., 2017), Symmetry (Sundararajan et al., 2017)
 
 ---
 
@@ -221,8 +221,8 @@
                          Low                      High
                               Evaluation Metrics
 
-Current: Explainiverse at (18 methods, 49 metrics) - EXCEEDS Quantus (37) by 32%!
-Target:  Explainiverse at (18 methods, 53 metrics) - Undisputed leader for metrics!
+Current: Explainiverse at (18 methods, 55 metrics) - EXCEEDS Quantus (37) by 49%!
+ACHIEVED: Undisputed leader for XAI evaluation metrics!
 ```
 
 **Key Insight:** Explainiverse is uniquely positioned to become the **only framework** combining:
@@ -332,8 +332,14 @@ No other framework currently achieves both.
 - Completeness / Symmetry: Sundararajan et al., 2017 - "Axiomatic Attribution for Deep Networks"
 - Non-Sensitivity: Nguyen & Martínez, 2020 - "On Quantitative Aspects of Model Interpretability"
 - Input Invariance: Kindermans et al., 2017 - "The (Un)reliability of Saliency Methods"
+- Group Fairness: Dai et al., 2022 - "Fairness via Explanation Quality" (AIES)
+- Fidelity Disparity: Balagopalan et al., 2022 - "The Road to Explainability is Paved with Bias" (FAccT)
+- Individual Fairness: Dwork et al., 2012 - "Fairness Through Awareness" (ITCS)
+- Counterfactual Fairness: Kusner et al., 2017 - "Counterfactual Fairness" (NeurIPS)
+- Conditional Fairness: Hardt et al., 2016 - "Equality of Opportunity in Supervised Learning" (NeurIPS)
+- Attribution Parity / Fairwashing: A�vodji et al., 2019 - "Fairwashing: the risk of rationalization" (ICML)
 
 ---
 
-*Last updated: February 2025 (v0.11.0)*
-*Next review: After Phase 7 (Fairness) begins*
+*Last updated: March 2025 (v0.12.0)*
+*All 7 phases complete. 55 metrics across 8 categories.*
