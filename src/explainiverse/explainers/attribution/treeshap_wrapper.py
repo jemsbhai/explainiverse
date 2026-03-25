@@ -65,7 +65,6 @@ def _get_raw_model(model):
     
     TreeExplainer needs the actual sklearn/xgboost model, not an adapter.
     """
-    # If it's an adapter, get the underlying model
     if hasattr(model, 'model'):
         return model.model
     return model
@@ -80,15 +79,8 @@ def _patch_shap_xgboost3_compat():
     calls ``float(base_score)`` in ``XGBTreeModelLoader.__init__`` and
     raises ``ValueError``.
 
-    This function wraps that ``__init__`` so the ``ValueError`` is caught
-    and the array is parsed correctly.  The per-class base scores are
-    stored as ``loader.original_base_scores`` for downstream use.
+    The patch is idempotent -- calling it multiple times is safe.
 
-    The patch is idempotent — calling it multiple times is safe.
-
-    Notes
-    -----
-    This workaround is needed until SHAP adds native xgboost 3.x support.
     See https://github.com/shap/shap/issues/3750
     """
     try:
@@ -110,20 +102,10 @@ def _patch_shap_xgboost3_compat():
             if "could not convert string to float" not in str(exc):
                 raise
 
-            # ----- Fix the data and retry the original init -----
-            # xgboost 3.x serializes multiclass base_score as a JSON array
-            # string (e.g. '[0.476,0.476,0.048]') inside the UBJ model
-            # dump.  SHAP's init calls float() on it and fails.
-            #
-            # Strategy: temporarily monkey-patch decode_ubjson_buffer so
-            # that the base_score is replaced with its scalar mean *before*
-            # the original init reads it.  This lets ALL of the original
-            # attribute-setting code run unmodified (node_cleft, values,
-            # thresholds, categories, etc.).
             import shap.explainers._tree as _tree_mod
 
             _orig_decode = _tree_mod.decode_ubjson_buffer
-            _captured_base_scores = [None]  # mutable closure for per-class scores
+            _captured_base_scores = [None]
 
             def _fixed_decode(fd):
                 result = _orig_decode(fd)
@@ -169,7 +151,7 @@ class TreeShapExplainer(BaseExplainer):
     
     Key advantages over KernelSHAP:
     - Exact SHAP values (not approximations)
-    - O(TLD²) complexity vs O(TL2^M) for KernelSHAP
+    - O(TLD^2) complexity vs O(TL2^M) for KernelSHAP
     - Can compute interaction values
     - No background data sampling needed
     
@@ -241,14 +223,107 @@ class TreeShapExplainer(BaseExplainer):
         if model_output != "auto":
             explainer_kwargs["model_output"] = model_output
         
-        # Patch SHAP's XGBTreeModelLoader to handle xgboost 3.x array
-        # base_score before constructing TreeExplainer.  Idempotent.
         _patch_shap_xgboost3_compat()
         
         self.explainer = shap.TreeExplainer(raw_model, **explainer_kwargs)
-        
         self.background_data = background_data
-    
+
+    def _extract_class_shap_values(
+        self,
+        shap_values,
+        X: np.ndarray,
+        sample_index: int,
+        target_class: Optional[int],
+    ):
+        """
+        Extract per-feature SHAP values for the target class from a single
+        sample within a (possibly batched) shap_values result.
+
+        TreeExplainer.shap_values() can return:
+          1. list of arrays -- one (n_samples, n_features) array per class.
+          2. 3D ndarray (n_samples, n_features, n_classes).
+          3. 2D ndarray (n_samples, n_features) -- binary/regression.
+          4. 1D ndarray (n_features,) -- single sample, single output.
+
+        Args:
+            shap_values: Raw output from TreeExplainer.shap_values().
+            X: The input instances as 2D array.
+            sample_index: Which sample to extract (for batch calls).
+            target_class: Which class to explain. If None, uses predicted class.
+
+        Returns:
+            (class_shap, label_index, label_name) where class_shap is
+            a 1D array of shape (n_features,).
+        """
+        # Determine target class from prediction if not specified
+        if target_class is None and hasattr(self.raw_model, 'predict'):
+            pred = self.raw_model.predict(
+                X[sample_index:sample_index + 1]
+            )[0]
+            resolved_class = int(pred)
+        elif target_class is not None:
+            resolved_class = target_class
+        else:
+            resolved_class = 0
+
+        # Case 1: list of arrays -- one per class
+        if isinstance(shap_values, list):
+            n_classes = len(shap_values)
+            tc = min(resolved_class, n_classes - 1)
+            class_shap = np.asarray(shap_values[tc])
+            if class_shap.ndim == 2:
+                class_shap = class_shap[sample_index]
+            # else already 1D
+
+            if self.class_names and tc < len(self.class_names):
+                label_name = self.class_names[tc]
+            else:
+                label_name = f"class_{tc}"
+
+            return class_shap, tc, label_name
+
+        # From here, shap_values is an ndarray
+        shap_arr = np.asarray(shap_values)
+
+        # Case 2: 3D -- (n_samples, n_features, n_classes)
+        if shap_arr.ndim == 3:
+            n_classes = shap_arr.shape[2]
+            tc = min(resolved_class, n_classes - 1)
+            class_shap = shap_arr[sample_index, :, tc]
+
+            if self.class_names and tc < len(self.class_names):
+                label_name = self.class_names[tc]
+            else:
+                label_name = f"class_{tc}"
+
+            return class_shap, tc, label_name
+
+        # Case 3: 2D -- (n_samples, n_features) -- binary/regression
+        if shap_arr.ndim == 2:
+            class_shap = shap_arr[sample_index]
+            if self.class_names and len(self.class_names) > 1:
+                label_name = self.class_names[1]
+            elif self.class_names:
+                label_name = self.class_names[0]
+            else:
+                label_name = "output"
+            return class_shap, 0, label_name
+
+        # Case 4: 1D -- (n_features,) -- single sample
+        if shap_arr.ndim == 1:
+            if self.class_names and len(self.class_names) > 1:
+                label_name = self.class_names[1]
+            elif self.class_names:
+                label_name = self.class_names[0]
+            else:
+                label_name = "output"
+            return shap_arr, 0, label_name
+
+        raise ValueError(
+            f"Unexpected SHAP values shape: {shap_arr.shape}. "
+            f"Expected list, 3D, 2D, or 1D."
+        )
+
     def explain(
         self,
         instance: np.ndarray,
@@ -266,82 +341,67 @@ class TreeShapExplainer(BaseExplainer):
                              prediction - expected_value.
         
         Returns:
-            Explanation object with feature attributions.
+            Explanation object with feature attributions keyed by original
+            feature names.
         """
         instance = np.array(instance).flatten()
         instance_2d = instance.reshape(1, -1)
         
-        # Compute SHAP values
         shap_values = self.explainer.shap_values(
             instance_2d,
             check_additivity=check_additivity
         )
-        
-        # Handle different output formats
-        if isinstance(shap_values, list):
-            # Multi-class classification: list of arrays, one per class
-            n_classes = len(shap_values)
-            
-            if target_class is None:
-                # Use predicted class
-                if hasattr(self.raw_model, 'predict'):
-                    pred = self.raw_model.predict(instance_2d)[0]
-                    target_class = int(pred)
-                else:
-                    target_class = 0
-            
-            # Ensure target_class is valid
-            target_class = min(target_class, n_classes - 1)
-            class_shap = shap_values[target_class][0]
-            
-            # Get class name
-            if self.class_names and target_class < len(self.class_names):
-                label_name = self.class_names[target_class]
-            else:
-                label_name = f"class_{target_class}"
-            
-            # Store all class SHAP values for reference
-            all_class_shap = {
-                (self.class_names[i] if self.class_names and i < len(self.class_names) 
-                 else f"class_{i}"): shap_values[i][0].tolist()
-                for i in range(n_classes)
-            }
-        else:
-            # Binary classification or regression
-            class_shap = shap_values[0] if shap_values.ndim > 1 else shap_values.flatten()
-            label_name = self.class_names[1] if self.class_names and len(self.class_names) > 1 else "output"
-            all_class_shap = None
-        
-        # Build attributions dict
-        flat_shap = np.array(class_shap).flatten()
+
+        class_shap, label_index, label_name = self._extract_class_shap_values(
+            shap_values, instance_2d, sample_index=0,
+            target_class=target_class,
+        )
+
+        # Validate shape
+        class_shap = np.asarray(class_shap).ravel()
+        if len(class_shap) != len(self.feature_names):
+            raise ValueError(
+                f"SHAP values length ({len(class_shap)}) does not match "
+                f"number of features ({len(self.feature_names)})."
+            )
+
+        # Build attributions dict keyed by original feature names
         attributions = {
-            fname: float(flat_shap[i])
+            fname: float(class_shap[i])
             for i, fname in enumerate(self.feature_names)
         }
         
         # Get expected value (base value)
         expected_value = self.explainer.expected_value
         if isinstance(expected_value, (list, np.ndarray)):
-            if target_class is not None and target_class < len(expected_value):
-                base_value = float(expected_value[target_class])
+            ev = np.asarray(expected_value)
+            if label_index < len(ev):
+                base_value = float(ev[label_index])
             else:
-                base_value = float(expected_value[0])
+                base_value = float(ev[0])
         else:
             base_value = float(expected_value)
         
         explanation_data = {
             "feature_attributions": attributions,
             "base_value": base_value,
-            "shap_values_raw": flat_shap.tolist(),
+            "shap_values_raw": class_shap.tolist(),
         }
         
-        if all_class_shap is not None:
+        # For multiclass list format, include all-class values
+        if isinstance(shap_values, list) and len(shap_values) > 1:
+            all_class_shap = {
+                (self.class_names[i] if self.class_names and i < len(self.class_names)
+                 else f"class_{i}"): np.asarray(shap_values[i][0]).ravel().tolist()
+                for i in range(len(shap_values))
+            }
             explanation_data["all_class_shap_values"] = all_class_shap
-        
+
         return Explanation(
             explainer_name="TreeSHAP",
             target_class=label_name,
-            explanation_data=explanation_data
+            explanation_data=explanation_data,
+            feature_names=self.feature_names,
         )
     
     def explain_batch(
@@ -353,11 +413,10 @@ class TreeShapExplainer(BaseExplainer):
         """
         Generate TreeSHAP explanations for multiple instances efficiently.
         
-        TreeSHAP can process batches more efficiently than individual calls.
-        
         Args:
             X: 2D numpy array of instances (n_samples, n_features).
             target_class: For multi-class, which class to explain.
+                         If None, uses the predicted class for each instance.
             check_additivity: Whether to verify SHAP value additivity.
         
         Returns:
@@ -367,47 +426,41 @@ class TreeShapExplainer(BaseExplainer):
         if X.ndim == 1:
             X = X.reshape(1, -1)
         
-        # Compute SHAP values for all instances at once
         shap_values = self.explainer.shap_values(X, check_additivity=check_additivity)
         
         explanations = []
         for i in range(X.shape[0]):
-            if isinstance(shap_values, list):
-                # Multi-class
-                n_classes = len(shap_values)
-                tc = target_class if target_class is not None else 0
-                tc = min(tc, n_classes - 1)
-                class_shap = shap_values[tc][i]
-                
-                if self.class_names and tc < len(self.class_names):
-                    label_name = self.class_names[tc]
-                else:
-                    label_name = f"class_{tc}"
-            else:
-                class_shap = shap_values[i]
-                label_name = self.class_names[1] if self.class_names and len(self.class_names) > 1 else "output"
-            
-            flat_shap = np.array(class_shap).flatten()
+            class_shap, label_index, label_name = self._extract_class_shap_values(
+                shap_values, X, sample_index=i,
+                target_class=target_class,
+            )
+
+            class_shap = np.asarray(class_shap).ravel()
+
             attributions = {
-                fname: float(flat_shap[j])
+                fname: float(class_shap[j])
                 for j, fname in enumerate(self.feature_names)
             }
-            
+
             expected_value = self.explainer.expected_value
             if isinstance(expected_value, (list, np.ndarray)):
-                tc = target_class if target_class is not None else 0
-                base_value = float(expected_value[min(tc, len(expected_value) - 1)])
+                ev = np.asarray(expected_value)
+                if label_index < len(ev):
+                    base_value = float(ev[label_index])
+                else:
+                    base_value = float(ev[0])
             else:
                 base_value = float(expected_value)
-            
+
             explanations.append(Explanation(
                 explainer_name="TreeSHAP",
                 target_class=label_name,
                 explanation_data={
                     "feature_attributions": attributions,
                     "base_value": base_value,
-                    "shap_values_raw": flat_shap.tolist(),
-                }
+                    "shap_values_raw": class_shap.tolist(),
+                },
+                feature_names=self.feature_names,
             ))
         
         return explanations
@@ -433,7 +486,6 @@ class TreeShapExplainer(BaseExplainer):
         instance = np.array(instance).flatten()
         instance_2d = instance.reshape(1, -1)
         
-        # Compute interaction values
         interaction_values = self.explainer.shap_interaction_values(instance_2d)
         
         # Determine target class for prediction
@@ -442,9 +494,8 @@ class TreeShapExplainer(BaseExplainer):
         elif target_class is None:
             target_class = 0
         
-        # Handle different return formats from shap_interaction_values
+        # Handle different return formats
         if isinstance(interaction_values, list):
-            # Multi-class: list of arrays, one per class
             n_classes = len(interaction_values)
             tc = min(target_class, n_classes - 1)
             interactions = np.array(interaction_values[tc][0])
@@ -454,7 +505,6 @@ class TreeShapExplainer(BaseExplainer):
             else:
                 label_name = f"class_{tc}"
         elif interaction_values.ndim == 4:
-            # Shape: (n_samples, n_features, n_features, n_classes)
             n_classes = interaction_values.shape[3]
             tc = min(target_class, n_classes - 1)
             interactions = interaction_values[0, :, :, tc]
@@ -464,17 +514,13 @@ class TreeShapExplainer(BaseExplainer):
             else:
                 label_name = f"class_{tc}"
         else:
-            # Binary or regression: (n_samples, n_features, n_features)
             interactions = interaction_values[0]
             label_name = self.class_names[1] if self.class_names and len(self.class_names) > 1 else "output"
         
-        # Ensure interactions is 2D (n_features x n_features)
         interactions = np.array(interactions)
         if interactions.ndim > 2:
-            # If still multi-dimensional, take first slice
             interactions = interactions[:, :, 0] if interactions.ndim == 3 else interactions
         
-        # Build interaction dict with feature name pairs
         n_features = len(self.feature_names)
         interaction_dict = {}
         main_effects = {}
@@ -486,14 +532,12 @@ class TreeShapExplainer(BaseExplainer):
             
             for j in range(i + 1, n_features):
                 fname_j = self.feature_names[j]
-                # Interaction values are symmetric, so we sum both directions
                 val_ij = interactions[i, j]
                 val_ji = interactions[j, i]
                 ij = float(val_ij) if np.isscalar(val_ij) or val_ij.size == 1 else float(val_ij.flat[0])
                 ji = float(val_ji) if np.isscalar(val_ji) or val_ji.size == 1 else float(val_ji.flat[0])
                 interaction_dict[f"{fname_i} x {fname_j}"] = ij + ji
         
-        # Sort interactions by absolute value
         sorted_interactions = dict(sorted(
             interaction_dict.items(),
             key=lambda x: abs(x[1]),
@@ -508,14 +552,13 @@ class TreeShapExplainer(BaseExplainer):
                 "interactions": sorted_interactions,
                 "interaction_matrix": interactions.tolist(),
                 "feature_names": self.feature_names
-            }
+            },
+            feature_names=self.feature_names,
         )
     
     def get_expected_value(self, target_class: Optional[int] = None) -> float:
         """
         Get the expected (base) value of the model.
-        
-        This is the average model output over the background dataset.
         
         Args:
             target_class: For multi-class, which class's expected value.
