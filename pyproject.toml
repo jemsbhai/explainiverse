@@ -1,7 +1,7 @@
 [project]
 name = "explainiverse"
-version = "0.12.0"
-description = "Unified, extensible explainability framework supporting 18 XAI methods including LIME, SHAP, LRP, TCAV, GradCAM, and more"
+version = "0.13.0"
+description = "Unified, extensible explainability framework supporting 23 XAI methods including LIME, SHAP, LRP, TCAV, GradCAM, HiResCAM, ScoreCAM, and more"
 authors = [
     { name = "Muntaser Syed", email = "jemsbhai@gmail.com" },
 ]

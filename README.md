@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **18 state-of-the-art explanation methods** across local, global, gradient-based, concept-based, and example-based paradigms, along with **55 evaluation metrics** across 8 categories for assessing explanation quality — **49% more metrics than Quantus**, the previous state of the art.
+**Explainiverse** is a unified, extensible Python framework for Explainable AI (XAI). It provides a standardized interface for **23 state-of-the-art explanation methods** across local, global, gradient-based, concept-based, and example-based paradigms, along with **55 evaluation metrics** across 8 categories for assessing explanation quality — **49% more metrics than Quantus**, the previous state of the art.
 
 ---
 
@@ -12,7 +12,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **18 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
+| **23 Explainers** | LIME, KernelSHAP, TreeSHAP, Integrated Gradients, DeepLIFT, DeepSHAP, SmoothGrad, Saliency Maps, GradCAM/GradCAM++, HiResCAM, XGradCAM, LayerCAM, EigenCAM, ScoreCAM, LRP, TCAV, Anchors, Counterfactual, Permutation Importance, PDP, ALE, SAGE, ProtoDash |
 | **55 Evaluation Metrics** | Faithfulness (17), Robustness (7), Localisation (9), Fairness (6), Randomisation (5), Axiomatic (4), Stability (3), Complexity (3), Agreement (2) — see detailed tables below |
 | **Unified API** | Consistent `BaseExplainer` interface with standardized `Explanation` output |
 | **Plugin Registry** | Filter explainers by scope, model type, data type; automatic recommendations |
@@ -36,6 +36,11 @@
 | **SmoothGrad** | Gradient | [Smilkov et al., 2017](https://arxiv.org/abs/1706.03825) |
 | **Saliency Maps** | Gradient | [Simonyan et al., 2014](https://arxiv.org/abs/1312.6034) |
 | **GradCAM / GradCAM++** | Gradient (CNN) | [Selvaraju et al., 2017](https://arxiv.org/abs/1610.02391) |
+| **HiResCAM** | Gradient (CNN) | [Draelos & Carin, 2020](https://arxiv.org/abs/2011.08891) |
+| **XGradCAM** | Gradient (CNN) | [Fu et al., 2020](https://arxiv.org/abs/2008.02312) |
+| **LayerCAM** | Gradient (CNN) | [Jiang et al., 2021](https://ieeexplore.ieee.org/document/9462463) |
+| **EigenCAM** | Activation (CNN) | [Muhammad & Yeasin, 2020](https://arxiv.org/abs/2008.00299) |
+| **ScoreCAM** | Perturbation (CNN) | [Wang et al., 2020](https://arxiv.org/abs/1910.01279) |
 | **LRP** | Decomposition | [Bach et al., 2015](https://doi.org/10.1371/journal.pone.0130140) |
 | **TCAV** | Concept-Based | [Kim et al., 2018](https://arxiv.org/abs/1711.11279) |
 | **Anchors** | Rule-Based | [Ribeiro et al., 2018](https://ojs.aaai.org/index.php/AAAI/article/view/11491) |
@@ -595,6 +600,7 @@ explainiverse/
 ├── explainers/
 │   ├── attribution/          # LIME, SHAP, TreeSHAP
 │   ├── gradient/             # IG, DeepLIFT, DeepSHAP, SmoothGrad, Saliency, GradCAM, LRP, TCAV
+│   │                         # + HiResCAM, XGradCAM, LayerCAM, EigenCAM, ScoreCAM
 │   ├── rule_based/           # Anchors
 │   ├── counterfactual/       # DiCE-style
 │   ├── global_explainers/    # Permutation, PDP, ALE, SAGE
@@ -665,7 +671,7 @@ If you use Explainiverse in your research, please cite:
   author = {Syed, Muntaser},
   year = {2025},
   url = {https://github.com/jemsbhai/explainiverse},
-  version = {0.12.0}
+  version = {0.13.0}
 }
 ```
 

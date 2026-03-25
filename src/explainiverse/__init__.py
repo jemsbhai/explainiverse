@@ -2,10 +2,12 @@
 """
 Explainiverse - A unified, extensible explainability framework.
 
-Supports 18 state-of-the-art XAI methods including LIME, SHAP, TreeSHAP,
-Integrated Gradients, DeepLIFT, DeepSHAP, LRP, GradCAM, TCAV, Anchors,
-Counterfactuals, Permutation Importance, PDP, ALE, SAGE, and ProtoDash
-through a consistent interface.
+Supports 23 state-of-the-art XAI methods including LIME, SHAP, TreeSHAP,
+Integrated Gradients, DeepLIFT, DeepSHAP, LRP, GradCAM, GradCAM++,
+HiResCAM, XGradCAM, LayerCAM, EigenCAM, ScoreCAM, SmoothGrad, Saliency,
+TCAV, Anchors, Counterfactuals, Permutation Importance, PDP, ALE, SAGE,
+and ProtoDash through a consistent interface, plus 55 evaluation metrics
+across 8 categories.
 
 Quick Start:
     from explainiverse import default_registry
@@ -34,7 +36,7 @@ from explainiverse.adapters.sklearn_adapter import SklearnAdapter
 from explainiverse.adapters import TORCH_AVAILABLE
 from explainiverse.engine.suite import ExplanationSuite
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 __all__ = [
     # Core
