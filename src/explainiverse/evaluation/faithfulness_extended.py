@@ -24,7 +24,10 @@ from typing import Union, Callable, List, Dict, Optional, Tuple
 from scipy import stats
 
 # NumPy 2.0 compatibility: np.trapz was renamed to np.trapezoid
-_trapezoid = getattr(np, 'trapezoid', np.trapz)
+try:
+    _trapezoid = np.trapezoid
+except AttributeError:
+    _trapezoid = np.trapz
 
 from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation._utils import (
