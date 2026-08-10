@@ -10,6 +10,9 @@ Reference:
     Propagating Activation Differences." ICML 2017.
 """
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -590,6 +593,40 @@ class TestDeepSHAPBasic:
 
 class TestDeepLIFTVerifiedAccuracy:
     """Tests with analytical or canonical-reference oracles."""
+
+    def test_import_does_not_require_zeropad1d_export(self):
+        """Torch 2.0 can import DeepLIFT without the later ZeroPad1d export."""
+        check = """
+import torch.nn as nn
+
+if hasattr(nn, "ZeroPad1d"):
+    delattr(nn, "ZeroPad1d")
+
+import explainiverse.explainers.gradient.deeplift as deeplift
+
+assert nn.ConstantPad1d in deeplift._SUPPORTED_LINEAR_TYPES
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", check],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
+    @pytest.mark.skipif(
+        not hasattr(nn, "ZeroPad1d"),
+        reason="This Torch version does not export ZeroPad1d",
+    )
+    def test_zeropad1d_is_supported_via_constant_pad_base(self):
+        """Newer Torch ZeroPad1d remains in the verified linear subset."""
+        import explainiverse.explainers.gradient.deeplift as module
+
+        model = nn.Sequential(nn.ZeroPad1d(1), nn.Linear(3, 1))
+
+        assert isinstance(model[0], module._SUPPORTED_LINEAR_TYPES)
+        module._validate_supported_model(model)
 
     def test_saturated_sigmoid_matches_output_delta(self):
         """Rescale handles saturation where midpoint gradient is badly wrong."""

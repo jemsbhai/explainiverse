@@ -115,9 +115,6 @@ if TORCH_AVAILABLE:
         nn.ConstantPad1d,
         nn.ConstantPad2d,
         nn.ConstantPad3d,
-        nn.ZeroPad1d,
-        nn.ZeroPad2d,
-        nn.ZeroPad3d,
     )
 else:  # pragma: no cover
     _SUPPORTED_NONLINEAR_TYPES = ()
