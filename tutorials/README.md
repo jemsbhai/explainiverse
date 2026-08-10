@@ -1,7 +1,7 @@
 # Explainiverse tutorials
 
-The first three tutorials are verified, deterministic, offline examples for the
-untagged `0.14.0` checkout. They were reviewed and published from the locked environment on
+The first three tutorials are verified, deterministic, offline examples for the tagged
+`v0.14.0` release. They were reviewed and published from the locked environment on
 2026-08-10. The remaining entries on this page are curriculum plans, not implemented
 capabilities.
 

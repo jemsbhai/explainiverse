@@ -5,9 +5,8 @@ explanations. Its public registry records what each explainer has actually been 
 it does not rank methods by quality or claim that one method is appropriate for a particular
 deployment.
 
-This working tree is the untagged `0.14.0` checkout and declares Python 3.10 through 3.13. The
-published `0.13.2` artifacts predate the accuracy remediation and are not an equivalent install
-of this checkout.
+Release `0.14.0` declares Python 3.10 through 3.13. Its source distribution and wheel are built
+from the tagged `v0.14.0` revision and include the accuracy-remediation changes described below.
 
 ## Accuracy status
 
@@ -227,7 +226,5 @@ The Python distribution declares the MIT license; see `LICENSE`. The separate pr
 published JavaScript distribution.
 
 If you use a particular explainer or metric, cite its primary source as well as the exact
-software revision and configuration you ran. The current `0.14.0` checkout is untagged, so that
-version string alone is not yet a reproducible citation. Cite the resulting commit hash and
-access date until a release tag is published. Do not cite the materially different PyPI `0.13.2`
-artifact as though it contained these changes.
+software revision and configuration you ran. For release `0.14.0`, cite the `v0.14.0` tag (or its
+commit hash) and your configuration; the PyPI `0.14.0` artifacts are built from that revision.
