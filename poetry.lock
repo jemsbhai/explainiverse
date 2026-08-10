@@ -4791,4 +4791,4 @@ torch = ["captum", "torch"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "6513764ef801a951d43b1b47cd320303dab295448bd7476e4b5c7e578a3abd3c"
+content-hash = "b04a54be54c6e25153ee2fa289fd46c2a5a0ace9e8ae72b647da6857436d8eef"

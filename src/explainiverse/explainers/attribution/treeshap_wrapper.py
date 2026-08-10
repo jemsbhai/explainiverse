@@ -22,6 +22,7 @@ from typing import List, Optional
 
 import numpy as np
 import shap
+from sklearn.base import is_classifier, is_regressor
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
@@ -57,6 +58,41 @@ SUPPORTED_TREE_MODELS = (
 def _is_tree_model(model) -> bool:
     """Check a supported tree family without rejecting safe subclasses."""
     return any(cls.__name__ in SUPPORTED_TREE_MODELS for cls in type(model).mro())
+
+
+def _infer_tree_model_task(model) -> Optional[str]:
+    """Infer task from public estimator semantics and the supported family.
+
+    Scikit-learn 1.9 no longer exposes ``_estimator_type`` on its estimator
+    mixins.  Its public helpers use estimator tags and continue to recognize
+    subclasses, so prefer them over private metadata.  The MRO fallback keeps
+    the explicitly supported XGBoost/LightGBM/CatBoost families working when
+    their sklearn-tag integration is unavailable.
+    """
+    tagged_task = None
+    try:
+        if is_classifier(model):
+            tagged_task = "classification"
+        elif is_regressor(model):
+            tagged_task = "regression"
+    except AttributeError:
+        # Scikit-learn 1.9 rejects third-party estimators without its tag API.
+        # Their exact supported base class below still provides task identity.
+        pass
+
+    supported_bases = {
+        cls.__name__ for cls in type(model).mro() if cls.__name__ in SUPPORTED_TREE_MODELS
+    }
+    family_tasks = {
+        "classification" if name.endswith("Classifier") else "regression"
+        for name in supported_bases
+    }
+    if len(family_tasks) > 1:
+        raise ValueError("TreeSHAP model inherits conflicting classifier/regressor families")
+    family_task = next(iter(family_tasks), None)
+    if tagged_task is not None and family_task is not None and tagged_task != family_task:
+        raise ValueError("TreeSHAP estimator tags conflict with its supported tree family")
+    return tagged_task or family_task
 
 
 def _is_xgboost_model(model) -> bool:
@@ -146,13 +182,7 @@ class TreeShapExplainer(BaseExplainer):
 
         if task not in {None, "classification", "regression"}:
             raise ValueError("task must be 'classification', 'regression', or None")
-        estimator_type = getattr(raw_model, "_estimator_type", None)
-        if estimator_type == "classifier" or type(raw_model).__name__.endswith("Classifier"):
-            inferred_task = "classification"
-        elif estimator_type == "regressor" or type(raw_model).__name__.endswith("Regressor"):
-            inferred_task = "regression"
-        else:
-            inferred_task = None
+        inferred_task = _infer_tree_model_task(raw_model)
         if task is None:
             if inferred_task is None:
                 raise ValueError("TreeSHAP could not infer model task; pass task explicitly")

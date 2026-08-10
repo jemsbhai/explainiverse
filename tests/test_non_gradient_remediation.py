@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 from sklearn.datasets import load_iris
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
 
 from explainiverse.explainers._validation import (
@@ -235,7 +235,8 @@ def test_treeshap_accepts_supported_subclasses_and_rejects_multirow_instance():
     iris = load_iris()
 
     class _CustomForest(RandomForestClassifier):
-        pass
+        # Scikit-learn 1.9 removed this private marker from estimator mixins.
+        _estimator_type = None
 
     model = _CustomForest(n_estimators=3, random_state=0).fit(iris.data, iris.target)
     explainer = TreeShapExplainer(
@@ -244,10 +245,32 @@ def test_treeshap_accepts_supported_subclasses_and_rejects_multirow_instance():
         list(iris.target_names),
     )
 
+    assert explainer.task == "classification"
     explanation = explainer.explain(iris.data[0])
     assert len(explanation.explanation_data["feature_attributions"]) == iris.data.shape[1]
     with pytest.raises(ValueError, match="single-row 2D array"):
         explainer.explain(iris.data[0].reshape(2, 2))
+
+
+def test_treeshap_preserves_supported_regressor_subclass_semantics():
+    iris = load_iris()
+
+    class _CustomRegressor(RandomForestRegressor):
+        _estimator_type = None
+
+    model = _CustomRegressor(n_estimators=3, random_state=0).fit(
+        iris.data,
+        iris.data[:, 0],
+    )
+    explainer = TreeShapExplainer(model, list(iris.feature_names))
+
+    assert explainer.task == "regression"
+    with pytest.raises(ValueError, match="conflicts with the tree estimator semantics"):
+        TreeShapExplainer(
+            model,
+            list(iris.feature_names),
+            task="classification",
+        )
 
 
 def test_sage_reports_feature_and_custom_loss_semantics():
