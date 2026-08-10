@@ -1,11 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import { StrictMode, useState, type CSSProperties } from 'react';
 import ReactDOM from 'react-dom/client';
-// @ts-ignore
 import { ExplanationVisualizer } from '../visualizer';
-// @ts-ignore
 import { Explanation } from '../core/explanation';
 
-// Mock Metadata for interactive selection
+// Synthetic labels and values for display testing only. No method runs here.
 const MOCK_DATA = {
     'Image Classification': {
         models: ['ResNet50', 'ViT-B/16', 'EfficientNet'],
@@ -43,51 +41,63 @@ const MOCK_DATA = {
 
 type TaskType = keyof typeof MOCK_DATA;
 
+const INITIAL_TASK: TaskType = 'Image Classification';
+
+function defaultFeaturesFor(task: TaskType, targetClass: string): Record<string, number> {
+    const defaultFeatures = MOCK_DATA[task].defaultFeatures as Record<
+        string,
+        Record<string, number>
+    >;
+    return { ...(defaultFeatures[targetClass] ?? {}) };
+}
+
 function DemoApp() {
     // Selection state
-    const [selectedTask, setSelectedTask] = useState<TaskType>('Image Classification');
-    const [selectedModel, setSelectedModel] = useState<string>('');
-    const [selectedExplainer, setSelectedExplainer] = useState<string>('');
-    const [selectedClass, setSelectedClass] = useState<string>('');
+    const initialTaskData = MOCK_DATA[INITIAL_TASK];
+    const [selectedTask, setSelectedTask] = useState<TaskType>(INITIAL_TASK);
+    const [selectedModel, setSelectedModel] = useState<string>(initialTaskData.models[0]);
+    const [selectedExplainer, setSelectedExplainer] = useState<string>(
+        initialTaskData.explainers[0]
+    );
+    const [selectedClass, setSelectedClass] = useState<string>(initialTaskData.classes[0]);
 
     // Feature state
-    const [features, setFeatures] = useState<Record<string, number>>({});
+    const [features, setFeatures] = useState<Record<string, number>>(
+        defaultFeaturesFor(INITIAL_TASK, initialTaskData.classes[0])
+    );
     const [newFeatureName, setNewFeatureName] = useState('');
     const [newFeatureValue, setNewFeatureValue] = useState('');
 
-    // Initialize defaults when task/class changes
-    useEffect(() => {
-        const taskData = MOCK_DATA[selectedTask];
+    const selectTask = (task: TaskType) => {
+        const taskData = MOCK_DATA[task];
+        const targetClass = taskData.classes[0];
+        setSelectedTask(task);
         setSelectedModel(taskData.models[0]);
         setSelectedExplainer(taskData.explainers[0]);
-        setSelectedClass(taskData.classes[0]);
-    }, [selectedTask]);
+        setSelectedClass(targetClass);
+        setFeatures(defaultFeaturesFor(task, targetClass));
+    };
 
-    useEffect(() => {
-        const taskData = MOCK_DATA[selectedTask];
-        const defaultFeatures = taskData.defaultFeatures as Record<string, Record<string, number>>;
-
-        if (selectedClass && defaultFeatures[selectedClass]) {
-            setFeatures({ ...defaultFeatures[selectedClass] });
-        } else {
-            setFeatures({});
-        }
-    }, [selectedClass, selectedTask]);
-
+    const selectClass = (targetClass: string) => {
+        setSelectedClass(targetClass);
+        setFeatures(defaultFeaturesFor(selectedTask, targetClass));
+    };
 
     const getCurrentExplanation = () => {
         return new Explanation(
-            selectedExplainer,
+            `Demo label: ${selectedExplainer}`,
             selectedClass,
             { feature_attributions: features },
             Object.keys(features),
-            { model: selectedModel, task: selectedTask } // Storing extra metadata
+            { model_label: selectedModel, task_label: selectedTask, synthetic_demo: true }
         );
     };
 
     const addFeature = () => {
-        if (newFeatureName && newFeatureValue) {
-            setFeatures({ ...features, [newFeatureName]: parseFloat(newFeatureValue) });
+        const featureName = newFeatureName.trim();
+        const featureValue = Number(newFeatureValue);
+        if (featureName && Number.isFinite(featureValue)) {
+            setFeatures({ ...features, [featureName]: featureValue });
             setNewFeatureName('');
             setNewFeatureValue('');
         }
@@ -100,22 +110,31 @@ function DemoApp() {
     };
 
     const taskData = MOCK_DATA[selectedTask];
+    const canAddFeature =
+        newFeatureName.trim().length > 0 &&
+        newFeatureValue.trim().length > 0 &&
+        Number.isFinite(Number(newFeatureValue));
 
     return (
         <div style={styles.container}>
             <header style={styles.header}>
-                <h1 style={styles.mainTitle}>Explainiverse Visualizer Demo</h1>
-                <p style={styles.subtitle}>Interactive XAI Explanation Explorer</p>
+                <h1 style={styles.mainTitle}>Experimental Attribution Viewer Demo</h1>
+                <p style={styles.subtitle}>Synthetic display data only</p>
+                <p role="note" style={styles.disclosure}>
+                    This demo does not implement or execute any explainer. Method and model
+                    names below are labels for testing the visualizer.
+                </p>
             </header>
 
             <div style={styles.controls}>
                 <div style={styles.grid}>
                     {/* Task Selection */}
                     <div style={styles.inputGroup}>
-                        <label style={styles.label}>Task Type:</label>
+                        <label htmlFor="task-type" style={styles.label}>Task type</label>
                         <select
+                            id="task-type"
                             value={selectedTask}
-                            onChange={(e) => setSelectedTask(e.target.value as TaskType)}
+                            onChange={(e) => selectTask(e.target.value as TaskType)}
                             style={styles.select}
                         >
                             {Object.keys(MOCK_DATA).map(task => (
@@ -126,8 +145,9 @@ function DemoApp() {
 
                     {/* Model Selection */}
                     <div style={styles.inputGroup}>
-                        <label style={styles.label}>Model:</label>
+                        <label htmlFor="model-label" style={styles.label}>Model label</label>
                         <select
+                            id="model-label"
                             value={selectedModel}
                             onChange={(e) => setSelectedModel(e.target.value)}
                             style={styles.select}
@@ -140,8 +160,9 @@ function DemoApp() {
 
                     {/* Explainer Selection */}
                     <div style={styles.inputGroup}>
-                        <label style={styles.label}>Explainer:</label>
+                        <label htmlFor="explainer-label" style={styles.label}>Explainer label</label>
                         <select
+                            id="explainer-label"
                             value={selectedExplainer}
                             onChange={(e) => setSelectedExplainer(e.target.value)}
                             style={styles.select}
@@ -154,10 +175,11 @@ function DemoApp() {
 
                     {/* Class Selection */}
                     <div style={styles.inputGroup}>
-                        <label style={styles.label}>Target Class:</label>
+                        <label htmlFor="target-class" style={styles.label}>Target class</label>
                         <select
+                            id="target-class"
                             value={selectedClass}
-                            onChange={(e) => setSelectedClass(e.target.value)}
+                            onChange={(e) => selectClass(e.target.value)}
                             style={styles.select}
                         >
                             {taskData.classes.map(cls => (
@@ -170,16 +192,24 @@ function DemoApp() {
                 <div style={styles.divider}></div>
 
                 <div style={styles.featureBuilder}>
-                    <h4 style={styles.featureBuilderTitle}>Modify Features (Attributions):</h4>
+                    <h2 style={styles.featureBuilderTitle}>Modify synthetic attributions</h2>
                     <div style={styles.featureInputRow}>
+                        <label htmlFor="new-feature-name" style={styles.visuallyHidden}>
+                            Feature name
+                        </label>
                         <input
+                            id="new-feature-name"
                             type="text"
                             value={newFeatureName}
                             onChange={(e) => setNewFeatureName(e.target.value)}
                             style={styles.input}
                             placeholder="Feature name"
                         />
+                        <label htmlFor="new-feature-value" style={styles.visuallyHidden}>
+                            Attribution value
+                        </label>
                         <input
+                            id="new-feature-value"
                             type="number"
                             step="0.01"
                             value={newFeatureValue}
@@ -187,7 +217,18 @@ function DemoApp() {
                             style={styles.input}
                             placeholder="Value"
                         />
-                        <button onClick={addFeature} style={styles.addButton}>Add</button>
+                        <button
+                            disabled={!canAddFeature}
+                            onClick={addFeature}
+                            style={{
+                                ...styles.addButton,
+                                opacity: canAddFeature ? 1 : 0.55,
+                                cursor: canAddFeature ? 'pointer' : 'not-allowed',
+                            }}
+                            type="button"
+                        >
+                            Add
+                        </button>
                     </div>
 
                     {Object.keys(features).length > 0 ? (
@@ -195,7 +236,14 @@ function DemoApp() {
                             {Object.entries(features).map(([name, value]) => (
                                 <div key={name} style={styles.featureTag}>
                                     <span>{name}: {value}</span>
-                                    <button onClick={() => removeFeature(name)} style={styles.removeButton}>×</button>
+                                    <button
+                                        aria-label={`Remove ${name}`}
+                                        onClick={() => removeFeature(name)}
+                                        style={styles.removeButton}
+                                        type="button"
+                                    >
+                                        ×
+                                    </button>
                                 </div>
                             ))}
                         </div>
@@ -206,7 +254,6 @@ function DemoApp() {
             </div>
 
             <div style={styles.visualizerContainer}>
-                {/*  Pass key to force re-render animation when context changes */}
                 <ExplanationVisualizer key={`${selectedTask}-${selectedModel}-${selectedClass}`} explanation={getCurrentExplanation()} />
             </div>
 
@@ -217,7 +264,7 @@ function DemoApp() {
     );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
     container: {
         minHeight: '100vh',
         backgroundColor: '#f3f4f6',
@@ -238,6 +285,16 @@ const styles: Record<string, React.CSSProperties> = {
         fontSize: '18px',
         color: '#6b7280',
         margin: 0,
+    },
+    disclosure: {
+        maxWidth: '700px',
+        margin: '16px auto 0',
+        padding: '12px',
+        color: '#374151',
+        backgroundColor: '#fef3c7',
+        border: '1px solid #d97706',
+        borderRadius: '8px',
+        lineHeight: 1.5,
     },
     controls: {
         maxWidth: '800px',
@@ -285,11 +342,7 @@ const styles: Record<string, React.CSSProperties> = {
         backgroundColor: '#e5e7eb',
         width: '100%',
     },
-    featureBuilder: {
-        // padding: '16px',
-        // backgroundColor: '#f9fafb',
-        // borderRadius: '8px',
-    },
+    featureBuilder: {},
     featureBuilderTitle: {
         margin: '0 0 12px 0',
         fontSize: '16px',
@@ -339,6 +392,17 @@ const styles: Record<string, React.CSSProperties> = {
         fontStyle: 'italic',
         fontSize: '14px',
     },
+    visuallyHidden: {
+        position: 'absolute',
+        width: '1px',
+        height: '1px',
+        padding: 0,
+        margin: '-1px',
+        overflow: 'hidden',
+        clip: 'rect(0, 0, 0, 0)',
+        whiteSpace: 'nowrap',
+        border: 0,
+    },
     visualizerContainer: {
         maxWidth: '800px',
         margin: '0 auto',
@@ -348,12 +412,17 @@ const styles: Record<string, React.CSSProperties> = {
         marginTop: '40px',
         color: '#9ca3af',
         fontSize: '14px',
-    }
+    },
 
 };
 
-ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
-    <React.StrictMode>
+const rootElement = document.getElementById('root');
+if (rootElement === null) {
+    throw new Error('Demo root element was not found');
+}
+
+ReactDOM.createRoot(rootElement).render(
+    <StrictMode>
         <DemoApp />
-    </React.StrictMode>
+    </StrictMode>
 );

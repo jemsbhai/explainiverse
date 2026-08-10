@@ -1,131 +1,109 @@
-# src/explainiverse/explainers/gradient/lrp.py
-"""
-Layer-wise Relevance Propagation (LRP) - Decomposition-based Attribution.
+"""Verified Layer-wise Relevance Propagation for feed-forward PyTorch models.
 
-LRP decomposes network predictions back to input features using a conservation
-principle. Unlike gradient-based methods, LRP propagates relevance scores
-layer-by-layer through the network using specific propagation rules.
+The public implementation is deliberately narrower than arbitrary PyTorch:
+LRP rules are only well-defined here for a single, feed-forward
+``torch.nn.Sequential`` chain (or one supported leaf module). Epsilon, gamma,
+z-plus, and composite propagation use Captum's canonical LRP machinery.
+Alpha-beta propagation is implemented for chains of ``Linear`` and supported
+pointwise / reshape layers; convolutional alpha-beta is rejected rather than
+silently substituted with another rule.
 
-Key Properties:
-- Conservation: Sum of relevances at each layer equals the output
-- Layer-wise decomposition: Relevance flows backward through layers
-- Multiple rules: Different rules for different layer types and use cases
-
-Supported Layer Types:
-- Linear (fully connected)
-- Conv2d (convolutional)
-- BatchNorm1d, BatchNorm2d
-- ReLU, LeakyReLU, ELU, Tanh, Sigmoid
-- MaxPool2d, AvgPool2d
-- Flatten, Dropout (passthrough)
-
-Propagation Rules:
-- LRP-0: Basic rule (no stabilization) - theoretical baseline
-- LRP-ε (epsilon): Adds small constant for numerical stability (recommended)
-- LRP-γ (gamma): Enhances positive contributions - good for image classification
-- LRP-αβ (alpha-beta): Separates positive/negative contributions - fine control
-- LRP-z⁺ (z-plus): Only considers positive weights - often used for input layers
-- Composite: Different rules for different layers
-
-Mathematical Formulation:
-    For layer l with input a and output z = Wx + b:
-    
-    LRP-0:     R_j = Σ_k (a_j * w_jk / z_k) * R_k
-    LRP-ε:     R_j = Σ_k (a_j * w_jk / (z_k + ε*sign(z_k))) * R_k
-    LRP-γ:     R_j = Σ_k (a_j * (w_jk + γ*w_jk⁺) / (z_k + γ*z_k⁺)) * R_k
-    LRP-αβ:    R_j = Σ_k (α * (a_j * w_jk)⁺ / z_k⁺ - β * (a_j * w_jk)⁻ / z_k⁻) * R_k
-    LRP-z⁺:    R_j = Σ_k (a_j * w_jk⁺ / Σ_i a_i * w_ik⁺) * R_k
-
-Reference:
-    Bach, S., Binder, A., Montavon, G., Klauschen, F., Müller, K. R., & Samek, W. (2015).
-    On Pixel-wise Explanations for Non-Linear Classifier Decisions by Layer-wise
-    Relevance Propagation. PLOS ONE.
-    https://doi.org/10.1371/journal.pone.0130140
-
-    Montavon, G., Binder, A., Lapuschkin, S., Samek, W., & Müller, K. R. (2019).
-    Layer-wise Relevance Propagation: An Overview. Explainable AI: Interpreting,
-    Explaining and Visualizing Deep Learning. Springer.
-
-Example:
-    from explainiverse.explainers.gradient import LRPExplainer
-    from explainiverse.adapters import PyTorchAdapter
-    
-    adapter = PyTorchAdapter(model, task="classification")
-    
-    explainer = LRPExplainer(
-        model=adapter,
-        feature_names=feature_names,
-        rule="epsilon",
-        epsilon=1e-6
-    )
-    
-    explanation = explainer.explain(instance)
+All reported scores are raw outputs of the wrapped module. When the adapter
+identifies a one-output classifier as a logit model, class 1 is the logit and
+class 0 is its negative margin. Probability-space LRP would require propagating
+through the output activation, which this implementation does not claim to do.
 """
 
 from __future__ import annotations
 
-import numpy as np
-from typing import List, Optional, Dict, Any, Tuple, Union
+import threading
 from collections import OrderedDict
+from numbers import Integral
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 
-
-# Check if PyTorch is available
-try:
+if TYPE_CHECKING:
     import torch
     import torch.nn as nn
-    import torch.nn.functional as F
+
     TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
-    nn = None
-    F = None
+else:
+    try:
+        import torch
+        import torch.nn as nn
+
+        TORCH_AVAILABLE = True
+    except ImportError:  # pragma: no cover - exercised only without torch extra
+        torch = None
+        nn = None
+        TORCH_AVAILABLE = False
+
+try:
+    from captum.attr import LRP as CaptumLRP
+    from captum.attr._utils.lrp_rules import (
+        Alpha1_Beta0_Rule,
+        EpsilonRule,
+        GammaRule,
+        IdentityRule,
+        PropagationRule,
+    )
+
+    CAPTUM_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only without torch extra
+    CaptumLRP = None
+    Alpha1_Beta0_Rule = None
+    EpsilonRule = None
+    GammaRule = None
+    IdentityRule = None
+    PropagationRule = object
+    CAPTUM_AVAILABLE = False
 
 
-# Valid LRP rules
-VALID_RULES = ["epsilon", "gamma", "alpha_beta", "z_plus", "composite"]
+VALID_RULES = ("epsilon", "gamma", "alpha_beta", "z_plus", "composite")
+_CAPTUM_RULES = ("epsilon", "gamma", "z_plus")
+_LRP_LOCK = threading.RLock()
 
-# Layer types that require special LRP handling
-WEIGHTED_LAYERS = (nn.Linear, nn.Conv2d) if TORCH_AVAILABLE else ()
-NORMALIZATION_LAYERS = (nn.BatchNorm1d, nn.BatchNorm2d) if TORCH_AVAILABLE else ()
-ACTIVATION_LAYERS = (nn.ReLU, nn.LeakyReLU, nn.ELU, nn.Tanh, nn.Sigmoid, nn.GELU) if TORCH_AVAILABLE else ()
-POOLING_LAYERS = (nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d) if TORCH_AVAILABLE else ()
-PASSTHROUGH_LAYERS = (nn.Dropout, nn.Dropout2d, nn.Flatten) if TORCH_AVAILABLE else ()
+
+if CAPTUM_AVAILABLE:
+
+    class _ReshapeRule(PropagationRule):
+        """Preserve relevance values while reversing Flatten / Unflatten."""
+
+        def _manipulate_weights(self, module, inputs, outputs) -> None:
+            return None
+
+        def _create_backward_hook_input(self, inputs):
+            def hook(grad):
+                return self.relevance_output[grad.device].reshape_as(inputs)
+
+            return hook
 
 
 class LRPExplainer(BaseExplainer):
+    """Layer-wise Relevance Propagation for verified sequential PyTorch graphs.
+
+    Supported global rules are ``epsilon``, ``gamma``, ``z_plus``, and
+    ``alpha_beta``. ``composite`` assigns epsilon, gamma, or z-plus to selected
+    weighted layers and defaults the remainder to epsilon.
+
+    Epsilon, gamma, z-plus, and composite support Linear, Conv2d, BatchNorm1d,
+    BatchNorm2d, MaxPool2d, AvgPool2d, AdaptiveAvgPool2d, ReLU, LeakyReLU,
+    ELU, Tanh, Sigmoid, Dropout, Flatten, and Unflatten in an
+    ``nn.Sequential`` chain. Alpha-beta is limited to Linear plus those
+    pointwise / reshape layers.
     """
-    Layer-wise Relevance Propagation (LRP) explainer for neural networks.
-    
-    LRP decomposes the network output into relevance scores for each input
-    feature by propagating relevance backward through the network layers.
-    The key property is conservation: the sum of relevances at each layer
-    equals the relevance at the layer above.
-    
-    Supports:
-    - Fully connected networks (Linear + activations)
-    - Convolutional networks (Conv2d + BatchNorm + pooling)
-    - Mixed architectures
-    
-    Attributes:
-        model: Model adapter (must be PyTorchAdapter)
-        feature_names: List of feature names
-        class_names: List of class names (for classification)
-        rule: Propagation rule ("epsilon", "gamma", "alpha_beta", "z_plus", "composite")
-        epsilon: Stabilization constant for epsilon rule
-        gamma: Enhancement factor for gamma rule
-        alpha: Positive contribution weight for alpha-beta rule
-        beta: Negative contribution weight for alpha-beta rule
-    
-    Example:
-        >>> explainer = LRPExplainer(adapter, feature_names, rule="epsilon")
-        >>> explanation = explainer.explain(instance)
-        >>> print(explanation.explanation_data["feature_attributions"])
-    """
-    
+
+    _POINTWISE_NATIVE = (nn.ReLU, nn.Tanh, nn.Dropout) if TORCH_AVAILABLE else ()
+    _POINTWISE_IDENTITY = (nn.LeakyReLU, nn.ELU, nn.Sigmoid) if TORCH_AVAILABLE else ()
+    _RESHAPE = (nn.Flatten, nn.Unflatten) if TORCH_AVAILABLE else ()
+    _WEIGHTED = (nn.Linear, nn.Conv2d) if TORCH_AVAILABLE else ()
+    _NORMALIZATION = (nn.BatchNorm1d, nn.BatchNorm2d) if TORCH_AVAILABLE else ()
+    _POOLING = (nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d) if TORCH_AVAILABLE else ()
+
     def __init__(
         self,
         model,
@@ -135,1133 +113,698 @@ class LRPExplainer(BaseExplainer):
         epsilon: float = 1e-6,
         gamma: float = 0.25,
         alpha: float = 2.0,
-        beta: float = 1.0
+        beta: float = 1.0,
     ):
-        """
-        Initialize the LRP explainer.
-        
-        Args:
-            model: A PyTorchAdapter wrapping the model to explain.
-            feature_names: List of input feature names.
-            class_names: List of class names (for classification tasks).
-            rule: Propagation rule to use:
-                - "epsilon": LRP-ε with stabilization (default, recommended)
-                - "gamma": LRP-γ enhancing positive contributions
-                - "alpha_beta": LRP-αβ separating pos/neg contributions
-                - "z_plus": LRP-z⁺ using only positive weights
-                - "composite": Different rules for different layers
-            epsilon: Small constant for numerical stability in epsilon rule.
-                    Default: 1e-6
-            gamma: Factor to enhance positive contributions in gamma rule.
-                   Default: 0.25
-            alpha: Weight for positive contributions in alpha-beta rule.
-                   Must satisfy alpha - beta = 1. Default: 2.0
-            beta: Weight for negative contributions in alpha-beta rule.
-                  Must satisfy alpha - beta = 1. Default: 1.0
-        
-        Raises:
-            TypeError: If model is not a PyTorchAdapter.
-            ValueError: If rule is invalid or alpha-beta constraint violated.
-        """
         if not TORCH_AVAILABLE:
+            raise ImportError("LRP requires PyTorch. Install explainiverse[torch].")
+        if not CAPTUM_AVAILABLE:
             raise ImportError(
-                "PyTorch is required for LRP. Install with: pip install torch"
+                "LRP requires Captum. Install explainiverse[torch] or pip install captum."
             )
-        
+
         super().__init__(model)
-        
-        # Validate model is PyTorchAdapter
-        if not hasattr(model, 'model') or not isinstance(model.model, nn.Module):
-            raise TypeError(
-                "LRP requires a PyTorchAdapter wrapping a PyTorch model. "
-                "Use: PyTorchAdapter(your_model, task='classification')"
-            )
-        
-        # Validate rule
+        if not hasattr(model, "model") or not isinstance(model.model, nn.Module):
+            raise TypeError("LRP requires a PyTorchAdapter wrapping an nn.Module.")
+        if getattr(model, "task", None) not in {"classification", "regression"}:
+            raise TypeError("LRP requires an adapter with an explicit task contract.")
         if rule not in VALID_RULES:
-            raise ValueError(
-                f"Invalid rule: '{rule}'. Must be one of: {VALID_RULES}"
-            )
-        
-        # Validate alpha-beta constraint
-        if rule == "alpha_beta":
-            if not np.isclose(alpha - beta, 1.0):
-                raise ValueError(
-                    f"For alpha-beta rule, alpha - beta must equal 1. "
-                    f"Got alpha={alpha}, beta={beta}, difference={alpha - beta}"
-                )
-        
-        self.feature_names = list(feature_names)
-        self.class_names = list(class_names) if class_names else None
+            raise ValueError(f"rule must be one of {VALID_RULES}; got {rule!r}")
+        if not np.isfinite(epsilon) or epsilon < 0:
+            raise ValueError("epsilon must be a finite non-negative number")
+        if not np.isfinite(gamma) or gamma < 0:
+            raise ValueError("gamma must be a finite non-negative number")
+        if not np.isfinite(alpha) or not np.isfinite(beta):
+            raise ValueError("alpha and beta must be finite")
+        if alpha < 1 or beta < 0 or not np.isclose(alpha - beta, 1.0):
+            raise ValueError("alpha_beta requires alpha >= 1, beta >= 0, and alpha - beta = 1")
+
+        self.feature_names = self._validate_names(feature_names, "feature_names")
+        inherited_classes = getattr(model, "class_names", None)
+        effective_classes = class_names if class_names is not None else inherited_classes
+        self.class_names = (
+            self._validate_names(effective_classes, "class_names")
+            if effective_classes is not None
+            else None
+        )
         self.rule = rule
-        self.epsilon = epsilon
-        self.gamma = gamma
-        self.alpha = alpha
-        self.beta = beta
-        
-        # For composite rules
+        self.epsilon = float(epsilon)
+        self.gamma = float(gamma)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
         self._layer_rules: Optional[Dict[int, str]] = None
-        
-        # Cache for layer information
         self._layers_info: Optional[List[Dict[str, Any]]] = None
-    
-    def _get_pytorch_model(self) -> nn.Module:
-        """Get the underlying PyTorch model."""
-        return self.model.model
-    
-    def _is_cnn_model(self) -> bool:
-        """Check if the model's first weighted layer is Conv2d."""
-        model = self._get_pytorch_model()
-        for module in model.modules():
-            if isinstance(module, nn.Conv2d):
-                return True
-            if isinstance(module, nn.Linear):
-                return False
-        return False
-    
-    def _get_model_device(self) -> torch.device:
-        """
-        Detect the device (CPU/CUDA) of the underlying PyTorch model.
-        
-        Returns:
-            torch.device the model parameters reside on
-        """
-        model = self._get_pytorch_model()
+
+        self._leaf_layers = self._validate_architecture(model.model)
+        if self.rule == "alpha_beta":
+            self._validate_alpha_beta_architecture()
+
+    @staticmethod
+    def _validate_names(names, field: str) -> List[str]:
+        if isinstance(names, (str, bytes)):
+            raise ValueError(f"{field} must be a non-empty sequence of unique strings")
         try:
-            return next(model.parameters()).device
+            result = list(names)
+        except TypeError as error:
+            raise ValueError(f"{field} must be a non-empty sequence of unique strings") from error
+        if not result:
+            raise ValueError(f"{field} must be a non-empty sequence of unique strings")
+        if any(not isinstance(name, str) or not name.strip() for name in result):
+            raise ValueError(f"{field} must contain non-empty strings")
+        if len(set(result)) != len(result):
+            raise ValueError(f"{field} must contain unique names")
+        return result
+
+    def _validate_architecture(self, model: nn.Module):
+        supported = (
+            self._WEIGHTED
+            + self._NORMALIZATION
+            + self._POOLING
+            + self._POINTWISE_NATIVE
+            + self._POINTWISE_IDENTITY
+            + self._RESHAPE
+        )
+        if type(model) is not nn.Sequential and type(model) not in supported:
+            raise TypeError(
+                "LRP supports only an nn.Sequential feed-forward chain or one "
+                f"supported leaf module; got {type(model).__name__}."
+            )
+
+        leaves: List[Tuple[int, str, nn.Module]] = []
+        seen: set[int] = set()
+
+        def visit(module: nn.Module, path: str) -> None:
+            if type(module) is nn.Sequential:
+                for name, child in module._modules.items():
+                    child_path = f"{path}.{name}" if path else name
+                    visit(child, child_path)
+                return
+            if type(module) not in supported:
+                raise TypeError(
+                    f"Unsupported LRP layer {type(module).__name__} at {path or '<root>'}."
+                )
+            if id(module) in seen:
+                raise TypeError(
+                    f"Layer {path or '<root>'} is reused; shared modules are unsupported."
+                )
+            seen.add(id(module))
+            if isinstance(module, self._NORMALIZATION) and (
+                not module.track_running_stats
+                or module.running_mean is None
+                or module.running_var is None
+            ):
+                raise TypeError(
+                    f"{type(module).__name__} at {path or '<root>'} requires "
+                    "tracked running statistics for deterministic eval-mode LRP."
+                )
+            if isinstance(module, nn.MaxPool2d) and module.return_indices:
+                raise TypeError("MaxPool2d(return_indices=True) is unsupported by LRP")
+            leaves.append((len(leaves), path or "model", module))
+
+        visit(model, "")
+        if not leaves:
+            raise TypeError("LRP requires at least one supported leaf layer")
+        return leaves
+
+    def _validate_alpha_beta_architecture(self) -> None:
+        supported = (nn.Linear,) + self._POINTWISE_NATIVE + self._POINTWISE_IDENTITY + self._RESHAPE
+        unsupported = [
+            (idx, name, type(layer).__name__)
+            for idx, name, layer in self._leaf_layers
+            if not isinstance(layer, supported)
+        ]
+        if unsupported:
+            details = ", ".join(
+                f"{layer_type} at {idx} ({name})" for idx, name, layer_type in unsupported
+            )
+            raise NotImplementedError(
+                "alpha_beta is verified only for Linear plus pointwise/reshape "
+                f"sequential layers; unsupported: {details}"
+            )
+
+    def _get_pytorch_model(self) -> nn.Module:
+        return self.model.model
+
+    def _get_model_device(self) -> torch.device:
+        try:
+            return next(self._get_pytorch_model().parameters()).device
         except StopIteration:
-            return torch.device("cpu")
-    
-    def _has_unflatten_before_conv(self) -> bool:
-        """
-        Check if the model contains an Unflatten or Reshape layer before
-        the first Conv2d. If so, the model expects flat input and handles
-        reshaping internally — we should NOT pre-reshape.
-        
-        Returns:
-            True if Unflatten/Reshape appears before first Conv2d
-        """
-        model = self._get_pytorch_model()
-        if isinstance(model, nn.Sequential):
-            for module in model.children():
-                if isinstance(module, nn.Unflatten):
-                    return True
-                if isinstance(module, nn.Conv2d):
-                    return False
-        else:
-            for module in model.modules():
-                if isinstance(module, nn.Unflatten):
-                    return True
-                if isinstance(module, nn.Conv2d):
-                    return False
-        return False
-    
+            return torch.device(getattr(self.model, "device", "cpu"))
+
     def _prepare_input_tensor(self, instance: np.ndarray) -> torch.Tensor:
-        """
-        Prepare input tensor with correct shape and device for the model.
-        
-        For CNN models, preserves the spatial dimensions.
-        For MLP models, flattens to 2D.
-        Handles models with Unflatten layers that expect flat input.
-        Automatically places tensors on the same device as the model.
-        
-        Args:
-            instance: Input array (1D for tabular, 3D for images)
-        
-        Returns:
-            Tensor with batch dimension added and correct shape for model
-        """
-        instance = np.array(instance).astype(np.float32)
-        original_shape = instance.shape
-        
-        model = self._get_pytorch_model()
-        device = self._get_model_device()
-        
-        # Find first weighted layer to determine input type
-        first_layer = None
-        for module in model.modules():
-            if isinstance(module, (nn.Linear, nn.Conv2d)):
-                first_layer = module
-                break
-        
-        if isinstance(first_layer, nn.Conv2d) and not self._has_unflatten_before_conv():
-            # CNN model without Unflatten - need 4D input (batch, channels, height, width)
-            in_channels = first_layer.in_channels
-            
-            if len(original_shape) >= 3:
-                # Already (C, H, W) format - just add batch dimension
-                x = torch.tensor(instance, device=device).unsqueeze(0)
-            elif len(original_shape) == 2:
-                # (H, W) - assume single channel, add channel and batch dimensions
-                x = torch.tensor(instance, device=device).unsqueeze(0).unsqueeze(0)
-            else:
-                # Flattened - try to infer spatial dimensions
-                n_features = instance.size
-                if n_features % in_channels == 0:
-                    spatial_size = int(np.sqrt(n_features // in_channels))
-                    if spatial_size * spatial_size * in_channels == n_features:
-                        x = torch.tensor(instance.flatten(), device=device).reshape(
-                            1, in_channels, spatial_size, spatial_size
-                        )
-                    else:
-                        raise ValueError(
-                            f"Cannot infer spatial dimensions for {n_features} features "
-                            f"with {in_channels} channels"
-                        )
-                else:
+        array = np.asarray(instance)
+        if array.ndim == 0 or array.size == 0:
+            raise ValueError("instance must contain at least one feature")
+        if array.dtype.kind not in "biuf":
+            raise TypeError("instance must be a numeric array")
+        array = array.astype(np.float32, copy=False)
+        if len(self.feature_names) != array.size:
+            raise ValueError(
+                f"feature_names has {len(self.feature_names)} entries but instance "
+                f"contains {array.size} scalar features"
+            )
+        first_shape_layer = next(
+            (
+                layer
+                for _, _, layer in self._leaf_layers
+                if not isinstance(layer, self._POINTWISE_NATIVE + self._POINTWISE_IDENTITY)
+            ),
+            None,
+        )
+        spatial_layers = (nn.Conv2d, nn.BatchNorm2d) + self._POOLING
+        if isinstance(first_shape_layer, spatial_layers) and array.ndim != 3:
+            raise ValueError(
+                "A spatial LRP instance must have shape (channels, height, width); "
+                f"got {tuple(array.shape)}"
+            )
+        if (
+            isinstance(first_shape_layer, (nn.Linear, nn.BatchNorm1d, nn.Unflatten))
+            and array.ndim != 1
+        ):
+            raise ValueError(
+                "A tabular LRP instance must be one-dimensional; " f"got {tuple(array.shape)}"
+            )
+        return torch.as_tensor(array, device=self._get_model_device()).unsqueeze(0)
+
+    def _forward_leafwise(self, x: torch.Tensor):
+        current = x
+        records = []
+        for idx, name, layer in self._leaf_layers:
+            activation = current.detach().clone()
+            current = layer(current)
+            records.append((idx, name, layer, activation))
+        return current, records
+
+    @staticmethod
+    def _normalise_output(output: torch.Tensor) -> torch.Tensor:
+        if not isinstance(output, torch.Tensor):
+            raise TypeError("The PyTorch model must return a Tensor")
+        if output.ndim == 1:
+            output = output.unsqueeze(1)
+        if output.ndim != 2 or output.shape[0] != 1:
+            raise ValueError(
+                "LRP requires one scalar or vector model output per instance; "
+                f"got shape {tuple(output.shape)}"
+            )
+        if not bool(torch.isfinite(output).all()):
+            raise ValueError("The model returned non-finite output values")
+        return output
+
+    def _resolve_target(
+        self, output: torch.Tensor, target_class: Optional[int]
+    ) -> Tuple[int, float, str, str]:
+        n_outputs = output.shape[1]
+        task = self.model.task
+
+        if target_class is not None and (
+            isinstance(target_class, (bool, np.bool_)) or not isinstance(target_class, Integral)
+        ):
+            raise TypeError("target_class must be an integer output index")
+
+        if task == "regression":
+            if n_outputs > 1 and target_class is None:
+                raise ValueError(
+                    "Multi-output regression requires an explicit output index in target_class"
+                )
+            index = 0 if target_class is None else int(target_class)
+            if index < 0 or index >= n_outputs:
+                raise ValueError(f"target_class output index must be in [0, {n_outputs - 1}]")
+            label = "output" if n_outputs == 1 else f"output_{index}"
+            return index, 1.0, label, "model_output"
+
+        if n_outputs == 1:
+            predictions = self.model._prediction_output(output)
+            index = (
+                int(torch.argmax(predictions, dim=1).item())
+                if target_class is None
+                else int(target_class)
+            )
+            if index not in (0, 1):
+                raise ValueError("target_class must be 0 or 1 for a one-logit classifier")
+            if self.class_names is not None and len(self.class_names) != 2:
+                raise ValueError("A one-logit binary classifier requires two class_names")
+            label = self.class_names[index] if self.class_names else f"class_{index}"
+            if getattr(self.model, "output_activation", None) is None:
+                if index == 0:
                     raise ValueError(
-                        f"Number of features ({n_features}) not divisible by "
-                        f"input channels ({in_channels})"
+                        "Class-0 LRP is undefined for a one-output probability model: "
+                        "the model exposes P(class 1), while 1-P(class 1) includes an "
+                        "unrepresented constant. Explain class 1 or use a logit model."
                     )
-        else:
-            # MLP model or CNN with Unflatten (model handles reshaping) - need 2D input
-            x = torch.tensor(instance.flatten(), device=device).reshape(1, -1)
-        
-        return x.float()
-    
-    def _get_rule_for_layer(self, layer_idx: int, layer_type: str) -> str:
-        """
-        Get the propagation rule for a specific layer.
-        
-        Args:
-            layer_idx: Index of the layer
-            layer_type: Type of the layer (e.g., "Linear", "Conv2d")
-        
-        Returns:
-            Rule name to use for this layer
-        """
+                return 0, 1.0, label, "model_probability"
+            if index == 0 and self._uses_sign_asymmetric_rule():
+                raise ValueError(
+                    "Class-0 LRP for a one-logit classifier is unsupported with "
+                    "gamma, z-plus, alpha-beta, or a composite containing those "
+                    "rules. Negating an attribution after propagation is not "
+                    "equivalent to applying a sign-asymmetric rule to the "
+                    "explicit -logit score. Use rule='epsilon' or expose two "
+                    "model output scores."
+                )
+            return 0, (1.0 if index == 1 else -1.0), label, "binary_logit_margin"
+
+        index = (
+            int(torch.argmax(output, dim=1).item()) if target_class is None else int(target_class)
+        )
+        if index < 0 or index >= n_outputs:
+            raise ValueError(f"target_class must be in [0, {n_outputs - 1}]")
+        if self.class_names is not None and len(self.class_names) != n_outputs:
+            raise ValueError(
+                f"class_names has {len(self.class_names)} entries for {n_outputs} outputs"
+            )
+        label = self.class_names[index] if self.class_names else f"class_{index}"
+        return index, 1.0, label, "model_output"
+
+    def _uses_sign_asymmetric_rule(self) -> bool:
+        """Return whether the configured propagation changes under ``f -> -f``."""
+
+        asymmetric = {"gamma", "z_plus", "alpha_beta"}
+        if self.rule in asymmetric:
+            return True
+        if self.rule != "composite":
+            return False
+        return any(rule in asymmetric for rule in self._effective_layer_rules().values())
+
+    def _get_rule_for_layer(self, layer_idx: int, layer_type: str = "") -> str:
         if self.rule != "composite":
             return self.rule
-        
-        # Composite rule: check layer-specific rules
         if self._layer_rules and layer_idx in self._layer_rules:
             return self._layer_rules[layer_idx]
-        
-        # Default fallback for composite
         return "epsilon"
-    
+
     def set_composite_rule(self, layer_rules: Dict[int, str]) -> "LRPExplainer":
-        """
-        Set layer-specific rules for composite LRP.
-        
-        This allows using different propagation rules for different layers,
-        which is often beneficial. A common practice is:
-        - z_plus for input/early layers (focuses on what's present)
-        - epsilon for middle layers (balanced attribution)
-        - epsilon or zero for final layers
-        
-        Args:
-            layer_rules: Dictionary mapping layer indices to rule names.
-                        Layers not in this dict use "epsilon" by default.
-        
-        Returns:
-            Self for method chaining.
-        
-        Example:
-            >>> explainer.set_composite_rule({
-            ...     0: "z_plus",   # First layer
-            ...     2: "epsilon",  # Middle layer
-            ...     4: "epsilon"   # Final layer
-            ... })
-        """
-        # Validate rules
-        for idx, rule in layer_rules.items():
-            if rule not in VALID_RULES and rule != "composite":
-                raise ValueError(f"Invalid rule '{rule}' for layer {idx}")
-        
-        self._layer_rules = layer_rules
+        if self.rule != "composite":
+            raise ValueError("set_composite_rule requires rule='composite'")
+        if not isinstance(layer_rules, dict):
+            raise TypeError("layer_rules must be a dictionary")
+        weighted_indices = {
+            idx for idx, _, layer in self._leaf_layers if isinstance(layer, self._WEIGHTED)
+        }
+        validated: Dict[int, str] = {}
+        for index, layer_rule in layer_rules.items():
+            if isinstance(index, bool) or not isinstance(index, Integral):
+                raise TypeError("composite layer indices must be integers")
+            index = int(index)
+            if index not in weighted_indices:
+                raise ValueError(
+                    f"Composite rule index {index} is not a weighted Linear/Conv2d layer"
+                )
+            if layer_rule not in _CAPTUM_RULES:
+                raise ValueError(
+                    "Composite layers support only epsilon, gamma, or z_plus; "
+                    f"got {layer_rule!r}"
+                )
+            validated[index] = layer_rule
+        self._layer_rules = validated
         return self
-    
-    # =========================================================================
-    # Linear Layer LRP Rules
-    # =========================================================================
-    
-    def _lrp_linear_epsilon(
-        self,
-        layer: nn.Linear,
-        activation: torch.Tensor,
-        relevance: torch.Tensor,
-        epsilon: float
-    ) -> torch.Tensor:
-        """
-        LRP-epsilon rule for linear layers.
-        
-        R_j = Σ_k (a_j * w_jk / (z_k + ε*sign(z_k))) * R_k
-        """
-        # Forward pass to get z
-        z = torch.mm(activation, layer.weight.t())
-        if layer.bias is not None:
-            z = z + layer.bias
-        
-        # Stabilize: z + epsilon * sign(z)
-        z_stabilized = z + epsilon * torch.sign(z)
-        z_stabilized = torch.where(
-            torch.abs(z_stabilized) < epsilon,
-            torch.full_like(z_stabilized, epsilon),
-            z_stabilized
-        )
-        
-        # Compute relevance contribution: (R / z_stabilized) @ W
-        s = relevance / z_stabilized
-        c = torch.mm(s, layer.weight)
-        
-        return activation * c
-    
-    def _lrp_linear_gamma(
-        self,
-        layer: nn.Linear,
-        activation: torch.Tensor,
-        relevance: torch.Tensor,
-        gamma: float
-    ) -> torch.Tensor:
-        """
-        LRP-gamma rule for linear layers.
-        Enhances positive contributions for sharper attributions.
-        """
-        w_plus = torch.clamp(layer.weight, min=0)
-        w_modified = layer.weight + gamma * w_plus
-        
-        z = torch.mm(activation, w_modified.t())
-        if layer.bias is not None:
-            b_plus = torch.clamp(layer.bias, min=0)
-            z = z + layer.bias + gamma * b_plus
-        
-        z_stabilized = z + self.epsilon * torch.sign(z)
-        z_stabilized = torch.where(
-            torch.abs(z_stabilized) < self.epsilon,
-            torch.full_like(z_stabilized, self.epsilon),
-            z_stabilized
-        )
-        
-        s = relevance / z_stabilized
-        c = torch.mm(s, w_modified)
-        
-        return activation * c
-    
-    def _lrp_linear_alpha_beta(
-        self,
-        layer: nn.Linear,
-        activation: torch.Tensor,
-        relevance: torch.Tensor,
-        alpha: float,
-        beta: float
-    ) -> torch.Tensor:
-        """
-        LRP-alpha-beta rule for linear layers.
-        Separates positive and negative contributions.
-        """
-        w_plus = torch.clamp(layer.weight, min=0)
-        w_minus = torch.clamp(layer.weight, max=0)
-        a_plus = torch.clamp(activation, min=0)
-        
-        z_plus = torch.mm(a_plus, w_plus.t())
-        if layer.bias is not None:
-            z_plus = z_plus + torch.clamp(layer.bias, min=0)
-        
-        z_minus = torch.mm(a_plus, w_minus.t())
-        if layer.bias is not None:
-            z_minus = z_minus + torch.clamp(layer.bias, max=0)
-        
-        z_plus_stable = z_plus + self.epsilon
-        z_minus_stable = z_minus - self.epsilon
-        z_minus_stable = torch.where(
-            torch.abs(z_minus_stable) < self.epsilon,
-            torch.full_like(z_minus_stable, -self.epsilon),
-            z_minus_stable
-        )
-        
-        s_plus = relevance / z_plus_stable
-        s_minus = relevance / z_minus_stable
-        
-        c_plus = torch.mm(s_plus, w_plus)
-        c_minus = torch.mm(s_minus, w_minus)
-        
-        return alpha * a_plus * c_plus - beta * a_plus * c_minus
-    
-    def _lrp_linear_z_plus(
-        self,
-        layer: nn.Linear,
-        activation: torch.Tensor,
-        relevance: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        LRP-z+ rule for linear layers.
-        Only considers positive weights.
-        """
-        w_plus = torch.clamp(layer.weight, min=0)
-        a_plus = torch.clamp(activation, min=0)
-        
-        z_plus = torch.mm(a_plus, w_plus.t())
-        if layer.bias is not None:
-            z_plus = z_plus + torch.clamp(layer.bias, min=0)
-        
-        z_plus_stable = z_plus + self.epsilon
-        
-        s = relevance / z_plus_stable
-        c = torch.mm(s, w_plus)
-        
-        return a_plus * c
-    
-    def _propagate_linear(
-        self,
-        layer: nn.Linear,
-        activation: torch.Tensor,
-        relevance: torch.Tensor,
-        rule: str
-    ) -> torch.Tensor:
-        """Propagate relevance through a linear layer."""
+
+    def _validate_z_plus_activations(self, records) -> None:
+        for idx, name, layer, activation in records:
+            if not isinstance(layer, self._WEIGHTED):
+                continue
+            if self._get_rule_for_layer(idx) != "z_plus":
+                continue
+            minimum = float(activation.min().item())
+            if minimum < -1e-7:
+                raise ValueError(
+                    "z_plus requires non-negative inputs to every weighted layer; "
+                    f"layer {idx} ({name}) received minimum activation {minimum:.6g}"
+                )
+
+    def _make_weighted_rule(self, rule: str):
         if rule == "epsilon":
-            return self._lrp_linear_epsilon(layer, activation, relevance, self.epsilon)
-        elif rule == "gamma":
-            return self._lrp_linear_gamma(layer, activation, relevance, self.gamma)
-        elif rule == "alpha_beta":
-            return self._lrp_linear_alpha_beta(layer, activation, relevance, self.alpha, self.beta)
-        elif rule == "z_plus":
-            return self._lrp_linear_z_plus(layer, activation, relevance)
-        else:
-            return self._lrp_linear_epsilon(layer, activation, relevance, self.epsilon)
-    
-    # =========================================================================
-    # Conv2d Layer LRP Rules
-    # =========================================================================
-    
-    def _lrp_conv2d_epsilon(
-        self,
-        layer: nn.Conv2d,
-        activation: torch.Tensor,
-        relevance: torch.Tensor,
-        epsilon: float
-    ) -> torch.Tensor:
-        """
-        LRP-epsilon rule for Conv2d layers.
-        Uses convolution transpose for backward relevance propagation.
-        """
-        # Forward pass to get z
-        z = F.conv2d(
-            activation,
-            layer.weight,
-            bias=layer.bias,
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups
-        )
-        
-        # Stabilize
-        z_stabilized = z + epsilon * torch.sign(z)
-        z_stabilized = torch.where(
-            torch.abs(z_stabilized) < epsilon,
-            torch.full_like(z_stabilized, epsilon),
-            z_stabilized
-        )
-        
-        # Compute s = R / z
-        s = relevance / z_stabilized
-        
-        # Backward pass using conv_transpose2d
-        c = F.conv_transpose2d(
-            s,
-            layer.weight,
-            bias=None,
-            stride=layer.stride,
-            padding=layer.padding,
-            output_padding=0,
-            groups=layer.groups,
-            dilation=layer.dilation
-        )
-        
-        # Handle output size mismatch
-        if c.shape != activation.shape:
-            # Pad or crop to match activation shape
-            diff_h = activation.shape[2] - c.shape[2]
-            diff_w = activation.shape[3] - c.shape[3]
-            if diff_h > 0 or diff_w > 0:
-                c = F.pad(c, [0, max(0, diff_w), 0, max(0, diff_h)])
-            if diff_h < 0 or diff_w < 0:
-                c = c[:, :, :activation.shape[2], :activation.shape[3]]
-        
-        return activation * c
-    
-    def _lrp_conv2d_gamma(
-        self,
-        layer: nn.Conv2d,
-        activation: torch.Tensor,
-        relevance: torch.Tensor,
-        gamma: float
-    ) -> torch.Tensor:
-        """LRP-gamma rule for Conv2d layers."""
-        w_plus = torch.clamp(layer.weight, min=0)
-        w_modified = layer.weight + gamma * w_plus
-        
-        z = F.conv2d(
-            activation,
-            w_modified,
-            bias=layer.bias,
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups
-        )
-        
-        if layer.bias is not None:
-            b_plus = torch.clamp(layer.bias, min=0)
-            # Bias is already added in conv2d, add gamma * b_plus
-            z = z + gamma * b_plus.view(1, -1, 1, 1)
-        
-        z_stabilized = z + self.epsilon * torch.sign(z)
-        z_stabilized = torch.where(
-            torch.abs(z_stabilized) < self.epsilon,
-            torch.full_like(z_stabilized, self.epsilon),
-            z_stabilized
-        )
-        
-        s = relevance / z_stabilized
-        
-        c = F.conv_transpose2d(
-            s,
-            w_modified,
-            bias=None,
-            stride=layer.stride,
-            padding=layer.padding,
-            output_padding=0,
-            groups=layer.groups,
-            dilation=layer.dilation
-        )
-        
-        if c.shape != activation.shape:
-            diff_h = activation.shape[2] - c.shape[2]
-            diff_w = activation.shape[3] - c.shape[3]
-            if diff_h > 0 or diff_w > 0:
-                c = F.pad(c, [0, max(0, diff_w), 0, max(0, diff_h)])
-            if diff_h < 0 or diff_w < 0:
-                c = c[:, :, :activation.shape[2], :activation.shape[3]]
-        
-        return activation * c
-    
-    def _lrp_conv2d_z_plus(
-        self,
-        layer: nn.Conv2d,
-        activation: torch.Tensor,
-        relevance: torch.Tensor
-    ) -> torch.Tensor:
-        """LRP-z+ rule for Conv2d layers."""
-        w_plus = torch.clamp(layer.weight, min=0)
-        a_plus = torch.clamp(activation, min=0)
-        
-        z_plus = F.conv2d(
-            a_plus,
-            w_plus,
-            bias=None,  # Ignore bias for z+
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups
-        )
-        
-        if layer.bias is not None:
-            z_plus = z_plus + torch.clamp(layer.bias, min=0).view(1, -1, 1, 1)
-        
-        z_plus_stable = z_plus + self.epsilon
-        
-        s = relevance / z_plus_stable
-        
-        c = F.conv_transpose2d(
-            s,
-            w_plus,
-            bias=None,
-            stride=layer.stride,
-            padding=layer.padding,
-            output_padding=0,
-            groups=layer.groups,
-            dilation=layer.dilation
-        )
-        
-        if c.shape != a_plus.shape:
-            diff_h = a_plus.shape[2] - c.shape[2]
-            diff_w = a_plus.shape[3] - c.shape[3]
-            if diff_h > 0 or diff_w > 0:
-                c = F.pad(c, [0, max(0, diff_w), 0, max(0, diff_h)])
-            if diff_h < 0 or diff_w < 0:
-                c = c[:, :, :a_plus.shape[2], :a_plus.shape[3]]
-        
-        return a_plus * c
-    
-    def _propagate_conv2d(
-        self,
-        layer: nn.Conv2d,
-        activation: torch.Tensor,
-        relevance: torch.Tensor,
-        rule: str
-    ) -> torch.Tensor:
-        """Propagate relevance through a Conv2d layer."""
-        if rule == "epsilon":
-            return self._lrp_conv2d_epsilon(layer, activation, relevance, self.epsilon)
-        elif rule == "gamma":
-            return self._lrp_conv2d_gamma(layer, activation, relevance, self.gamma)
-        elif rule == "z_plus":
-            return self._lrp_conv2d_z_plus(layer, activation, relevance)
-        elif rule == "alpha_beta":
-            # Alpha-beta for conv is complex, fall back to epsilon
-            return self._lrp_conv2d_epsilon(layer, activation, relevance, self.epsilon)
-        else:
-            return self._lrp_conv2d_epsilon(layer, activation, relevance, self.epsilon)
-    
-    # =========================================================================
-    # BatchNorm Layer LRP Rules
-    # =========================================================================
-    
-    def _propagate_batchnorm(
-        self,
-        layer: Union[nn.BatchNorm1d, nn.BatchNorm2d],
-        activation: torch.Tensor,
-        relevance: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Propagate relevance through BatchNorm layer.
-        
-        BatchNorm is an affine transformation: y = gamma * (x - mean) / std + beta
-        We treat it as a linear scaling and propagate relevance proportionally.
-        """
-        # Get BatchNorm parameters
-        if layer.running_mean is None or layer.running_var is None:
-            # If no running stats, pass through
-            return relevance
-        
-        mean = layer.running_mean
-        var = layer.running_var
-        eps = layer.eps
-        
-        # Compute the effective scale factor
-        std = torch.sqrt(var + eps)
-        
-        if layer.weight is not None:
-            scale = layer.weight / std
-        else:
-            scale = 1.0 / std
-        
-        # Reshape scale for broadcasting
-        if isinstance(layer, nn.BatchNorm2d):
-            scale = scale.view(1, -1, 1, 1)
-        else:
-            scale = scale.view(1, -1)
-        
-        # Relevance propagation: R_input = R_output (scaled back)
-        # Since BN is essentially a rescaling, we redistribute proportionally
-        return relevance / (scale + self.epsilon * torch.sign(scale))
-    
-    # =========================================================================
-    # Activation Layer LRP Rules  
-    # =========================================================================
-    
-    def _propagate_activation(
-        self,
-        layer: nn.Module,
-        activation: torch.Tensor,
-        relevance: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Propagate relevance through activation layers (ReLU, etc.).
-        
-        For element-wise activations, relevance passes through unchanged
-        to locations where the activation was positive.
-        """
-        if isinstance(layer, nn.ReLU):
-            # ReLU: pass relevance where input was positive
-            # Since we have post-activation values, we use them as mask
-            mask = (activation > 0).float()
-            return relevance * mask + relevance * (1 - mask)  # Actually just pass through
-        elif isinstance(layer, (nn.LeakyReLU, nn.ELU)):
-            # For leaky activations, relevance passes through
-            return relevance
-        elif isinstance(layer, (nn.Tanh, nn.Sigmoid)):
-            # For bounded activations, relevance passes through
-            return relevance
-        else:
-            # Default: pass through
-            return relevance
-    
-    # =========================================================================
-    # Pooling Layer LRP Rules
-    # =========================================================================
-    
-    def _propagate_maxpool2d(
-        self,
-        layer: nn.MaxPool2d,
-        activation: torch.Tensor,
-        relevance: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Propagate relevance through MaxPool2d.
-        
-        Relevance is distributed to the max locations (winner-take-all).
-        Uses the full 4D activation shape as output_size for max_unpool2d
-        to ensure correct spatial reconstruction.
-        """
-        # Ensure activation is 4D (batch, channels, height, width)
-        if activation.dim() != 4:
-            raise ValueError(
-                f"MaxPool2d propagation requires 4D activation tensor, "
-                f"got {activation.dim()}D with shape {activation.shape}"
+            return EpsilonRule(epsilon=self.epsilon)
+        if rule == "gamma":
+            return GammaRule(gamma=self.gamma)
+        if rule == "z_plus":
+            return Alpha1_Beta0_Rule(set_bias_to_zero=True)
+        raise ValueError(f"Unsupported Captum LRP rule {rule!r}")
+
+    def _attach_captum_rules(self):
+        attached = []
+        for idx, name, layer in self._leaf_layers:
+            rule_object = None
+            if isinstance(layer, self._WEIGHTED):
+                rule_object = self._make_weighted_rule(self._get_rule_for_layer(idx))
+            elif isinstance(layer, self._NORMALIZATION + self._POOLING):
+                rule_object = EpsilonRule(epsilon=self.epsilon)
+            elif isinstance(layer, self._RESHAPE):
+                rule_object = _ReshapeRule()
+            elif isinstance(layer, self._POINTWISE_IDENTITY):
+                rule_object = IdentityRule()
+
+            if rule_object is not None:
+                layer.rule = rule_object
+                attached.append((idx, name, layer, rule_object))
+        return attached
+
+    @staticmethod
+    def _restore_training_flags(flags) -> None:
+        for module, training in flags.items():
+            module.training = training
+
+    def _captum_lrp(self, x, target_index, sign, records):
+        model = self._get_pytorch_model()
+        if self.rule == "z_plus" or (
+            self.rule == "composite"
+            and self._layer_rules
+            and "z_plus" in self._layer_rules.values()
+        ):
+            self._validate_z_plus_activations(records)
+
+        training_flags = {module: module.training for module in model.modules()}
+        state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+        old_rules = {
+            layer: (hasattr(layer, "rule"), getattr(layer, "rule", None))
+            for _, _, layer in self._leaf_layers
+        }
+        attached = []
+        try:
+            model.eval()
+            attached = self._attach_captum_rules()
+            x_for_lrp = x.detach().clone().requires_grad_(True)
+            # Captum discovers leaf layers by traversing children. A module
+            # that is itself a single Linear / Conv2d therefore needs a
+            # transparent Sequential container for its rule to be attached.
+            backend_model = model if type(model) is nn.Sequential else nn.Sequential(model)
+            attributions, _ = CaptumLRP(backend_model).attribute(
+                x_for_lrp,
+                target=target_index,
+                return_convergence_delta=True,
             )
-        
-        # Forward pass to get indices
-        _, indices = F.max_pool2d(
-            activation,
-            kernel_size=layer.kernel_size,
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            return_indices=True,
-            ceil_mode=layer.ceil_mode
-        )
-        
-        # Ensure relevance matches pooled output shape
-        if relevance.shape != indices.shape:
-            relevance = relevance.reshape(indices.shape)
-        
-        # Unpool: place relevance at max locations
-        # output_size must be the full 4D tensor shape (batch, channels, H, W)
-        unpooled = F.max_unpool2d(
-            relevance,
-            indices,
-            kernel_size=layer.kernel_size,
-            stride=layer.stride,
-            padding=layer.padding,
-            output_size=activation.shape  # Full 4D shape
-        )
-        
-        return unpooled
-    
-    def _propagate_avgpool2d(
-        self,
-        layer: Union[nn.AvgPool2d, nn.AdaptiveAvgPool2d],
-        activation: torch.Tensor,
-        relevance: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Propagate relevance through AvgPool2d.
-        
-        Relevance is distributed uniformly across pooling regions.
-        """
-        if isinstance(layer, nn.AdaptiveAvgPool2d):
-            # For adaptive pooling, upsample relevance to input size
-            return F.interpolate(
-                relevance,
-                size=activation.shape[2:],
-                mode='nearest'
+            attributions = attributions * sign
+
+            target_score = float(
+                self._normalise_output(model(x.detach()))[0, target_index].item() * sign
             )
-        else:
-            # For regular avg pooling, use nearest neighbor upsampling
-            # and scale by pool area
-            kernel_size = layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-            
-            upsampled = F.interpolate(
-                relevance,
-                size=activation.shape[2:],
-                mode='nearest'
+            layer_relevances: "OrderedDict[str, np.ndarray]" = OrderedDict()
+            layer_relevances["output"] = np.asarray([target_score], dtype=float)
+            for idx, name, _layer, rule_object in reversed(attached):
+                stored = rule_object.relevance_input.get(x.device)
+                if isinstance(stored, list):
+                    if len(stored) != 1:
+                        raise RuntimeError(
+                            f"Layer {idx} ({name}) has multiple relevance inputs; "
+                            "only single-input sequential layers are supported"
+                        )
+                    stored = stored[0]
+                if stored is not None:
+                    actual = stored.detach() * target_score
+                    layer_relevances[f"layer_{idx}_{name}_{type(_layer).__name__}"] = (
+                        actual.cpu().numpy().reshape(-1)
+                    )
+            layer_relevances["input"] = attributions.detach().cpu().numpy().reshape(-1)
+            return attributions.detach(), layer_relevances
+        finally:
+            model.load_state_dict(state, strict=True)
+            for layer, (had_rule, old_rule) in old_rules.items():
+                if had_rule:
+                    layer.rule = old_rule
+                elif hasattr(layer, "rule"):
+                    delattr(layer, "rule")
+                for temporary in ("activations",):
+                    if hasattr(layer, temporary):
+                        delattr(layer, temporary)
+            self._restore_training_flags(training_flags)
+
+    def _alpha_beta_linear(self, layer, activation, relevance):
+        if activation.ndim != 2 or relevance.ndim != 2:
+            raise ValueError("alpha_beta Linear propagation requires 2D activations")
+        weight_positive = layer.weight.clamp(min=0)
+        weight_negative = layer.weight.clamp(max=0)
+        activation_positive = activation.clamp(min=0)
+        activation_negative = activation.clamp(max=0)
+
+        denominator_positive = (
+            activation_positive @ weight_positive.T + activation_negative @ weight_negative.T
+        )
+        denominator_negative = (
+            activation_positive @ weight_negative.T + activation_negative @ weight_positive.T
+        )
+        stable_positive = denominator_positive + self.epsilon
+        stable_negative = denominator_negative - self.epsilon
+        if self.epsilon == 0:
+            stable_positive = torch.where(
+                denominator_positive == 0,
+                torch.ones_like(denominator_positive),
+                denominator_positive,
             )
-            
-            return upsampled
-    
-    # =========================================================================
-    # Main LRP Computation
-    # =========================================================================
-    
+            stable_negative = torch.where(
+                denominator_negative == 0,
+                -torch.ones_like(denominator_negative),
+                denominator_negative,
+            )
+
+        positive_scale = relevance / stable_positive
+        negative_scale = relevance / stable_negative
+        positive_contribution = activation_positive * (
+            positive_scale @ weight_positive
+        ) + activation_negative * (positive_scale @ weight_negative)
+        negative_contribution = activation_positive * (
+            negative_scale @ weight_negative
+        ) + activation_negative * (negative_scale @ weight_positive)
+        return self.alpha * positive_contribution - self.beta * negative_contribution
+
+    def _alpha_beta_lrp(self, x, target_index, sign, output, records):
+        self._validate_alpha_beta_architecture()
+        relevance = torch.zeros_like(output)
+        relevance[0, target_index] = output[0, target_index] * sign
+        target_score = float(relevance[0, target_index].item())
+        layer_relevances: "OrderedDict[str, np.ndarray]" = OrderedDict()
+        layer_relevances["output"] = np.asarray([target_score], dtype=float)
+
+        for idx, name, layer, activation in reversed(records):
+            if isinstance(layer, nn.Linear):
+                relevance = self._alpha_beta_linear(layer, activation, relevance)
+            elif isinstance(layer, self._RESHAPE):
+                relevance = relevance.reshape_as(activation)
+            # Pointwise activations and eval-mode dropout preserve relevance.
+            layer_relevances[f"layer_{idx}_{name}_{type(layer).__name__}"] = (
+                relevance.detach().cpu().numpy().reshape(-1)
+            )
+
+        layer_relevances["input"] = relevance.detach().cpu().numpy().reshape(-1)
+        return relevance.detach(), layer_relevances
+
+    def _compute(self, instance: np.ndarray, target_class: Optional[int]) -> Dict[str, Any]:
+        x = self._prepare_input_tensor(instance)
+        model = self._get_pytorch_model()
+        with _LRP_LOCK:
+            training_flags = {module: module.training for module in model.modules()}
+            try:
+                model.eval()
+                with torch.no_grad():
+                    output, records = self._forward_leafwise(x)
+                    output = self._normalise_output(output)
+                target_index, sign, label, score_space = self._resolve_target(output, target_class)
+
+                if self.rule == "alpha_beta":
+                    attributions, layer_relevances = self._alpha_beta_lrp(
+                        x, target_index, sign, output, records
+                    )
+                else:
+                    attributions, layer_relevances = self._captum_lrp(
+                        x, target_index, sign, records
+                    )
+            finally:
+                self._restore_training_flags(training_flags)
+
+        flat = attributions.cpu().numpy().reshape(-1)
+        if not np.isfinite(flat).all():
+            raise FloatingPointError(
+                "LRP produced non-finite relevance. Use epsilon > 0 or inspect "
+                "zero denominators in the selected rule."
+            )
+        target_score = float(output[0, target_index].item() * sign)
+        attribution_sum = float(flat.sum())
+        signed_delta = target_score - attribution_sum
+        semantic_target_index = target_index
+        if self.model.task == "classification" and output.shape[1] == 1:
+            semantic_target_index = 1 if sign > 0 else 0
+        return {
+            "attributions": flat,
+            "layer_relevances": layer_relevances,
+            "target_index": semantic_target_index,
+            "backend_target_index": target_index,
+            "label": label,
+            "score_space": score_space,
+            "target_score": target_score,
+            "attribution_sum": attribution_sum,
+            "signed_delta": signed_delta,
+        }
+
     def _compute_lrp(
         self,
         instance: np.ndarray,
         target_class: Optional[int] = None,
-        return_layer_relevances: bool = False
-    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, np.ndarray]]]:
-        """
-        Compute LRP attributions for a single instance.
-        
-        Args:
-            instance: Input instance (1D or multi-dimensional array)
-            target_class: Target class for relevance initialization
-            return_layer_relevances: If True, also return relevances at each layer
-        
-        Returns:
-            If return_layer_relevances is False:
-                Array of attribution scores for input features
-            If return_layer_relevances is True:
-                Tuple of (input_attributions, layer_relevances_dict)
-        """
-        model = self._get_pytorch_model()
-        model.eval()
-        
-        # Prepare input with correct shape for model type (CNN vs MLP)
-        x = self._prepare_input_tensor(instance)
-        x.requires_grad_(False)
-        
-        # =====================================================================
-        # Forward pass: collect activations at each layer
-        # =====================================================================
-        activations = OrderedDict()
-        activations["input"] = x.clone()
-        
-        layer_list = []  # List of (idx, name, layer, input_activation)
-        
-        current = x
-        
-        # Handle Sequential models
-        if isinstance(model, nn.Sequential):
-            for idx, (name, layer) in enumerate(model.named_children()):
-                layer_list.append((idx, name, layer, current.clone()))
-                current = layer(current)
-                activations[f"layer_{idx}_{name}"] = current.clone()
-        else:
-            # For non-Sequential models, use hooks
-            hooks = []
-            layer_data = OrderedDict()
-            
-            def make_hook(name):
-                def hook(module, input, output):
-                    inp = input[0] if isinstance(input, tuple) else input
-                    layer_data[name] = {
-                        "input": inp.clone().detach(),
-                        "output": output.clone().detach() if isinstance(output, torch.Tensor) else output
-                    }
-                return hook
-            
-            # Register hooks on relevant layers
-            idx = 0
-            for name, module in model.named_modules():
-                if isinstance(module, (*WEIGHTED_LAYERS, *NORMALIZATION_LAYERS, *ACTIVATION_LAYERS, *POOLING_LAYERS)):
-                    hooks.append(module.register_forward_hook(make_hook(f"{idx}_{name}")))
-                    idx += 1
-            
-            # Forward pass
-            current = model(x)
-            
-            # Remove hooks
-            for h in hooks:
-                h.remove()
-            
-            # Build layer list from collected data
-            for name, data in layer_data.items():
-                idx_str, layer_name = name.split("_", 1)
-                # Get the actual module
-                module = dict(model.named_modules()).get(layer_name)
-                if module is not None:
-                    layer_list.append((int(idx_str), layer_name, module, data["input"]))
-        
-        output = current
-        
-        # =====================================================================
-        # Initialize relevance at output layer
-        # =====================================================================
-        if target_class is not None:
-            relevance = torch.zeros_like(output)
-            relevance[0, target_class] = output[0, target_class]
-        else:
-            relevance = output.clone()
-        
-        # =====================================================================
-        # Backward pass: propagate relevance through layers
-        # =====================================================================
-        layer_relevances = OrderedDict()
-        layer_relevances["output"] = relevance.detach().cpu().numpy().flatten()
-        
-        # Reverse through layers
-        for idx, name, layer, activation in reversed(layer_list):
-            rule = self._get_rule_for_layer(idx, type(layer).__name__)
-            
-            # Propagate based on layer type
-            if isinstance(layer, nn.Linear):
-                # Flatten activation if needed
-                if activation.dim() > 2:
-                    activation = activation.flatten(1)
-                if relevance.dim() > 2:
-                    relevance = relevance.flatten(1)
-                relevance = self._propagate_linear(layer, activation, relevance, rule)
-            
-            elif isinstance(layer, nn.Conv2d):
-                relevance = self._propagate_conv2d(layer, activation, relevance, rule)
-            
-            elif isinstance(layer, NORMALIZATION_LAYERS):
-                relevance = self._propagate_batchnorm(layer, activation, relevance)
-            
-            elif isinstance(layer, ACTIVATION_LAYERS):
-                relevance = self._propagate_activation(layer, activation, relevance)
-            
-            elif isinstance(layer, nn.MaxPool2d):
-                relevance = self._propagate_maxpool2d(layer, activation, relevance)
-            
-            elif isinstance(layer, (nn.AvgPool2d, nn.AdaptiveAvgPool2d)):
-                relevance = self._propagate_avgpool2d(layer, activation, relevance)
-            
-            elif isinstance(layer, nn.Flatten):
-                # Reshape relevance back to pre-flatten shape
-                if activation.dim() > 2:
-                    relevance = relevance.reshape(activation.shape)
-            
-            elif isinstance(layer, nn.Unflatten):
-                # Unflatten in forward expands dimensions: (batch, features) -> (batch, *dims)
-                # In backward, reshape relevance to match the flattened input activation
-                relevance = relevance.view(activation.shape)
-            
-            elif isinstance(layer, PASSTHROUGH_LAYERS):
-                # Dropout and other passthrough layers
-                pass
-            
-            layer_relevances[f"layer_{idx}_{name}"] = relevance.detach().cpu().numpy().flatten()
-        
-        # Final relevance is the input attribution
-        input_relevance = relevance.detach().cpu().numpy().flatten()
-        layer_relevances["input"] = input_relevance
-        
+        return_layer_relevances: bool = False,
+    ):
+        result = self._compute(instance, target_class)
         if return_layer_relevances:
-            return input_relevance, layer_relevances
-        return input_relevance
-    
+            return result["attributions"], result["layer_relevances"]
+        return result["attributions"]
+
+    def _bias_treatment(self) -> str:
+        if self.rule == "epsilon":
+            return "included_in_denominators_not_redistributed"
+        if self.rule == "gamma":
+            return "retained_in_transformed_denominators_not_separately_redistributed"
+        if self.rule == "z_plus":
+            return (
+                "weighted_layer_biases_excluded_from_local_denominators; "
+                "original_output_relevance_is_propagated"
+            )
+        if self.rule == "alpha_beta":
+            return (
+                "excluded_from_local_denominators; " "output_relevance_including_bias_is_propagated"
+            )
+        return "per_layer_rule"
+
+    def _effective_layer_rules(self) -> Dict[int, str]:
+        assignments: Dict[int, str] = {}
+        for index, _name, layer in self._leaf_layers:
+            if isinstance(layer, self._WEIGHTED):
+                assignments[index] = self._get_rule_for_layer(index)
+            elif isinstance(layer, self._NORMALIZATION + self._POOLING):
+                assignments[index] = "epsilon"
+            elif isinstance(layer, self._RESHAPE):
+                assignments[index] = "relevance_preserving_reshape"
+            else:
+                assignments[index] = "relevance_passthrough"
+        return assignments
+
+    def _effective_layer_parameters(self) -> Dict[int, Dict[str, Any]]:
+        parameters: Dict[int, Dict[str, Any]] = {}
+        for index, rule in self._effective_layer_rules().items():
+            values: Dict[str, Any] = {"rule": rule}
+            if rule == "epsilon":
+                values["epsilon"] = self.epsilon
+            elif rule == "gamma":
+                values.update(
+                    gamma=self.gamma,
+                    stability_factor=float(GammaRule.STABILITY_FACTOR),
+                )
+            elif rule == "z_plus":
+                values.update(
+                    stability_factor=float(Alpha1_Beta0_Rule.STABILITY_FACTOR),
+                    weighted_bias_set_to_zero=True,
+                )
+            elif rule == "alpha_beta":
+                values.update(alpha=self.alpha, beta=self.beta, epsilon=self.epsilon)
+            parameters[index] = values
+        return parameters
+
     def explain(
         self,
         instance: np.ndarray,
         target_class: Optional[int] = None,
-        return_convergence_delta: bool = False
+        return_convergence_delta: bool = False,
     ) -> Explanation:
-        """
-        Generate LRP explanation for an instance.
-        
-        Args:
-            instance: Numpy array of input features (1D for tabular, 
-                     or multi-dimensional for images).
-            target_class: For classification, which class to explain.
-                         If None, uses the predicted class.
-            return_convergence_delta: If True, include the convergence delta
-                (difference between sum of attributions and target output).
-                Should be close to 0 for correct LRP (conservation property).
-        
-        Returns:
-            Explanation object with feature attributions.
-        
-        Example:
-            >>> explanation = explainer.explain(instance)
-            >>> print(explanation.explanation_data["feature_attributions"])
-        """
-        instance = np.array(instance).astype(np.float32)
-        original_shape = instance.shape
-        instance_flat = instance.flatten()
-        
-        # Determine target class if not specified
-        if target_class is None and self.class_names:
-            # Get prediction using properly shaped input
-            model = self._get_pytorch_model()
-            model.eval()
-            with torch.no_grad():
-                x = self._prepare_input_tensor(instance)
-                output = model(x)
-                target_class = int(torch.argmax(output, dim=1).item())
-        
-        # Compute LRP attributions
-        attributions_raw = self._compute_lrp(instance, target_class)
-        
-        # Build attributions dict
-        if len(self.feature_names) == len(attributions_raw):
-            attributions = {
-                fname: float(attributions_raw[i])
-                for i, fname in enumerate(self.feature_names)
-            }
-        else:
-            # For images or mismatched feature names, use indices
-            attributions = {
-                f"feature_{i}": float(attributions_raw[i])
-                for i in range(len(attributions_raw))
-            }
-        
-        # Determine class name
-        if self.class_names and target_class is not None:
-            label_name = self.class_names[target_class]
-        else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
-        
-        explanation_data = {
+        original = np.asarray(instance)
+        result = self._compute(original, target_class)
+        raw = result["attributions"]
+        attributions = {name: float(raw[index]) for index, name in enumerate(self.feature_names)}
+        data = {
             "feature_attributions": attributions,
-            "attributions_raw": [float(x) for x in attributions_raw],
+            "attributions_raw": [float(value) for value in raw],
             "rule": self.rule,
-            "epsilon": self.epsilon if self.rule in ["epsilon", "composite"] else None,
-            "gamma": self.gamma if self.rule == "gamma" else None,
+            "backend": ("native_alpha_beta" if self.rule == "alpha_beta" else "captum.attr.LRP"),
+            "score_space": result["score_space"],
+            "target_class_index": int(result["target_index"]),
+            "backend_target_index": int(result["backend_target_index"]),
+            "target_output": result["target_score"],
+            "attribution_sum": result["attribution_sum"],
+            "signed_convergence_delta": result["signed_delta"],
+            "convergence_delta": abs(result["signed_delta"]),
+            "bias_treatment": self._bias_treatment(),
+            "effective_layer_rules": self._effective_layer_rules(),
+            "effective_layer_parameters": self._effective_layer_parameters(),
+            "epsilon": self.epsilon,
+            "gamma": self.gamma if self.rule in {"gamma", "composite"} else None,
             "alpha": self.alpha if self.rule == "alpha_beta" else None,
             "beta": self.beta if self.rule == "alpha_beta" else None,
-            "input_shape": list(original_shape)
+            "input_shape": list(original.shape),
+            "supported_graph": "single_input_nn.Sequential_chain_or_supported_leaf",
         }
-        
-        # Compute convergence delta (conservation check)
-        if return_convergence_delta:
-            model = self._get_pytorch_model()
-            model.eval()
-            
-            with torch.no_grad():
-                # Use the helper method to get properly shaped input
-                x = self._prepare_input_tensor(instance)
-                output = model(x)
-                
-                if target_class is not None:
-                    target_output = output[0, target_class].item()
-                else:
-                    target_output = output.sum().item()
-            
-            attribution_sum = sum(attributions.values())
-            convergence_delta = abs(target_output - attribution_sum)
-            
-            explanation_data["target_output"] = float(target_output)
-            explanation_data["attribution_sum"] = float(attribution_sum)
-            explanation_data["convergence_delta"] = float(convergence_delta)
-        
+        if self.rule == "composite":
+            data["layer_rules"] = dict(self._layer_rules or {})
+        if not return_convergence_delta:
+            # The score and residual remain present because they define the LRP
+            # contract; the flag is retained for API compatibility.
+            data["convergence_delta_requested"] = False
+
         return Explanation(
             explainer_name="LRP",
-            target_class=label_name,
-            explanation_data=explanation_data,
-            feature_names=self.feature_names
+            target_class=result["label"],
+            explanation_data=data,
+            feature_names=self.feature_names,
         )
-    
-    def explain_batch(
-        self,
-        X: np.ndarray,
-        target_class: Optional[int] = None
-    ) -> List[Explanation]:
-        """
-        Generate explanations for multiple instances.
-        
-        Args:
-            X: Array of instances. For tabular: (n_samples, n_features).
-               For images: (n_samples, channels, height, width) or similar.
-            target_class: Target class for all instances. If None,
-                         uses predicted class for each instance.
-        
-        Returns:
-            List of Explanation objects.
-        """
-        X = np.array(X)
-        
-        # Handle single instance
-        if X.ndim == 1:
-            X = X.reshape(1, -1)
-        
-        # For multi-dimensional data (images), first dim is batch
-        n_samples = X.shape[0]
-        
+
+    def explain_batch(self, X: np.ndarray, target_class: Optional[int] = None) -> List[Explanation]:
+        array = np.asarray(X)
+        if array.ndim == 1:
+            return [self.explain(array, target_class=target_class)]
+        if array.ndim < 2:
+            raise ValueError("X must contain one or more instances")
         return [
-            self.explain(X[i], target_class=target_class)
-            for i in range(n_samples)
+            self.explain(array[index], target_class=target_class) for index in range(array.shape[0])
         ]
-    
+
     def explain_with_layer_relevances(
-        self,
-        instance: np.ndarray,
-        target_class: Optional[int] = None
+        self, instance: np.ndarray, target_class: Optional[int] = None
     ) -> Dict[str, Any]:
-        """
-        Compute LRP with layer-wise relevance scores for detailed analysis.
-        
-        This method returns relevance scores at each layer, which is useful
-        for understanding how relevance flows through the network and
-        verifying the conservation property.
-        
-        Args:
-            instance: Input instance.
-            target_class: Target class for relevance computation.
-        
-        Returns:
-            Dictionary containing:
-                - input_relevances: Final attribution scores for input features
-                - layer_relevances: Dict mapping layer names to relevance arrays
-                - target_class: The target class used
-                - rule: The rule used for computation
-        """
-        instance = np.array(instance).astype(np.float32)
-        
-        # Determine target class if not specified
-        if target_class is None and self.class_names:
-            # Get prediction using properly shaped input
-            model = self._get_pytorch_model()
-            model.eval()
-            with torch.no_grad():
-                x = self._prepare_input_tensor(instance)
-                output = model(x)
-                target_class = int(torch.argmax(output, dim=1).item())
-        
-        # Compute LRP with layer relevances
-        input_relevances, layer_relevances = self._compute_lrp(
-            instance, target_class, return_layer_relevances=True
-        )
-        
+        result = self._compute(instance, target_class)
         return {
-            "input_relevances": [float(x) for x in input_relevances],
+            "input_relevances": [float(value) for value in result["attributions"]],
             "layer_relevances": {
-                name: [float(x) for x in rel] if isinstance(rel, np.ndarray) else float(rel)
-                for name, rel in layer_relevances.items()
+                name: [float(value) for value in np.asarray(relevance).reshape(-1)]
+                for name, relevance in result["layer_relevances"].items()
             },
-            "target_class": target_class,
+            "target_class": int(result["target_index"]),
+            "target_output": result["target_score"],
+            "score_space": result["score_space"],
             "rule": self.rule,
-            "feature_names": self.feature_names
+            "feature_names": self.feature_names,
+            "layer_relevance_scope": (
+                "all_sequential_layer_inputs_plus_input_output"
+                if self.rule == "alpha_beta"
+                else "captum_rule_inputs_plus_input_output"
+            ),
         }
-    
+
     def compare_rules(
         self,
         instance: np.ndarray,
         target_class: Optional[int] = None,
-        rules: Optional[List[str]] = None
+        rules: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        """
-        Compare different LRP rules on the same instance.
-        
-        Useful for understanding how different rules affect attributions
-        and for selecting the most appropriate rule for your use case.
-        
-        Args:
-            instance: Input instance.
-            target_class: Target class for comparison.
-            rules: List of rules to compare. If None, compares all rules.
-        
-        Returns:
-            Dictionary mapping rule names to their attribution results.
-        """
-        instance = np.array(instance).astype(np.float32)
-        
-        # Determine target class
-        if target_class is None and self.class_names:
-            # Get prediction using properly shaped input
-            model = self._get_pytorch_model()
-            model.eval()
-            with torch.no_grad():
-                x = self._prepare_input_tensor(instance)
-                output = model(x)
-                target_class = int(torch.argmax(output, dim=1).item())
-        
-        if rules is None:
-            rules = ["epsilon", "gamma", "alpha_beta", "z_plus"]
-        
-        results = {}
-        
-        # Save original settings
+        requested = ["epsilon", "gamma", "alpha_beta", "z_plus"] if rules is None else list(rules)
+        invalid = [rule for rule in requested if rule not in VALID_RULES or rule == "composite"]
+        if invalid:
+            raise ValueError(f"Invalid standalone comparison rules: {invalid}")
+
         original_rule = self.rule
-        
-        for rule in rules:
-            self.rule = rule
-            
-            try:
-                attributions = self._compute_lrp(instance, target_class)
-                
-                # Find top feature
-                top_idx = int(np.argmax(np.abs(attributions)))
-                if top_idx < len(self.feature_names):
-                    top_feature = self.feature_names[top_idx]
-                else:
-                    top_feature = f"feature_{top_idx}"
-                
-                results[rule] = {
-                    "attributions": [float(x) for x in attributions],
-                    "top_feature": top_feature,
-                    "top_attribution": float(attributions[top_idx]),
-                    "attribution_sum": float(np.sum(attributions)),
-                    "attribution_range": (float(np.min(attributions)), float(np.max(attributions)))
-                }
-            except Exception as e:
-                results[rule] = {"error": str(e)}
-        
-        # Restore original rule
-        self.rule = original_rule
-        
+        results: Dict[str, Dict[str, Any]] = {}
+        try:
+            for rule in requested:
+                self.rule = rule
+                try:
+                    computation = self._compute(instance, target_class)
+                    values = computation["attributions"]
+                    top_index = int(np.argmax(np.abs(values)))
+                    results[rule] = {
+                        "attributions": [float(value) for value in values],
+                        "top_feature": self.feature_names[top_index],
+                        "top_attribution": float(values[top_index]),
+                        "attribution_sum": float(values.sum()),
+                        "attribution_range": (
+                            float(values.min()),
+                            float(values.max()),
+                        ),
+                        "target_output": computation["target_score"],
+                        "convergence_delta": abs(computation["signed_delta"]),
+                    }
+                except (ValueError, NotImplementedError, FloatingPointError) as error:
+                    results[rule] = {"error": str(error)}
+        finally:
+            self.rule = original_rule
         return results

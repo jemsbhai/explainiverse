@@ -1,55 +1,20 @@
 ﻿# tests/test_fairness.py
-"""
-Tests for Phase 7 fairness evaluation metrics.
+"""Compatibility and integration tests for fairness-related diagnostics.
 
-Metrics:
-1. Group Fairness (Dai et al., 2022) — composable disparity across demographic groups
-2. Individual Fairness (Dwork et al., 2012; adapted for XAI) — similar individuals get
-   similar explanations regardless of protected attribute
-3. Counterfactual Explanation Fairness (Kusner et al., 2017; adapted) — explanations
-   should not change when only the protected attribute is flipped
-4. Fidelity Disparity (Balagopalan et al., 2022) — max/mean explanation quality gaps
-   across subgroup pairs
-5. Attribution Parity (novel synthesis from Dai et al. + Aïvodji et al., 2019) —
-   whether the protected feature itself receives disproportionate attribution
-6. Conditional Fairness (Hardt et al., 2016; adapted) — explanation quality equality
-   conditioned on model prediction
-
-Also tests the FairnessMetricRegistry for extensibility.
-
-References:
-    Dai, J., Upadhyay, S., Aïvodji, U., Bach, S. H., & Lakkaraju, H. (2022).
-    Fairness via Explanation Quality: Evaluating Disparities in the Quality
-    of Post hoc Explanations. AIES. https://doi.org/10.1145/3514094.3534159
-
-    Balagopalan, A., Zhang, H., Hamidieh, K., Hartvigsen, T., Rudzicz, F., &
-    Ghassemi, M. (2022). The Road to Explainability is Paved with Bias:
-    Measuring the Fairness of Explanations. FAccT.
-    https://doi.org/10.1145/3531146.3533179
-
-    Dwork, C., Hardt, M., Pitassi, T., Reingold, O., & Zemel, R. (2012).
-    Fairness Through Awareness. ITCS.
-
-    Kusner, M. J., Loftus, J., Russell, C., & Silva, R. (2017).
-    Counterfactual Fairness. NeurIPS.
-
-    Hardt, M., Price, E., & Srebro, N. (2016). Equality of Opportunity in
-    Supervised Learning. NeurIPS.
-
-    Aïvodji, U., Arai, H., Fortineau, O., Gambs, S., Hara, S., & Tapp, A.
-    (2019). Fairwashing: the risk of rationalization. ICML.
+Accuracy/claim-scope counterexamples live in ``test_fairness_accuracy.py``.
+Historical fairness-named entry points are retained, but most report audit
+diagnostics rather than canonical fairness criteria.
 """
 
-import pytest
 import numpy as np
-from unittest.mock import MagicMock
+import pytest
 
 from explainiverse.core.explanation import Explanation
-
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def feature_names():
@@ -82,8 +47,7 @@ def sensitive_features_binary(sample_data):
 def sensitive_features_multigroup():
     """Multi-valued sensitive feature (3 groups)."""
     np.random.seed(42)
-    return np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2,
-                     0, 1, 2, 0, 1])
+    return np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 0, 1, 2, 0, 1])
 
 
 @pytest.fixture
@@ -101,17 +65,19 @@ def fair_attributions(sample_data):
 def unfair_attributions(sample_data, sensitive_features_binary):
     """
     Attributions with intentional disparity across groups.
-    Group 0 gets high-quality (sparse, focused) attributions.
-    Group 1 gets low-quality (spread, noisy) attributions.
+    The groups receive vectors with different L1 magnitudes and shapes.
+
+    These fixtures exercise disparity calculations only; they do not label
+    either vector as a higher-quality explanation.
     """
     n = sample_data.shape[0]
     attrs = np.zeros((n, 5))
     for i in range(n):
         if sensitive_features_binary[i] == 0:
-            # Group 0: sparse, focused attribution
+            # Group 0 fixture
             attrs[i] = [0.7, 0.2, 0.0, 0.1, 0.0]
         else:
-            # Group 1: spread, noisy attribution
+            # Group 1 fixture
             attrs[i] = [0.2, 0.2, 0.1, 0.25, 0.25]
     return attrs
 
@@ -121,14 +87,19 @@ def trained_model_and_explainer(feature_names):
     """
     Train a real sklearn model and create a LIME explainer.
     """
-    from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.datasets import make_classification
+    from sklearn.ensemble import GradientBoostingClassifier
+
     from explainiverse.adapters import SklearnAdapter
     from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 
     X, y = make_classification(
-        n_samples=100, n_features=5, n_informative=3,
-        n_redundant=0, n_classes=2, random_state=42,
+        n_samples=100,
+        n_features=5,
+        n_informative=3,
+        n_redundant=0,
+        n_classes=2,
+        random_state=42,
     )
     X = X.astype(np.float32)
     # Make feature index 2 binary (sensitive attribute)
@@ -137,9 +108,7 @@ def trained_model_and_explainer(feature_names):
     clf = GradientBoostingClassifier(n_estimators=20, random_state=42)
     clf.fit(X, y)
 
-    adapter = SklearnAdapter(
-        clf, feature_names=feature_names, class_names=["denied", "approved"]
-    )
+    adapter = SklearnAdapter(clf, feature_names=feature_names, class_names=["denied", "approved"])
     explainer = LimeExplainer(
         model=adapter,
         training_data=X,
@@ -153,14 +122,13 @@ def trained_model_and_explainer(feature_names):
 # Helper: Build attribution arrays from Explanation objects
 # =============================================================================
 
+
 def _make_explanation(feature_names, attribution_values):
     """Create an Explanation with given attribution values."""
     return Explanation(
         explainer_name="test",
         target_class="class_0",
-        explanation_data={
-            "feature_attributions": dict(zip(feature_names, attribution_values))
-        },
+        explanation_data={"feature_attributions": dict(zip(feature_names, attribution_values))},
         feature_names=feature_names,
     )
 
@@ -169,30 +137,28 @@ def _make_explanation(feature_names, attribution_values):
 # 1. FairnessMetricRegistry Tests
 # =============================================================================
 
+
 class TestFairnessMetricRegistry:
     """Tests for the extensible fairness metric registry."""
 
     def test_import_registry(self):
         """FairnessMetricRegistry can be imported."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         assert FairnessMetricRegistry is not None
         assert FairnessMetricMeta is not None
 
     def test_create_empty_registry(self):
         """Empty registry can be created."""
         from explainiverse.evaluation.fairness import FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
         assert registry.list_metrics() == []
 
     def test_register_metric(self):
         """A fairness metric can be registered."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         def dummy_metric(attributions, sensitive_features, **kwargs):
@@ -210,10 +176,8 @@ class TestFairnessMetricRegistry:
 
     def test_register_duplicate_raises(self):
         """Registering the same name twice raises ValueError."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         def dummy(a, s, **kw):
@@ -225,10 +189,8 @@ class TestFairnessMetricRegistry:
 
     def test_register_override(self):
         """Override flag allows re-registration."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         def v1(a, s, **kw):
@@ -238,18 +200,14 @@ class TestFairnessMetricRegistry:
             return {"score": 2.0}
 
         registry.register("dummy", v1, FairnessMetricMeta(level="group"))
-        registry.register(
-            "dummy", v2, FairnessMetricMeta(level="group"), override=True
-        )
+        registry.register("dummy", v2, FairnessMetricMeta(level="group"), override=True)
         result = registry.get("dummy")
         assert result["fn"] is v2
 
     def test_unregister_metric(self):
         """Metric can be unregistered."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         def dummy(a, s, **kw):
@@ -262,6 +220,7 @@ class TestFairnessMetricRegistry:
     def test_unregister_unknown_raises(self):
         """Unregistering unknown metric raises KeyError."""
         from explainiverse.evaluation.fairness import FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
         with pytest.raises(KeyError, match="not registered"):
             registry.unregister("nonexistent")
@@ -269,16 +228,15 @@ class TestFairnessMetricRegistry:
     def test_get_unknown_raises(self):
         """Getting unknown metric raises KeyError."""
         from explainiverse.evaluation.fairness import FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
         with pytest.raises(KeyError, match="not registered"):
             registry.get("nonexistent")
 
     def test_decorator_registration(self):
         """Decorator-based registration works."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         @registry.register_decorator(
@@ -294,10 +252,8 @@ class TestFairnessMetricRegistry:
 
     def test_evaluate_calls_registered_function(self):
         """registry.evaluate() calls the registered function with correct args."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
         call_log = []
 
@@ -315,17 +271,16 @@ class TestFairnessMetricRegistry:
 
     def test_list_metrics_with_meta(self):
         """list_metrics(with_meta=True) returns metadata."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         def d(a, s, **kw):
             return {"score": 0.0}
 
         registry.register(
-            "test_metric", d,
+            "test_metric",
+            d,
             FairnessMetricMeta(level="group", composable=True, description="Test"),
         )
         result = registry.list_metrics(with_meta=True)
@@ -334,12 +289,41 @@ class TestFairnessMetricRegistry:
         assert result["test_metric"]["meta"].level == "group"
         assert result["test_metric"]["meta"].composable is True
 
+    def test_registry_entries_are_detached_and_metadata_is_immutable(self):
+        from dataclasses import FrozenInstanceError
+
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
+        registry = FairnessMetricRegistry()
+
+        def metric(a, s, **kw):
+            return {"score": 0.0}
+
+        registry.register("metric", metric, FairnessMetricMeta(level="group"))
+        detached = registry.get("metric")
+        detached["fn"] = None
+        assert registry.get("metric")["fn"] is metric
+        with pytest.raises(FrozenInstanceError):
+            detached["meta"].level = "individual"
+
+    @pytest.mark.parametrize(
+        "kwargs, error",
+        [
+            ({"level": "unknown"}, ValueError),
+            ({"level": "group", "composable": 1}, TypeError),
+            ({"level": "group", "claim_scope": ""}, ValueError),
+        ],
+    )
+    def test_metadata_contract_is_validated(self, kwargs, error):
+        from explainiverse.evaluation.fairness import FairnessMetricMeta
+
+        with pytest.raises(error):
+            FairnessMetricMeta(**kwargs)
+
     def test_filter_by_level(self):
         """Metrics can be filtered by level (group, individual, conditional)."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         def d(a, s, **kw):
@@ -357,6 +341,7 @@ class TestFairnessMetricRegistry:
     def test_default_registry_has_builtin_metrics(self):
         """The default fairness registry includes all 6 built-in metrics."""
         from explainiverse.evaluation.fairness import get_default_fairness_registry
+
         registry = get_default_fairness_registry()
         metrics = registry.list_metrics()
         expected = [
@@ -372,10 +357,8 @@ class TestFairnessMetricRegistry:
 
     def test_summary_output(self):
         """summary() returns a human-readable string."""
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry,
-            FairnessMetricMeta,
-        )
+        from explainiverse.evaluation.fairness import FairnessMetricMeta, FairnessMetricRegistry
+
         registry = FairnessMetricRegistry()
 
         def d(a, s, **kw):
@@ -388,22 +371,22 @@ class TestFairnessMetricRegistry:
 
 
 # =============================================================================
-# 2. Group Fairness Tests — compute_group_fairness()
+# 2. Group disparity compatibility API — compute_group_fairness()
 # =============================================================================
 
+
 class TestGroupFairness:
-    """Tests for the Group Fairness metric (Dai et al., 2022)."""
+    """Tests for the historical group-disparity compatibility API."""
 
     def test_import(self):
         """compute_group_fairness can be imported."""
         from explainiverse.evaluation.fairness import compute_group_fairness
+
         assert callable(compute_group_fairness)
 
-    def test_basic_fair_attributions(
-        self, fair_attributions, sensitive_features_binary
-    ):
+    def test_basic_fair_attributions(self, fair_attributions, sensitive_features_binary):
         """
-        Identical attributions across groups should produce zero disparity.
+        Identical attribution L1 magnitudes across groups produce zero disparity.
         """
         from explainiverse.evaluation.fairness import compute_group_fairness
 
@@ -415,11 +398,9 @@ class TestGroupFairness:
         assert "disparity" in result
         assert result["disparity"] == pytest.approx(0.0, abs=1e-10)
 
-    def test_basic_unfair_attributions(
-        self, unfair_attributions, sensitive_features_binary
-    ):
+    def test_basic_unfair_attributions(self, unfair_attributions, sensitive_features_binary):
         """
-        Intentionally disparate attributions should produce non-zero disparity.
+        Different attribution L1 magnitudes produce non-zero disparity.
         """
         from explainiverse.evaluation.fairness import compute_group_fairness
 
@@ -429,9 +410,7 @@ class TestGroupFairness:
         )
         assert result["disparity"] > 0.0
 
-    def test_returns_statistical_test(
-        self, unfair_attributions, sensitive_features_binary
-    ):
+    def test_returns_statistical_test(self, unfair_attributions, sensitive_features_binary):
         """
         Result must contain Mann-Whitney U p-value and Cohen's d effect size.
         """
@@ -446,9 +425,7 @@ class TestGroupFairness:
         assert 0.0 <= result["p_value"] <= 1.0
         assert isinstance(result["effect_size"], float)
 
-    def test_returns_per_group_means(
-        self, unfair_attributions, sensitive_features_binary
-    ):
+    def test_returns_per_group_means(self, unfair_attributions, sensitive_features_binary):
         """
         Result must contain per-group metric means.
         """
@@ -465,8 +442,7 @@ class TestGroupFairness:
 
     def test_default_inner_metric(self, sample_data, sensitive_features_binary):
         """
-        Default inner metric (L1 norm / sparseness) should work without
-        user specifying one.
+        The default attribution-L1-magnitude metric works without an override.
         """
         from explainiverse.evaluation.fairness import compute_group_fairness
 
@@ -479,9 +455,7 @@ class TestGroupFairness:
         assert "disparity" in result
         assert isinstance(result["disparity"], float)
 
-    def test_custom_inner_metric(
-        self, unfair_attributions, sensitive_features_binary
-    ):
+    def test_custom_inner_metric(self, unfair_attributions, sensitive_features_binary):
         """
         User-supplied inner metric function should be called correctly.
         """
@@ -497,12 +471,10 @@ class TestGroupFairness:
             inner_metric=custom_sparsity,
         )
         assert "disparity" in result
-        # Group 1 has more non-zero entries, so there should be a gap
+        # The explicit count metric differs between the two fixture groups.
         assert result["disparity"] > 0.0
 
-    def test_multigroup_sensitive_features(
-        self, fair_attributions, sensitive_features_multigroup
-    ):
+    def test_multigroup_sensitive_features(self, fair_attributions, sensitive_features_multigroup):
         """
         Should work with 3+ groups, not just binary.
         """
@@ -513,7 +485,7 @@ class TestGroupFairness:
             sensitive_features=sensitive_features_multigroup,
         )
         assert "disparity" in result
-        # Fair attributions: disparity should be ~0
+        # Identical row vectors have identical L1 magnitude in every group.
         assert result["disparity"] == pytest.approx(0.0, abs=1e-10)
         assert len(result["group_means"]) == 3
 
@@ -539,16 +511,14 @@ class TestGroupFairness:
         )
         assert result["disparity"] > 0.0
 
-    def test_single_group_returns_zero_disparity(self):
-        """
-        If all instances belong to the same group, disparity is 0.
-        """
+    def test_single_group_is_not_evaluable(self):
+        """A one-group sample cannot identify a between-group disparity."""
         from explainiverse.evaluation.fairness import compute_group_fairness
 
         attrs = np.random.randn(10, 4)
         sf = np.zeros(10, dtype=int)
-        result = compute_group_fairness(attributions=attrs, sensitive_features=sf)
-        assert result["disparity"] == pytest.approx(0.0, abs=1e-10)
+        with pytest.raises(ValueError, match="at least two observed groups"):
+            compute_group_fairness(attributions=attrs, sensitive_features=sf)
 
     def test_invalid_attributions_type_raises(self):
         """Non-array attributions should raise TypeError."""
@@ -590,32 +560,29 @@ class TestGroupFairness:
                 sensitive_features=np.array([]),
             )
 
-    def test_semantic_validation_unfair_detected(self):
+    def test_default_l1_magnitude_disparity_has_exact_ordering(self):
         """
-        Semantic validation: deliberately biased attributions should have
-        higher disparity than fair ones.
+        An explicit L1-magnitude gap exceeds the zero-gap fixture.
         """
         from explainiverse.evaluation.fairness import compute_group_fairness
 
-        np.random.seed(42)
-        n = 50
-        sf = np.array([0] * 25 + [1] * 25)
+        sf = np.array([0] * 4 + [1] * 4)
+        equal_attrs = np.tile([1.0, 0.0], (8, 1))
+        disparate_attrs = equal_attrs.copy()
+        disparate_attrs[4:] = 0.0
 
-        # Fair: identical distributions
-        fair_attrs = np.random.randn(n, 4)
-        # Unfair: group 1 gets all-zero attributions
-        unfair_attrs = fair_attrs.copy()
-        unfair_attrs[25:] = 0.0
+        equal_result = compute_group_fairness(equal_attrs, sf)
+        disparate_result = compute_group_fairness(disparate_attrs, sf)
 
-        fair_result = compute_group_fairness(fair_attrs, sf)
-        unfair_result = compute_group_fairness(unfair_attrs, sf)
-
-        assert unfair_result["disparity"] > fair_result["disparity"]
+        assert equal_result["disparity"] == pytest.approx(0.0)
+        assert disparate_result["group_means"] == {0: 1.0, 1: 0.0}
+        assert disparate_result["disparity"] == pytest.approx(1.0)
 
 
 # =============================================================================
-# 3. Group Fairness — Score-based API (with explainer)
+# 3. Group disparity — Score-based API (with explainer)
 # =============================================================================
+
 
 class TestGroupFairnessScore:
     """Tests for compute_group_fairness_score() — explainer-based API."""
@@ -623,6 +590,7 @@ class TestGroupFairnessScore:
     def test_import(self):
         """compute_group_fairness_score can be imported."""
         from explainiverse.evaluation.fairness import compute_group_fairness_score
+
         assert callable(compute_group_fairness_score)
 
     def test_with_real_model(self, trained_model_and_explainer):
@@ -643,8 +611,9 @@ class TestGroupFairnessScore:
 
 
 # =============================================================================
-# 4. Batch Group Fairness
+# 4. Batch group disparity
 # =============================================================================
+
 
 class TestBatchGroupFairness:
     """Tests for compute_batch_group_fairness()."""
@@ -652,11 +621,10 @@ class TestBatchGroupFairness:
     def test_import(self):
         """compute_batch_group_fairness can be imported."""
         from explainiverse.evaluation.fairness import compute_batch_group_fairness
+
         assert callable(compute_batch_group_fairness)
 
-    def test_batch_returns_list(
-        self, unfair_attributions, sensitive_features_binary
-    ):
+    def test_batch_returns_list(self, unfair_attributions, sensitive_features_binary):
         """Batch computation returns a list of result dicts."""
         from explainiverse.evaluation.fairness import compute_batch_group_fairness
 
@@ -678,21 +646,22 @@ class TestBatchGroupFairness:
 
 
 # =============================================================================
-# 5. Individual Fairness Tests
+# 5. Cross-group Lipschitz compatibility tests
 # =============================================================================
 
+
 class TestIndividualFairness:
-    """Tests for individual fairness metric (Dwork et al., 2012; adapted)."""
+    """Tests for the historical cross-group Lipschitz compatibility API."""
 
     def test_import(self):
         """compute_individual_fairness can be imported."""
         from explainiverse.evaluation.fairness import compute_individual_fairness
+
         assert callable(compute_individual_fairness)
 
     def test_identical_attributions_across_groups(self):
         """
-        If all instances get identical attributions, individual fairness
-        should be perfect (score near 0).
+        Identical attributions produce a zero cross-group sensitivity ratio.
         """
         from explainiverse.evaluation.fairness import compute_individual_fairness
 
@@ -714,8 +683,8 @@ class TestIndividualFairness:
 
     def test_disparate_attributions_detected(self):
         """
-        Similar individuals from different groups receiving different
-        explanations should yield a high score.
+        Different attribution vectors at small input distances yield a
+        positive empirical distance ratio.
         """
         from explainiverse.evaluation.fairness import compute_individual_fairness
 
@@ -726,7 +695,7 @@ class TestIndividualFairness:
         sf = np.array([0] * 10 + [1] * 10)
         attrs = np.zeros((n, 4))
         attrs[:10] = [0.9, 0.05, 0.025, 0.025]  # group 0
-        attrs[10:] = [0.1, 0.4, 0.3, 0.2]        # group 1
+        attrs[10:] = [0.1, 0.4, 0.3, 0.2]  # group 1
 
         result = compute_individual_fairness(
             inputs=inputs,
@@ -751,18 +720,19 @@ class TestIndividualFairness:
 # 6. Counterfactual Explanation Fairness Tests
 # =============================================================================
 
+
 class TestCounterfactualFairness:
-    """Tests for counterfactual explanation fairness (Kusner et al., 2017; adapted)."""
+    """Tests for the historical sensitive-attribution-change compatibility API."""
 
     def test_import(self):
         """compute_counterfactual_fairness can be imported."""
         from explainiverse.evaluation.fairness import compute_counterfactual_fairness
+
         assert callable(compute_counterfactual_fairness)
 
     def test_insensitive_attributions_score_zero(self):
         """
-        If attributions don't change when the sensitive feature is flipped,
-        counterfactual fairness should be 0.
+        If matched attributions do not change, the observational proxy is zero.
         """
         from explainiverse.evaluation.fairness import compute_counterfactual_fairness
 
@@ -836,25 +806,24 @@ class TestCounterfactualFairness:
 # 7. Fidelity Disparity Tests
 # =============================================================================
 
+
 class TestFidelityDisparity:
-    """Tests for fidelity disparity metric (Balagopalan et al., 2022)."""
+    """Tests for the exact Balagopalan et al. fidelity-gap definitions."""
 
     def test_import(self):
         """compute_fidelity_disparity can be imported."""
         from explainiverse.evaluation.fairness import compute_fidelity_disparity
+
         assert callable(compute_fidelity_disparity)
 
     def test_equal_groups_zero_disparity(self):
-        """Identical quality across groups -> zero max_gap and mean_gap."""
-        from explainiverse.evaluation.fairness import compute_fidelity_disparity
+        """Identical scalar scores across groups give zero gaps."""
+        from explainiverse.evaluation.fairness import compute_fidelity_gap
 
-        attrs = np.tile([0.3, 0.5, 0.1, 0.1], (20, 1))
+        scores = np.full(20, 0.8)
         sf = np.array([0] * 10 + [1] * 10)
 
-        result = compute_fidelity_disparity(
-            attributions=attrs,
-            sensitive_features=sf,
-        )
+        result = compute_fidelity_gap(scores, sf)
         assert isinstance(result, dict)
         assert "max_gap" in result
         assert "mean_gap" in result
@@ -862,19 +831,13 @@ class TestFidelityDisparity:
         assert result["mean_gap"] == pytest.approx(0.0, abs=1e-10)
 
     def test_disparate_groups_positive_gap(self):
-        """Different quality across groups -> positive gaps."""
-        from explainiverse.evaluation.fairness import compute_fidelity_disparity
+        """Different scalar group scores give positive gaps."""
+        from explainiverse.evaluation.fairness import compute_fidelity_gap
 
-        n = 20
-        attrs = np.zeros((n, 4))
-        attrs[:10] = [0.9, 0.3, 0.05, 0.05]
-        attrs[10:] = [0.2, 0.1, 0.1, 0.1]
+        scores = np.array([0.9] * 10 + [0.4] * 10)
         sf = np.array([0] * 10 + [1] * 10)
 
-        result = compute_fidelity_disparity(
-            attributions=attrs,
-            sensitive_features=sf,
-        )
+        result = compute_fidelity_gap(scores, sf)
         assert result["max_gap"] > 0.0
         assert result["mean_gap"] > 0.0
 
@@ -882,72 +845,63 @@ class TestFidelityDisparity:
         """
         With 3 groups, max_gap should reflect the worst-case pair.
         """
-        from explainiverse.evaluation.fairness import compute_fidelity_disparity
+        from explainiverse.evaluation.fairness import compute_fidelity_gap
 
         n = len(sensitive_features_multigroup)
-        attrs = np.zeros((n, 4))
+        scores = np.zeros(n)
         for i in range(n):
             g = sensitive_features_multigroup[i]
             if g == 0:
-                attrs[i] = [0.9, 0.05, 0.025, 0.025]  # very sparse
+                scores[i] = 0.9
             elif g == 1:
-                attrs[i] = [0.5, 0.3, 0.1, 0.1]         # moderate
+                scores[i] = 0.6
             else:
-                attrs[i] = [0.25, 0.25, 0.25, 0.25]     # uniform
+                scores[i] = 0.2
 
-        result = compute_fidelity_disparity(
-            attributions=attrs,
-            sensitive_features=sensitive_features_multigroup,
-        )
-        # max_gap should be the gap between group 0 (sparsest) and group 2 (most uniform)
-        assert result["max_gap"] >= result["mean_gap"]
+        result = compute_fidelity_gap(scores, sensitive_features_multigroup)
+        assert result["max_gap_from_average"] > 0.0
         assert "pairwise_gaps" in result
         # With 3 groups, there should be 3 pairs: (0,1), (0,2), (1,2)
         assert len(result["pairwise_gaps"]) == 3
 
-    def test_custom_inner_metric_with_fidelity(self):
-        """Fidelity disparity accepts a user-supplied quality metric."""
+    def test_compatibility_adapter_requires_explicit_fidelity_metric(self):
+        """The attribution-shaped adapter accepts an explicit fidelity metric."""
         from explainiverse.evaluation.fairness import compute_fidelity_disparity
 
-        def entropy_metric(attr_vector):
-            """Explanation entropy (higher = more complex)."""
-            p = np.abs(attr_vector)
-            total = p.sum()
-            if total < 1e-10:
-                return 0.0
-            p = p / total
-            p = p[p > 0]
-            return float(-np.sum(p * np.log2(p)))
+        def stored_fidelity_score(row):
+            """Read a synthetic per-instance fidelity score from column zero."""
+            return float(row[0])
 
         attrs = np.zeros((20, 4))
-        attrs[:10] = [0.9, 0.05, 0.025, 0.025]  # low entropy
-        attrs[10:] = [0.25, 0.25, 0.25, 0.25]   # high entropy
+        attrs[:10, 0] = 0.9
+        attrs[10:, 0] = 0.25
         sf = np.array([0] * 10 + [1] * 10)
 
         result = compute_fidelity_disparity(
             attributions=attrs,
             sensitive_features=sf,
-            inner_metric=entropy_metric,
+            inner_metric=stored_fidelity_score,
         )
         assert result["max_gap"] > 0.0
 
 
 # =============================================================================
-# 8. Attribution Parity Tests
+# 8. Sensitive-attribution-gap compatibility tests
 # =============================================================================
 
+
 class TestAttributionParity:
-    """Tests for Attribution Parity (novel synthesis)."""
+    """Tests for the sensitive-attribution-gap compatibility API."""
 
     def test_import(self):
         """compute_attribution_parity can be imported."""
         from explainiverse.evaluation.fairness import compute_attribution_parity
+
         assert callable(compute_attribution_parity)
 
     def test_no_sensitive_attribution_is_fair(self):
         """
-        If the sensitive feature gets zero attribution in all groups,
-        attribution parity should be high (low divergence).
+        Identical zero sensitive-feature attribution gives zero divergence.
         """
         from explainiverse.evaluation.fairness import compute_attribution_parity
 
@@ -1007,27 +961,29 @@ class TestAttributionParity:
 
 
 # =============================================================================
-# 9. Conditional Fairness Tests
+# 9. Prediction-conditioned disparity compatibility tests
 # =============================================================================
 
+
 class TestConditionalFairness:
-    """Tests for Conditional Fairness / Equalized Explanation Quality (Hardt et al., 2016; adapted)."""
+    """Tests for prediction-conditioned scalar-property disparity."""
 
     def test_import(self):
         """compute_conditional_fairness can be imported."""
         from explainiverse.evaluation.fairness import compute_conditional_fairness
+
         assert callable(compute_conditional_fairness)
 
-    def test_equal_quality_conditioned_on_prediction(self):
+    def test_equal_magnitude_conditioned_on_prediction(self):
         """
-        If explanation quality is equal within each prediction class,
-        conditional disparity should be 0.
+        Equal attribution L1 magnitude within each prediction class gives
+        zero conditional disparity under the compatibility default.
         """
         from explainiverse.evaluation.fairness import compute_conditional_fairness
 
         n = 20
         attrs = np.tile([0.3, 0.4, 0.2, 0.1], (n, 1))
-        sf = np.array([0] * 10 + [1] * 10)
+        sf = np.tile([0, 1], 10)
         predictions = np.array([0] * 10 + [1] * 10)
 
         result = compute_conditional_fairness(
@@ -1041,8 +997,8 @@ class TestConditionalFairness:
 
     def test_disparity_conditioned_on_prediction(self):
         """
-        If within a prediction class, one group gets worse explanations,
-        conditional disparity should be positive.
+        Different attribution L1 magnitudes within a prediction class give a
+        positive conditional disparity under the compatibility default.
         """
         from explainiverse.evaluation.fairness import compute_conditional_fairness
 
@@ -1054,9 +1010,9 @@ class TestConditionalFairness:
         attrs = np.zeros((n, 4))
         for i in range(n):
             if sf[i] == 0:
-                attrs[i] = [0.9, 0.4, 0.05, 0.05]  # good quality for both preds
+                attrs[i] = [0.9, 0.4, 0.05, 0.05]  # larger L1 magnitude
             else:
-                attrs[i] = [0.1, 0.1, 0.1, 0.1]  # poor quality for both preds
+                attrs[i] = [0.1, 0.1, 0.1, 0.1]  # smaller L1 magnitude
 
         result = compute_conditional_fairness(
             attributions=attrs,
@@ -1098,12 +1054,14 @@ class TestConditionalFairness:
 # 10. Top-level API: compute_X / compute_X_score / compute_batch_X
 # =============================================================================
 
+
 class TestThreeTierAPI:
     """Verify the 3-tier API pattern is consistent across all fairness metrics."""
 
     def test_all_metrics_have_compute_function(self):
         """Each metric has a compute_<name>() function."""
         from explainiverse.evaluation import fairness
+
         expected = [
             "compute_group_fairness",
             "compute_individual_fairness",
@@ -1117,13 +1075,15 @@ class TestThreeTierAPI:
             assert callable(getattr(fairness, fn_name))
 
     def test_group_fairness_has_score_variant(self):
-        """Group fairness has an explainer-based score variant."""
+        """Group disparity has an explainer-based score variant."""
         from explainiverse.evaluation.fairness import compute_group_fairness_score
+
         assert callable(compute_group_fairness_score)
 
     def test_group_fairness_has_batch_variant(self):
-        """Group fairness has a batch variant."""
+        """Group disparity has a batch variant."""
         from explainiverse.evaluation.fairness import compute_batch_group_fairness
+
         assert callable(compute_batch_group_fairness)
 
 
@@ -1131,50 +1091,61 @@ class TestThreeTierAPI:
 # 11. Integration with evaluation/__init__.py exports
 # =============================================================================
 
+
 class TestEvaluationExports:
     """Fairness metrics are properly exported from evaluation package."""
 
     def test_group_fairness_importable_from_evaluation(self):
         """compute_group_fairness is importable from evaluation package."""
         from explainiverse.evaluation import compute_group_fairness
+
         assert callable(compute_group_fairness)
 
     def test_individual_fairness_importable_from_evaluation(self):
         from explainiverse.evaluation import compute_individual_fairness
+
         assert callable(compute_individual_fairness)
 
     def test_counterfactual_fairness_importable_from_evaluation(self):
         from explainiverse.evaluation import compute_counterfactual_fairness
+
         assert callable(compute_counterfactual_fairness)
 
     def test_fidelity_disparity_importable_from_evaluation(self):
         from explainiverse.evaluation import compute_fidelity_disparity
+
         assert callable(compute_fidelity_disparity)
 
     def test_attribution_parity_importable_from_evaluation(self):
         from explainiverse.evaluation import compute_attribution_parity
+
         assert callable(compute_attribution_parity)
 
     def test_conditional_fairness_importable_from_evaluation(self):
         from explainiverse.evaluation import compute_conditional_fairness
+
         assert callable(compute_conditional_fairness)
 
     def test_registry_importable_from_evaluation(self):
         from explainiverse.evaluation import get_default_fairness_registry
+
         assert callable(get_default_fairness_registry)
 
     def test_batch_group_fairness_importable(self):
         from explainiverse.evaluation import compute_batch_group_fairness
+
         assert callable(compute_batch_group_fairness)
 
     def test_group_fairness_score_importable(self):
         from explainiverse.evaluation import compute_group_fairness_score
+
         assert callable(compute_group_fairness_score)
 
 
 # =============================================================================
 # 12. Edge Cases & Robustness
 # =============================================================================
+
 
 class TestEdgeCases:
     """Edge cases and robustness tests across all fairness metrics."""
@@ -1224,14 +1195,14 @@ class TestEdgeCases:
         assert "disparity" in result
         assert len(result["group_means"]) == 10
 
-    def test_fidelity_disparity_single_group(self):
-        """Single group should produce zero gaps."""
-        from explainiverse.evaluation.fairness import compute_fidelity_disparity
+    def test_fidelity_disparity_single_group_is_not_evaluable(self):
+        """A fidelity gap cannot be identified from one observed group."""
+        from explainiverse.evaluation.fairness import compute_fidelity_gap
 
-        attrs = np.random.randn(10, 4)
+        scores = np.random.randn(10)
         sf = np.zeros(10, dtype=int)
-        result = compute_fidelity_disparity(attributions=attrs, sensitive_features=sf)
-        assert result["max_gap"] == pytest.approx(0.0, abs=1e-10)
+        with pytest.raises(ValueError, match="at least two observed groups"):
+            compute_fidelity_gap(scores, sf)
 
     def test_attribution_parity_all_groups_same_sensitive_attr(self):
         """If sensitive feature gets same attribution in all groups, divergence=0."""

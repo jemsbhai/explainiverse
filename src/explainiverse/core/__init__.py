@@ -6,8 +6,8 @@ Explainiverse core components.
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.core.registry import (
-    ExplainerRegistry,
     ExplainerMeta,
+    ExplainerRegistry,
     default_registry,
     get_default_registry,
 )

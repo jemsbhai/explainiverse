@@ -1,26 +1,24 @@
 # src/explainiverse/evaluation/robustness.py
 """
-Robustness evaluation metrics for explanations (Phase 2).
+Finite-sample robustness and stability diagnostics for explanations.
 
 Implements:
 - Max-Sensitivity (Yeh et al., 2019)
-- Avg-Sensitivity (Yeh et al., 2019)
-- Continuity (Montavon et al., 2018; Alvarez-Melis & Jaakkola, 2018)
+- Mean-sensitivity compatibility heuristic (not defined by Yeh et al.)
+- Finite-sample local Lipschitz estimate (Alvarez-Melis & Jaakkola, 2018)
 - Consistency (Dasgupta et al., 2022)
 - Relative Input Stability — RIS (Agarwal et al., 2022, Eq 2)
 - Relative Representation Stability — RRS (Agarwal et al., 2022, Eq 3)
 - Relative Output Stability — ROS (Agarwal et al., 2022, Eq 5)
 
-These metrics evaluate whether explanations are stable under small input
-perturbations and whether similar inputs receive similar explanations.
+These functions report declared finite-sample instability or agreement
+statistics. They do not certify stability outside the sampled inputs and
+perturbations.
 
 References:
-    Yeh, C. K., Hsieh, C. Y., Suggala, A. S., Inber, D. I., & Ravikumar, P.
+    Yeh, C. K., Hsieh, C. Y., Suggala, A. S., Inouye, D. I., & Ravikumar, P.
     (2019). On the (In)fidelity and Sensitivity of Explanations. NeurIPS.
     https://proceedings.neurips.cc/paper/2019/hash/a7471fdc77b3435276507cc8f2571547-Abstract.html
-
-    Montavon, G., Samek, W., & Müller, K. R. (2018). Methods for interpreting
-    and understanding deep neural networks. Digital Signal Processing, 73, 1-15.
 
     Alvarez-Melis, D., & Jaakkola, T. S. (2018). On the Robustness of
     Interpretability Methods. ICML Workshop on Human Interpretability in
@@ -35,28 +33,34 @@ References:
     Zitnik, M., & Lakkaraju, H. (2022). Rethinking Stability for
     Attribution-based Explanations. arXiv:2203.06877.
 """
+import inspect
 import warnings
+from collections.abc import Mapping
+from numbers import Integral, Real
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-from typing import Union, Callable, List, Dict, Optional
-from scipy import stats
 from scipy.spatial.distance import cdist
-from itertools import combinations
 
-from explainiverse.core.explanation import Explanation
 from explainiverse.core.explainer import BaseExplainer
-
+from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation.faithfulness import _candidate_from_label
 
 # =============================================================================
 # Internal Helpers
 # =============================================================================
 
+_UNSET_TARGET = object()
+
+
 def _extract_attribution_vector(explanation: Explanation) -> np.ndarray:
     """
     Extract attribution values as a numpy array from an Explanation.
 
-    Preserves feature order from explanation.feature_names if available,
-    otherwise uses dictionary iteration order.
+    Preserves the declared feature order. If feature names are absent, the
+    mapping must use the complete explicit sequence ``feature_0``,
+    ``feature_1``, ...; dictionary insertion order is not treated as a feature
+    identity contract.
 
     Args:
         explanation: Explanation object with feature_attributions
@@ -67,17 +71,158 @@ def _extract_attribution_vector(explanation: Explanation) -> np.ndarray:
     Raises:
         ValueError: If no feature attributions are found
     """
+    if not isinstance(explanation, Explanation):
+        raise TypeError("explanation must be an Explanation object.")
     attributions = explanation.explanation_data.get("feature_attributions", {})
+    if not isinstance(attributions, Mapping):
+        raise TypeError("feature_attributions must be a mapping from feature names to values.")
     if not attributions:
         raise ValueError("No feature attributions found in explanation.")
+    if any(not isinstance(name, str) or not name for name in attributions):
+        raise TypeError("Feature attribution keys must be non-empty strings.")
 
-    feature_names = getattr(explanation, 'feature_names', None)
-    if feature_names:
-        values = [attributions.get(fn, 0.0) for fn in feature_names]
+    feature_names = getattr(explanation, "feature_names", None)
+    if feature_names is not None and len(feature_names) > 0:
+        feature_names = list(feature_names)
+        if len(set(feature_names)) != len(feature_names):
+            raise ValueError("Explanation feature_names must be unique.")
+        missing = set(feature_names) - set(attributions)
+        extra = set(attributions) - set(feature_names)
+        if missing or extra:
+            raise ValueError(
+                "Explanation feature_attributions must map exactly one value per "
+                f"declared feature; missing={sorted(missing)!r}, extra={sorted(extra)!r}."
+            )
+        values = [attributions[name] for name in feature_names]
     else:
-        values = list(attributions.values())
+        feature_names = [f"feature_{index}" for index in range(len(attributions))]
+        if set(attributions) != set(feature_names):
+            raise ValueError(
+                "Explanation without feature_names must use a complete zero-based "
+                "feature_<index> attribution mapping."
+            )
+        values = [attributions[name] for name in feature_names]
 
-    return np.array(values, dtype=np.float64)
+    if any(isinstance(value, bool) or not isinstance(value, Real) for value in values):
+        raise TypeError("Feature attributions must be real numeric scalars.")
+    result = np.asarray(values, dtype=np.float64)
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError("Feature attributions must be a non-empty 1D vector.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError("Feature attributions must contain only finite values.")
+    return result
+
+
+def _validate_instance(instance: np.ndarray, name: str = "instance") -> np.ndarray:
+    """Return a strict, finite one-dimensional feature vector."""
+    result = np.asarray(instance, dtype=np.float64)
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError(f"{name} must be a non-empty 1D array.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return result
+
+
+def _validate_batch(X: np.ndarray, name: str = "X") -> np.ndarray:
+    """Return a strict, finite two-dimensional feature matrix."""
+    result = np.asarray(X, dtype=np.float64)
+    if result.ndim != 2 or result.shape[0] == 0 or result.shape[1] == 0:
+        raise ValueError(f"{name} must be a non-empty 2D array.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return result
+
+
+def _validate_sampling_parameters(
+    *,
+    n_samples: int,
+    radius: Optional[float] = None,
+    noise_scale: Optional[float] = None,
+) -> None:
+    if isinstance(n_samples, bool) or not isinstance(n_samples, (int, np.integer)):
+        raise TypeError("The number of perturbations must be an integer.")
+    if int(n_samples) <= 0:
+        raise ValueError("The number of perturbations must be greater than zero.")
+    if radius is not None:
+        if isinstance(radius, (bool, np.bool_)) or not isinstance(
+            radius, (int, float, np.integer, np.floating)
+        ):
+            raise TypeError("radius must be a real number.")
+        if not np.isfinite(radius) or radius < 0:
+            raise ValueError("radius must be finite and non-negative.")
+    if noise_scale is not None:
+        if isinstance(noise_scale, (bool, np.bool_)) or not isinstance(
+            noise_scale, (int, float, np.integer, np.floating)
+        ):
+            raise TypeError("noise_scale must be a real number.")
+        if not np.isfinite(noise_scale) or noise_scale < 0:
+            raise ValueError("noise_scale must be finite and non-negative.")
+
+
+def _validate_norm_order(norm_ord: Union[int, float]) -> None:
+    if isinstance(norm_ord, (bool, np.bool_)) or norm_ord not in {1, 2, np.inf}:
+        raise ValueError("norm_ord must be 1, 2, or np.inf.")
+
+
+def _vector_norm(values: np.ndarray, norm_ord: Union[int, float]) -> float:
+    """Return the scalar vector norm produced for a one-dimensional input."""
+    return float(np.linalg.norm(values, ord=norm_ord))
+
+
+def _require_scalar_result(result: Union[float, dict], metric_name: str) -> float:
+    """Narrow a detail-capable metric call made with details disabled."""
+    if isinstance(result, dict):
+        raise RuntimeError(f"{metric_name} unexpectedly returned detail data")
+    return float(result)
+
+
+def _supports_target_class(explainer: BaseExplainer) -> bool:
+    """Whether ``explain`` accepts a fixed output-column target."""
+    try:
+        parameters = inspect.signature(explainer.explain).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "target_class" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _get_explanation(
+    explainer: BaseExplainer,
+    instance: np.ndarray,
+    target_class: Optional[int] = None,
+) -> Explanation:
+    kwargs: Dict[str, int] = {}
+    if target_class is not None:
+        if not isinstance(target_class, Integral) or isinstance(target_class, (bool, np.bool_)):
+            raise TypeError("target_class must be an integer output index or None.")
+        target_class = int(target_class)
+        if target_class < 0:
+            raise ValueError("target_class must be non-negative.")
+        if not _supports_target_class(explainer):
+            raise ValueError(
+                "This explainer cannot accept target_class, so the metric cannot "
+                "guarantee a fixed explained output."
+            )
+        kwargs["target_class"] = target_class
+    explanation = explainer.explain(instance, **kwargs)
+    if not isinstance(explanation, Explanation):
+        raise TypeError("explainer.explain() must return an Explanation object.")
+    if target_class is not None:
+        identity_source = getattr(explainer, "model", explainer)
+        returned_target = _candidate_from_label(identity_source, explanation)
+        if returned_target is None:
+            raise ValueError(
+                "The explainer returned no target identity that can verify the "
+                "requested target_class."
+            )
+        if returned_target != target_class:
+            raise ValueError(
+                "The explainer did not honor the requested target_class "
+                f"({target_class} requested, {returned_target} returned)."
+            )
+    return explanation
 
 
 def _generate_perturbations_l2(
@@ -145,11 +290,11 @@ def _get_explanation_vector(
     explainer: BaseExplainer,
     instance: np.ndarray,
     n_features: int,
+    target_class: Optional[int] = None,
+    expected_target=_UNSET_TARGET,
 ) -> np.ndarray:
     """
     Get attribution vector for a single instance.
-
-    Sets feature_names on the explanation if not present.
 
     Args:
         explainer: Explainer instance
@@ -159,25 +304,53 @@ def _get_explanation_vector(
     Returns:
         1D numpy array of attributions
     """
-    exp = explainer.explain(instance)
-    if not getattr(exp, 'feature_names', None):
-        exp.feature_names = [f"feature_{i}" for i in range(n_features)]
-    return _extract_attribution_vector(exp)
+    exp = _get_explanation(explainer, instance, target_class=target_class)
+    values = _extract_attribution_vector(exp)
+    if values.size != n_features:
+        raise ValueError(
+            f"Explanation has {values.size} attribution values; expected "
+            f"{n_features}, one per input feature."
+        )
+    if expected_target is not _UNSET_TARGET and exp.target_class != expected_target:
+        raise ValueError(
+            "The explainer changed target_class across perturbations "
+            f"({expected_target!r} -> {exp.target_class!r}). Pass an explicit "
+            "target_class to an explainer that supports fixed targets."
+        )
+    return values
+
+
+def _get_explanation_vector_and_target(
+    explainer: BaseExplainer,
+    instance: np.ndarray,
+    n_features: int,
+    target_class: Optional[int] = None,
+):
+    exp = _get_explanation(explainer, instance, target_class=target_class)
+    values = _extract_attribution_vector(exp)
+    if values.size != n_features:
+        raise ValueError(
+            f"Explanation has {values.size} attribution values; expected "
+            f"{n_features}, one per input feature."
+        )
+    return values, exp.target_class
 
 
 # =============================================================================
 # Max-Sensitivity (Yeh et al., 2019)
 # =============================================================================
 
+
 def compute_max_sensitivity(
     explainer: BaseExplainer,
     instance: np.ndarray,
     radius: float = 0.1,
     n_samples: int = 50,
-    norm_ord: Union[int, float, str] = 2,
+    norm_ord: Union[int, float] = 2,
     perturb_norm: str = "l2",
-    normalize: bool = True,
-    seed: int = None,
+    normalize: bool = False,
+    seed: Optional[int] = None,
+    target_class: Optional[int] = None,
 ) -> float:
     """
     Compute Max-Sensitivity of an explanation method.
@@ -187,7 +360,8 @@ def compute_max_sensitivity(
 
         MaxSens(E, x, r) = max_{||δ||_p ≤ r} ||E(x + δ) - E(x)||_q
 
-    A lower score indicates a more robust explanation.
+    A lower score means a smaller sampled explanation change under this
+    perturbation and norm contract; it is not a global robustness certificate.
 
     Args:
         explainer: Explainer instance with .explain() method.
@@ -195,18 +369,26 @@ def compute_max_sensitivity(
         radius: Radius of the perturbation ball. Default: 0.1.
             For unnormalized features, scale this to the feature range.
         n_samples: Number of Monte Carlo samples to approximate the max.
-            More samples give a tighter estimate. Default: 50.
+            Additional samples reduce under-sampling risk but do not certify
+            the true neighbourhood maximum. Default: 50.
         norm_ord: Norm order for measuring explanation change.
             2 for L2 (default), 1 for L1, np.inf for L∞.
         perturb_norm: Norm for the perturbation ball.
             "l2" (default) or "linf".
-        normalize: If True, normalize by the norm of the original explanation
-            to produce a relative (scale-invariant) sensitivity. Default: True.
-        seed: Random seed for reproducibility.
+        normalize: If True, divide by the norm of the original explanation.
+            This is a noncanonical relative variant; Yeh et al.'s definition
+            is the unnormalised change, so the default is False.
+        seed: Seed for this function's local perturbation generator only.
+            Stochastic explainers/models must be controlled separately.
+        target_class: Optional fixed output-column index. If supplied, the
+            explainer must accept ``target_class``.
 
     Returns:
-        Max-Sensitivity score (float). Lower = more robust.
-        Returns 0.0 if the original explanation is zero and normalize=True.
+        Finite-sample Monte Carlo maximum (float). It is a sampled lower
+        estimate of the neighbourhood supremum; lower = more robust under the
+        declared sampling contract.
+        If ``normalize=True``, a zero-norm original explanation is undefined
+        and raises ``ValueError``.
 
     Example:
         >>> from explainiverse.evaluation import compute_max_sensitivity
@@ -217,16 +399,25 @@ def compute_max_sensitivity(
         Yeh et al. (2019). On the (In)fidelity and Sensitivity of
         Explanations. NeurIPS.
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
+    _validate_sampling_parameters(n_samples=n_samples, radius=radius)
+    _validate_norm_order(norm_ord)
+    if not isinstance(normalize, (bool, np.bool_)):
+        raise TypeError("normalize must be a boolean.")
     n_features = len(instance)
     rng = np.random.default_rng(seed)
 
     # Get original explanation
-    original_attr = _get_explanation_vector(explainer, instance, n_features)
-    original_norm = np.linalg.norm(original_attr, ord=norm_ord)
+    original_attr, explained_target = _get_explanation_vector_and_target(
+        explainer, instance, n_features, target_class=target_class
+    )
+    original_norm = _vector_norm(original_attr, norm_ord)
 
-    if normalize and original_norm < 1e-12:
-        return 0.0
+    if normalize and original_norm == 0:
+        raise ValueError(
+            "Normalized sensitivity is undefined for a zero-norm original "
+            "explanation. Use normalize=False for canonical Max-Sensitivity."
+        )
 
     # Generate perturbations
     if perturb_norm == "l2":
@@ -237,19 +428,20 @@ def compute_max_sensitivity(
         raise ValueError(f"perturb_norm must be 'l2' or 'linf', got '{perturb_norm}'")
 
     # Compute explanation distances
-    max_diff = 0.0
+    diffs = []
     for i in range(n_samples):
-        try:
-            perturbed_attr = _get_explanation_vector(
-                explainer, perturbed[i], n_features
-            )
-            diff = np.linalg.norm(original_attr - perturbed_attr, ord=norm_ord)
-            if diff > max_diff:
-                max_diff = diff
-        except Exception:
-            continue
+        perturbed_attr = _get_explanation_vector(
+            explainer,
+            perturbed[i],
+            n_features,
+            target_class=target_class,
+            expected_target=explained_target,
+        )
+        diffs.append(_vector_norm(original_attr - perturbed_attr, norm_ord))
 
-    if normalize and original_norm > 1e-12:
+    max_diff = max(diffs)
+
+    if normalize:
         return float(max_diff / original_norm)
     return float(max_diff)
 
@@ -259,12 +451,13 @@ def compute_batch_max_sensitivity(
     X: np.ndarray,
     radius: float = 0.1,
     n_samples: int = 50,
-    norm_ord: Union[int, float, str] = 2,
+    norm_ord: Union[int, float] = 2,
     perturb_norm: str = "l2",
-    normalize: bool = True,
-    max_instances: int = None,
-    seed: int = None,
-) -> Dict[str, float]:
+    normalize: bool = False,
+    max_instances: Optional[int] = None,
+    seed: Optional[int] = None,
+    target_class: Optional[int] = None,
+) -> dict:
     """
     Compute Max-Sensitivity over a batch of instances.
 
@@ -277,38 +470,53 @@ def compute_batch_max_sensitivity(
         perturb_norm: Perturbation ball norm ("l2" or "linf").
         normalize: If True, normalize by original explanation norm.
         max_instances: Maximum number of instances to evaluate (None = all).
-        seed: Random seed.
+        seed: Base seed for per-instance local perturbation generators. It
+            does not seed a stochastic explainer or model.
 
     Returns:
         Dictionary with:
             - "mean": Mean Max-Sensitivity across instances
             - "std": Standard deviation
             - "max": Worst-case Max-Sensitivity
-            - "min": Best-case Max-Sensitivity
+            - "min": Minimum observed per-instance score
             - "scores": List of per-instance scores
             - "n_evaluated": Number of instances evaluated
     """
-    X = np.asarray(X)
+    X = _validate_batch(X)
     n = len(X)
     if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, (int, np.integer)):
+            raise TypeError("max_instances must be an integer or None.")
+        if max_instances <= 0:
+            raise ValueError("max_instances must be greater than zero.")
         n = min(n, max_instances)
 
     scores = []
     for i in range(n):
-        try:
-            score = compute_max_sensitivity(
-                explainer, X[i], radius=radius, n_samples=n_samples,
-                norm_ord=norm_ord, perturb_norm=perturb_norm,
-                normalize=normalize,
-                seed=seed + i if seed is not None else None,
-            )
-            scores.append(score)
-        except Exception:
-            continue
+        score = compute_max_sensitivity(
+            explainer,
+            X[i],
+            radius=radius,
+            n_samples=n_samples,
+            norm_ord=norm_ord,
+            perturb_norm=perturb_norm,
+            normalize=normalize,
+            seed=seed + i if seed is not None else None,
+            target_class=target_class,
+        )
+        scores.append(score)
 
     if not scores:
-        return {"mean": float("nan"), "std": 0.0, "max": float("nan"),
-                "min": float("nan"), "scores": [], "n_evaluated": 0}
+        return {
+            "mean": float("nan"),
+            "std": 0.0,
+            "max": float("nan"),
+            "min": float("nan"),
+            "scores": [],
+            "n_evaluated": 0,
+            "n_attempted": n,
+            "n_undefined": n,
+        }
 
     return {
         "mean": float(np.mean(scores)),
@@ -317,12 +525,15 @@ def compute_batch_max_sensitivity(
         "min": float(np.min(scores)),
         "scores": scores,
         "n_evaluated": len(scores),
+        "n_attempted": n,
+        "n_undefined": n - len(scores),
     }
 
 
 # =============================================================================
 # Relative Stability Helpers (Agarwal et al., 2022)
 # =============================================================================
+
 
 def _generate_mixed_perturbations(
     instance: np.ndarray,
@@ -336,26 +547,43 @@ def _generate_mixed_perturbations(
     Generate perturbations with support for mixed feature types.
 
     Continuous features: additive Gaussian noise N(0, noise_scale).
-    Discrete (binary) features: independent Bernoulli flip with probability p.
+    Discrete (binary) features: independent Bernoulli(p) replacement draws.
 
     Following Appendix B of Agarwal et al. (2022):
     - Continuous perturbations: x' = x + N(0, 0.05)
-    - Discrete perturbations: flip with p = 0.03 (small p to avoid OOD)
+    - Discrete perturbations: replace values with Bernoulli(p) draws, p=0.03
+
+    The paper's Appendix B text literally specifies replacement. The authors'
+    later OpenXAI code instead implements a Bernoulli-triggered binary flip,
+    so discrete scores from the two perturbation contracts are not directly
+    comparable. This function follows the written paper contract and exposes
+    it in metric diagnostics.
 
     Args:
         instance: 1D input array.
         n_perturbations: Number of perturbed copies to generate.
         noise_scale: Standard deviation of Gaussian noise for continuous
-            features. Default paper value: 0.05.
+            features. The public metric default of 0.05 matches the paper's
+            experimental setting.
         rng: NumPy random generator.
         feature_types: 1D array of strings, one per feature. Values:
             "continuous" (default) or "discrete". If None, all continuous.
-        discrete_flip_prob: Probability of flipping each discrete feature.
-            Default paper value: 0.03.
+        discrete_flip_prob: Bernoulli success probability for replacement
+            draws. The historical parameter name is retained for API
+            compatibility; this is not a per-value flip probability.
 
     Returns:
         Array of shape (n_perturbations, n_features).
     """
+    instance = _validate_instance(instance)
+    _validate_sampling_parameters(n_samples=n_perturbations, noise_scale=noise_scale)
+    if isinstance(discrete_flip_prob, (bool, np.bool_)) or not isinstance(
+        discrete_flip_prob, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("discrete_flip_prob must be a real number.")
+    if not np.isfinite(discrete_flip_prob) or not 0 <= discrete_flip_prob <= 1:
+        raise ValueError("discrete_flip_prob must be in [0, 1].")
+
     d = len(instance)
     perturbed = np.tile(instance, (n_perturbations, 1))
 
@@ -365,8 +593,21 @@ def _generate_mixed_perturbations(
         perturbed = perturbed + noise
     else:
         feature_types = np.asarray(feature_types)
+        if feature_types.ndim != 1 or feature_types.size != d:
+            raise ValueError("feature_types must be a 1D array with one entry per feature.")
+        unknown = set(feature_types.tolist()) - {"continuous", "discrete"}
+        if unknown:
+            raise ValueError(
+                "feature_types entries must be 'continuous' or 'discrete'; "
+                f"got {sorted(unknown)!r}."
+            )
         continuous_mask = feature_types == "continuous"
         discrete_mask = feature_types == "discrete"
+        if np.any(discrete_mask) and not np.all(np.isin(instance[discrete_mask], [0.0, 1.0])):
+            raise ValueError(
+                "Features marked 'discrete' must be binary 0/1 values for "
+                "the declared Bernoulli replacement contract."
+            )
 
         # Continuous features: additive Gaussian noise
         if np.any(continuous_mask):
@@ -374,15 +615,15 @@ def _generate_mixed_perturbations(
             noise = rng.normal(0, noise_scale, size=(n_perturbations, n_cont))
             perturbed[:, continuous_mask] += noise
 
-        # Discrete features: Bernoulli flip
+        # Discrete features: Bernoulli replacement draws.
         if np.any(discrete_mask):
             n_disc = np.sum(discrete_mask)
-            flip_mask = rng.random(size=(n_perturbations, n_disc)) < discrete_flip_prob
-            # Flip: 0 → 1, 1 → 0 (XOR with flip mask)
-            perturbed[:, discrete_mask] = np.where(
-                flip_mask,
-                1.0 - perturbed[:, discrete_mask],
-                perturbed[:, discrete_mask],
+            # Appendix B replaces each discrete dimension by an independent
+            # Bernoulli(p) draw; it does not describe an XOR/flip operation.
+            perturbed[:, discrete_mask] = rng.binomial(
+                1,
+                discrete_flip_prob,
+                size=(n_perturbations, n_disc),
             )
 
     return perturbed
@@ -396,23 +637,29 @@ def _element_wise_percent_change(
     """
     Compute element-wise percent change: (original - perturbed) / original.
 
-    Applies an epsilon floor to the denominator to prevent division by zero
-    when elements of the original vector are zero or near-zero.
+    Replaces exact zero denominator entries with ``epsilon_min``, matching the
+    official Quantus objective implementation.
 
     Args:
         original: 1D array (the reference vector).
         perturbed: 1D array (the perturbed vector).
-        epsilon_min: Floor for absolute value of denominator elements.
+        epsilon_min: Positive replacement for exact zero denominator entries.
 
     Returns:
         1D array of element-wise percent changes.
     """
-    # Replace near-zero denominator elements with epsilon_min to prevent
-    # division by zero. We use positive epsilon for near-zero values;
-    # sign does not matter here because the result is wrapped in a norm.
+    original = np.asarray(original, dtype=np.float64)
+    perturbed = np.asarray(perturbed, dtype=np.float64)
+    if original.shape != perturbed.shape:
+        raise ValueError("original and perturbed vectors must have the same shape.")
+    if isinstance(epsilon_min, (bool, np.bool_)) or not isinstance(
+        epsilon_min, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("epsilon_min must be a real number.")
+    if not np.isfinite(epsilon_min) or epsilon_min <= 0:
+        raise ValueError("epsilon_min must be finite and greater than zero.")
     safe_denom = np.copy(original)
-    near_zero = np.abs(original) < epsilon_min
-    safe_denom[near_zero] = epsilon_min
+    safe_denom[original == 0] = epsilon_min
     return (original - perturbed) / safe_denom
 
 
@@ -425,7 +672,8 @@ def _aggregate_perturbation_scores(
 
     Args:
         scores: List of per-perturbation ratio scores.
-        aggregation: "max" (paper default), "mean", or "median".
+        aggregation: "max" (canonical), "mean", or "median". The latter two
+            are explicit noncanonical summaries.
 
     Returns:
         Dict with score, max, mean, median, perturbation_scores.
@@ -435,9 +683,7 @@ def _aggregate_perturbation_scores(
     """
     valid_aggs = {"max", "mean", "median"}
     if aggregation not in valid_aggs:
-        raise ValueError(
-            f"aggregation must be one of {valid_aggs}, got '{aggregation}'"
-        )
+        raise ValueError(f"aggregation must be one of {valid_aggs}, got '{aggregation}'")
 
     if not scores:
         return {
@@ -459,10 +705,99 @@ def _aggregate_perturbation_scores(
     return result
 
 
+def _validate_relative_parameters(
+    *,
+    n_perturbations: int,
+    noise_scale: float,
+    norm_ord: Union[int, float],
+    epsilon_min: float,
+    aggregation: str,
+) -> None:
+    _validate_sampling_parameters(n_samples=n_perturbations, noise_scale=noise_scale)
+    _validate_norm_order(norm_ord)
+    if isinstance(epsilon_min, (bool, np.bool_)) or not isinstance(
+        epsilon_min, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("epsilon_min must be a real number.")
+    if not np.isfinite(epsilon_min) or epsilon_min <= 0:
+        raise ValueError("epsilon_min must be finite and greater than zero.")
+    if aggregation not in {"max", "mean", "median"}:
+        raise ValueError(
+            "aggregation must be one of {'max', 'mean', 'median'}, " f"got {aggregation!r}"
+        )
+
+
+def _evaluate_single_vector_fn(
+    function: Callable[[np.ndarray], np.ndarray],
+    instance: np.ndarray,
+    *,
+    name: str,
+) -> np.ndarray:
+    """Evaluate a representation/logit callable for exactly one instance."""
+    result = np.asarray(function(instance), dtype=np.float64)
+    if result.ndim >= 2:
+        if result.shape[0] != 1:
+            raise ValueError(f"{name} must return exactly one sample.")
+        result = result[0]
+    result = result.reshape(-1)
+    if result.size == 0:
+        raise ValueError(f"{name} must return a non-empty vector.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must return only finite values.")
+    return result
+
+
+def _class_from_single_prediction(output, *, probabilistic: bool):
+    """Interpret one model result without coercing arbitrary labels to int."""
+    values = np.asarray(output)
+    if values.ndim == 0:
+        return values.item()
+
+    # Remove only the single-sample batch dimension. Extra sample rows are a
+    # contract error rather than something to flatten and silently reinterpret.
+    if values.ndim >= 2:
+        if values.shape[0] != 1:
+            raise ValueError("Model prediction for one instance must have exactly one row.")
+        values = values[0]
+
+    values = np.asarray(values)
+    if values.ndim == 0 or values.size == 1:
+        scalar = values.reshape(-1)[0].item()
+        if probabilistic:
+            probability = float(scalar)
+            if not np.isfinite(probability) or not 0 <= probability <= 1:
+                raise ValueError(
+                    "A one-column predict_proba output must be a probability " "in [0, 1]."
+                )
+            if not np.isclose(probability, 1.0):
+                raise ValueError(
+                    "A one-column probabilistic output is ambiguous unless it "
+                    "represents a one-class distribution with probability 1. "
+                    "Return two class-score columns for binary classification."
+                )
+            return 0
+        return scalar
+
+    if values.ndim != 1:
+        raise ValueError("Model output for one instance must be a 1D vector.")
+    numeric = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(numeric)):
+        raise ValueError("Model output must contain only finite values.")
+    if probabilistic:
+        if np.any((numeric < 0) | (numeric > 1)) or not np.isclose(
+            np.sum(numeric), 1.0, rtol=1e-6, atol=1e-8
+        ):
+            raise ValueError(
+                "Probabilistic model output must contain values in [0, 1] "
+                "that sum to one for the single sample."
+            )
+    return int(np.argmax(numeric))
+
+
 def _get_predicted_class(
     model,
     instance: np.ndarray,
-) -> int:
+):
     """
     Get predicted class label for a single instance.
 
@@ -473,22 +808,39 @@ def _get_predicted_class(
         instance: 1D input array.
 
     Returns:
-        Integer predicted class label.
+        A predicted class label or output-column index.
     """
+    known_task = getattr(model, "task", None)
+    estimator_type = getattr(model, "_estimator_type", None)
+    wrapped_model = getattr(model, "model", None)
+    wrapped_estimator_type = getattr(wrapped_model, "_estimator_type", None)
+    if (
+        known_task == "regression"
+        or estimator_type == "regressor"
+        or wrapped_estimator_type == "regressor"
+    ):
+        raise ValueError(
+            "This metric requires categorical model predictions; a known "
+            "regression model has no same-predicted-class contract."
+        )
+
+    instance = _validate_instance(instance)
     instance_2d = instance.reshape(1, -1)
 
-    if hasattr(model, 'predict_proba'):
+    if callable(getattr(model, "predict_proba", None)):
         proba = model.predict_proba(instance_2d)
-        if isinstance(proba, np.ndarray):
-            if proba.ndim == 2:
-                return int(np.argmax(proba[0]))
-            return int(np.argmax(proba))
+        return _class_from_single_prediction(proba, probabilistic=True)
 
-    if hasattr(model, 'predict'):
+    if callable(getattr(model, "predict", None)):
         pred = model.predict(instance_2d)
-        if isinstance(pred, np.ndarray):
-            pred = pred.flatten()[0]
-        return int(pred)
+        # Explainiverse adapters return a row of classification scores from
+        # predict(), while raw sklearn classifiers return one label. The shape
+        # distinguishes these contracts; never take the first probability and
+        # cast it to int.
+        return _class_from_single_prediction(
+            pred,
+            probabilistic=getattr(model, "task", None) == "classification",
+        )
 
     raise ValueError("Model must have a predict() or predict_proba() method.")
 
@@ -496,6 +848,7 @@ def _get_predicted_class(
 # =============================================================================
 # Relative Input Stability (Agarwal et al., 2022 — Equation 2)
 # =============================================================================
+
 
 def compute_relative_input_stability(
     explainer: BaseExplainer,
@@ -511,6 +864,7 @@ def compute_relative_input_stability(
     seed: Optional[int] = None,
     return_details: bool = False,
     representation_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    target_class: Optional[int] = None,
 ) -> Union[float, dict]:
     """
     Compute Relative Input Stability (Agarwal et al., 2022, Equation 2).
@@ -523,38 +877,53 @@ def compute_relative_input_stability(
                  ||(e_x − e_x') / e_x||_p
                  / max(||(x − x') / x||_p, ε_min)
 
-    A higher score indicates higher instability. Lower is better.
+    A higher score is greater measured instability under this equation and
+    perturbation contract.
+
+    With finitely many generated perturbations, ``aggregation="max"`` is a
+    sampled maximum and need not equal the full-neighbourhood maximum.
 
     The numerator uses element-wise percent change in explanation, enabling
     comparison across explanation methods with different magnitude ranges.
     The denominator normalises by the percent change in input.
 
+    This follows the written equations and Quantus objective implementation.
+    The authors' later OpenXAI benchmark code instead computes
+    ``||e-e'||/||e||`` and ``||x-x'||/||x||``; those scores are not directly
+    comparable to this element-wise-percent-change contract.
+
     Args:
         explainer: Explainer instance with .explain() method.
         model: Model adapter with predict() or predict_proba().
         instance: Input instance (1D array of shape (n_features,)).
-        n_perturbations: Number of perturbations to generate. Default: 50
-            (paper recommendation).
+        n_perturbations: Number of perturbations to generate. Default: 50,
+            matching the paper's experimental setting (not a guarantee).
         noise_scale: Standard deviation of Gaussian noise for continuous
-            features. Default: 0.05 (paper recommendation).
+            features. Default: 0.05, matching the paper's experiments. The
+            Gaussian is unbounded and applied in the supplied (typically
+            preprocessed) feature space; this function does not clip to data
+            bounds or enforce domain constraints.
         norm_ord: Norm order for computing vector norms. Default: 2 (L2).
             Supports 1, 2, np.inf.
         epsilon_min: Floor to prevent division by zero in element-wise
             percent change and in the denominator norm. Default: 1e-7.
         aggregation: How to aggregate per-perturbation scores.
-            "max" (paper default — worst-case instability),
-            "mean" (expected instability), or "median" (robust estimate).
-        feature_types: 1D array of "continuous" or "discrete" per feature.
+            "max" (canonical worst-case instability), or the explicitly
+            noncanonical "mean" and "median" summaries.
+        feature_types: 1D array of "continuous" or binary "discrete" per feature.
             If None, all features are treated as continuous.
-            Discrete features are perturbed via Bernoulli flips.
-        discrete_flip_prob: Probability of flipping each discrete feature.
-            Default: 0.03 (paper recommendation).
-        seed: Random seed for reproducibility.
+            Discrete features are replaced by Bernoulli draws.
+        discrete_flip_prob: Bernoulli replacement success probability. The
+            historical name is retained for compatibility. Default: 0.03.
+        seed: Seed for the local perturbation generator only. It does not seed
+            a stochastic explainer, model, representation_fn, or logit_fn.
         return_details: If True, return a dict with full diagnostics.
             If False (default), return a single float score.
         representation_fn: Optional callable mapping input → hidden
             representation. If provided and return_details=True, the
-            theoretical upper bound (Equation 4) is included.
+            sampled right-hand-side estimate for Equation 4 is included. It
+            is not a certified theoretical bound.
+        target_class: Optional fixed output-column index.
 
     Returns:
         If return_details=False: float score (using chosen aggregation).
@@ -567,8 +936,8 @@ def compute_relative_input_stability(
             - "n_valid": int (perturbations passing same-class filter)
             - "n_total": int (total perturbations generated)
             - "perturbation_scores": list of per-perturbation ratios
-            - "theoretical_bound": float or None (Equation 4, if
-              representation_fn is provided)
+            - "empirical_bound_estimate": sampled RHS of Equation 4
+            - "theoretical_bound": always None (compatibility tombstone)
 
     Example:
         >>> from explainiverse.evaluation import compute_relative_input_stability
@@ -582,147 +951,130 @@ def compute_relative_input_stability(
         Zitnik, M., & Lakkaraju, H. (2022). Rethinking Stability for
         Attribution-based Explanations. arXiv:2203.06877. Equation 2.
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
+    _validate_relative_parameters(
+        n_perturbations=n_perturbations,
+        noise_scale=noise_scale,
+        norm_ord=norm_ord,
+        epsilon_min=epsilon_min,
+        aggregation=aggregation,
+    )
     n_features = len(instance)
     rng = np.random.default_rng(seed)
 
-    # Validate aggregation early
-    valid_aggs = {"max", "mean", "median"}
-    if aggregation not in valid_aggs:
-        raise ValueError(
-            f"aggregation must be one of {valid_aggs}, got '{aggregation}'"
-        )
-
     # Get original explanation and prediction
-    original_attr = _get_explanation_vector(explainer, instance, n_features)
+    original_attr, explained_target = _get_explanation_vector_and_target(
+        explainer, instance, n_features, target_class=target_class
+    )
     original_class = _get_predicted_class(model, instance)
 
     # Generate perturbations
     perturbed = _generate_mixed_perturbations(
-        instance, n_perturbations, noise_scale, rng,
-        feature_types=feature_types, discrete_flip_prob=discrete_flip_prob,
+        instance,
+        n_perturbations,
+        noise_scale,
+        rng,
+        feature_types=feature_types,
+        discrete_flip_prob=discrete_flip_prob,
     )
 
-    # Pre-compute representation for theoretical bound (avoid redundant calls)
+    # Pre-compute the representation used by the optional sampled Equation 4
+    # right-hand-side diagnostic.
     repr_orig = None
     if representation_fn is not None:
-        repr_orig = np.asarray(
-            representation_fn(instance), dtype=np.float64
-        ).flatten()
+        repr_orig = _evaluate_single_vector_fn(
+            representation_fn, instance, name="representation_fn"
+        )
 
     # Evaluate each perturbation
-    per_perturbation_scores = []
-    # For theoretical bound: collect RRS ratios if representation_fn given
-    rrs_scores_for_bound = [] if representation_fn is not None else None
+    per_perturbation_scores: List[float] = []
+    # Retain the exact evaluations used in the main pass. Re-evaluating a
+    # stochastic/stateful representation function would mix incompatible
+    # samples into the diagnostic.
+    rrs_scores_for_bound: List[float] = []
+    representation_differences: List[Tuple[np.ndarray, np.ndarray]] = []
 
     for i in range(n_perturbations):
         x_prime = perturbed[i]
 
         # Same-class filter: ŷ_x = ŷ_x'
-        try:
-            pred_class = _get_predicted_class(model, x_prime)
-        except Exception:
-            continue
+        pred_class = _get_predicted_class(model, x_prime)
         if pred_class != original_class:
             continue
 
         # Get perturbed explanation
-        try:
-            perturbed_attr = _get_explanation_vector(
-                explainer, x_prime, n_features
-            )
-        except Exception:
-            continue
+        perturbed_attr = _get_explanation_vector(
+            explainer,
+            x_prime,
+            n_features,
+            target_class=target_class,
+            expected_target=explained_target,
+        )
 
         # Numerator: ||(e_x - e_x') / e_x||_p  (element-wise percent change)
-        numerator_vec = _element_wise_percent_change(
-            original_attr, perturbed_attr, epsilon_min
-        )
-        numerator = np.linalg.norm(numerator_vec, ord=norm_ord)
+        numerator_vec = _element_wise_percent_change(original_attr, perturbed_attr, epsilon_min)
+        numerator = _vector_norm(numerator_vec, norm_ord)
 
         # Denominator: max(||(x - x') / x||_p, epsilon_min)
-        denom_vec = _element_wise_percent_change(
-            instance, x_prime, epsilon_min
-        )
-        denom = max(np.linalg.norm(denom_vec, ord=norm_ord), epsilon_min)
+        denom_vec = _element_wise_percent_change(instance, x_prime, epsilon_min)
+        denom = max(_vector_norm(denom_vec, norm_ord), epsilon_min)
 
         ratio = float(numerator / denom)
         per_perturbation_scores.append(ratio)
 
-        # Collect RRS ratio for theoretical bound
+        # Collect components for the sampled Equation 4 RHS diagnostic.
         if representation_fn is not None:
-            try:
-                repr_pert = np.asarray(
-                    representation_fn(x_prime), dtype=np.float64
-                ).flatten()
-                repr_pct = _element_wise_percent_change(
-                    repr_orig, repr_pert, epsilon_min
-                )
-                repr_denom = max(
-                    np.linalg.norm(repr_pct, ord=norm_ord), epsilon_min
-                )
-                rrs_ratio = float(numerator / repr_denom)
-                rrs_scores_for_bound.append(rrs_ratio)
-            except Exception:
-                pass
+            if repr_orig is None:
+                raise RuntimeError("representation_fn anchor evaluation is unavailable")
+            repr_pert = _evaluate_single_vector_fn(
+                representation_fn, x_prime, name="representation_fn"
+            )
+            if repr_pert.shape != repr_orig.shape:
+                raise ValueError("representation_fn changed output shape across perturbations.")
+            repr_pct = _element_wise_percent_change(repr_orig, repr_pert, epsilon_min)
+            repr_denom = max(_vector_norm(repr_pct, norm_ord), epsilon_min)
+            rrs_ratio = float(numerator / repr_denom)
+            rrs_scores_for_bound.append(rrs_ratio)
+            representation_differences.append((instance - x_prime, repr_orig - repr_pert))
 
     n_valid = len(per_perturbation_scores)
 
-    # Warn if too few valid perturbations for statistically reliable results
+    # Emit an explicitly heuristic low-count diagnostic.
     if 0 < n_valid < 5:
         warnings.warn(
             f"Only {n_valid}/{n_perturbations} perturbations passed the "
-            f"same-class filter. RIS score may be statistically unreliable. "
-            f"Consider increasing n_perturbations or noise_scale.",
+            f"same-class filter. RIS has fewer than five valid draws; this "
+            f"warning threshold is a library diagnostic, not a paper criterion. "
+            f"Consider increasing n_perturbations or decreasing noise_scale.",
             stacklevel=2,
         )
 
-    agg_result = _aggregate_perturbation_scores(
-        per_perturbation_scores, aggregation
-    )
+    agg_result = _aggregate_perturbation_scores(per_perturbation_scores, aggregation)
 
-    # Compute theoretical bound (Equation 4): RIS ≤ λ₁ · L₁ · RRS
-    # where λ₁ = ||L(x)||_p / ||x||_p and L₁ is the local Lipschitz
-    # constant estimated as max ||L(x) - L(x')||_p / ||x - x'||_p.
-    theoretical_bound = None
+    # Equation 4's RHS is λ₁ · L₁ · RRS, where
+    # λ₁ = ||L(x)||_p / ||x||_p. Here both L₁ and RRS are finite sampled
+    # maxima, so this is only a diagnostic estimate of that RHS. It is not a
+    # certified Lipschitz constant or a theoretical upper bound.
+    empirical_bound_estimate = None
     if representation_fn is not None and rrs_scores_for_bound:
-        try:
-            # repr_orig already computed before the perturbation loop
-            repr_norm = np.linalg.norm(repr_orig, ord=norm_ord)
-            input_norm = np.linalg.norm(instance, ord=norm_ord)
-            lambda_1 = repr_norm / max(input_norm, epsilon_min)
-
+        if repr_orig is None:
+            raise RuntimeError("representation_fn anchor evaluation is unavailable")
+        repr_norm = _vector_norm(repr_orig, norm_ord)
+        input_norm = _vector_norm(instance, norm_ord)
+        l1_estimates: List[float] = []
+        for input_delta, representation_delta in representation_differences:
+            input_diff = _vector_norm(input_delta, norm_ord)
+            if input_diff == 0:
+                continue
+            representation_diff = _vector_norm(representation_delta, norm_ord)
+            l1_estimates.append(representation_diff / input_diff)
+        # λ₁ is undefined for a zero-norm anchor. Do not manufacture a finite
+        # value with epsilon regularisation and call it Equation 4's RHS.
+        if input_norm != 0 and l1_estimates:
+            lambda_1 = repr_norm / input_norm
+            l1_est = float(np.max(l1_estimates))
             max_rrs = float(np.max(rrs_scores_for_bound))
-
-            # Estimate L₁ from valid perturbation pairs
-            l1_estimates = []
-            for i_pert in range(n_perturbations):
-                x_p = perturbed[i_pert]
-                try:
-                    pred_p = _get_predicted_class(model, x_p)
-                except Exception:
-                    continue
-                if pred_p != original_class:
-                    continue
-                try:
-                    repr_p = np.asarray(
-                        representation_fn(x_p), dtype=np.float64
-                    ).flatten()
-                    input_diff = np.linalg.norm(
-                        instance - x_p, ord=norm_ord
-                    )
-                    repr_diff = np.linalg.norm(
-                        repr_orig - repr_p, ord=norm_ord
-                    )
-                    if input_diff > epsilon_min:
-                        l1_estimates.append(repr_diff / input_diff)
-                except Exception:
-                    continue
-            if l1_estimates:
-                l1_est = float(np.max(l1_estimates))
-                theoretical_bound = float(lambda_1 * l1_est * max_rrs)
-        except Exception:
-            theoretical_bound = None
+            empirical_bound_estimate = float(lambda_1 * l1_est * max_rrs)
 
     if not return_details:
         return agg_result["score"]
@@ -735,7 +1087,11 @@ def compute_relative_input_stability(
         "n_valid": n_valid,
         "n_total": n_perturbations,
         "perturbation_scores": agg_result["perturbation_scores"],
-        "theoretical_bound": theoretical_bound,
+        "empirical_bound_estimate": empirical_bound_estimate,
+        "theoretical_bound": None,
+        "aggregation_is_canonical": aggregation == "max",
+        "perturbation_space": "preprocessed_input_space",
+        "discrete_perturbation_contract": "paper_text_bernoulli_replacement",
     }
 
 
@@ -752,7 +1108,8 @@ def compute_batch_relative_input_stability(
     discrete_flip_prob: float = 0.03,
     max_instances: Optional[int] = None,
     seed: Optional[int] = None,
-) -> Dict[str, Union[float, list]]:
+    target_class: Optional[int] = None,
+) -> dict:
     """
     Compute Relative Input Stability over a batch of instances.
 
@@ -761,43 +1118,61 @@ def compute_batch_relative_input_stability(
         model: Model adapter.
         X: Input data (2D array of shape (n_instances, n_features)).
         n_perturbations: Perturbations per instance.
-        noise_scale: Gaussian noise std for continuous features.
+        noise_scale: Unbounded Gaussian noise standard deviation for
+            continuous features in the supplied feature space.
         norm_ord: Norm order.
         epsilon_min: Division-by-zero floor.
-        aggregation: Aggregation mode ("max", "mean", "median").
+        aggregation: ``"max"`` implements Equation 2; ``"mean"`` and
+            ``"median"`` are noncanonical summaries.
         feature_types: Feature type array ("continuous"/"discrete").
-        discrete_flip_prob: Flip probability for discrete features.
+        discrete_flip_prob: Bernoulli replacement success probability.
         max_instances: Maximum instances to evaluate (None = all).
-        seed: Random seed.
+        seed: Base seed for per-instance local perturbation generators only.
 
     Returns:
-        Dictionary with mean, std, max, min, scores, n_evaluated.
+        Dictionary with statistics over defined scores, plus ``n_attempted``
+        and ``n_undefined`` so same-class-filter failures are explicit.
     """
-    X = np.asarray(X, dtype=np.float64)
+    X = _validate_batch(X)
     n = len(X)
     if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, (int, np.integer)):
+            raise TypeError("max_instances must be an integer or None.")
+        if max_instances <= 0:
+            raise ValueError("max_instances must be greater than zero.")
         n = min(n, max_instances)
 
-    scores = []
+    scores: List[float] = []
     for i in range(n):
-        try:
-            score = compute_relative_input_stability(
-                explainer, model, X[i],
-                n_perturbations=n_perturbations,
-                noise_scale=noise_scale, norm_ord=norm_ord,
-                epsilon_min=epsilon_min, aggregation=aggregation,
-                feature_types=feature_types,
-                discrete_flip_prob=discrete_flip_prob,
-                seed=seed + i if seed is not None else None,
-            )
-            if not np.isnan(score):
-                scores.append(score)
-        except Exception:
-            continue
+        result = compute_relative_input_stability(
+            explainer,
+            model,
+            X[i],
+            n_perturbations=n_perturbations,
+            noise_scale=noise_scale,
+            norm_ord=norm_ord,
+            epsilon_min=epsilon_min,
+            aggregation=aggregation,
+            feature_types=feature_types,
+            discrete_flip_prob=discrete_flip_prob,
+            seed=seed + i if seed is not None else None,
+            target_class=target_class,
+        )
+        score = _require_scalar_result(result, "compute_relative_input_stability")
+        if not np.isnan(score):
+            scores.append(score)
 
     if not scores:
-        return {"mean": float("nan"), "std": 0.0, "max": float("nan"),
-                "min": float("nan"), "scores": [], "n_evaluated": 0}
+        return {
+            "mean": float("nan"),
+            "std": 0.0,
+            "max": float("nan"),
+            "min": float("nan"),
+            "scores": [],
+            "n_evaluated": 0,
+            "n_attempted": n,
+            "n_undefined": n,
+        }
 
     return {
         "mean": float(np.mean(scores)),
@@ -806,12 +1181,15 @@ def compute_batch_relative_input_stability(
         "min": float(np.min(scores)),
         "scores": scores,
         "n_evaluated": len(scores),
+        "n_attempted": n,
+        "n_undefined": n - len(scores),
     }
 
 
 # =============================================================================
 # Relative Representation Stability (Agarwal et al., 2022 — Equation 3)
 # =============================================================================
+
 
 def compute_relative_representation_stability(
     explainer: BaseExplainer,
@@ -827,6 +1205,7 @@ def compute_relative_representation_stability(
     discrete_flip_prob: float = 0.03,
     seed: Optional[int] = None,
     return_details: bool = False,
+    target_class: Optional[int] = None,
 ) -> Union[float, dict]:
     """
     Compute Relative Representation Stability (Agarwal et al., 2022, Eq 3).
@@ -842,23 +1221,34 @@ def compute_relative_representation_stability(
     embeddings). This metric captures instability that arises when the model
     uses different internal logic paths for similar inputs.
 
-    A higher score indicates higher instability. Lower is better.
+    This implementation uses the paper/Quantus element-wise percent-change
+    interpretation. The later OpenXAI author implementation uses ratios of
+    whole-vector norms instead, so its numeric scores are not interchangeable.
+
+    A higher score is greater measured instability under this equation and
+    perturbation contract.
+
+    With finitely many generated perturbations, ``aggregation="max"`` is a
+    sampled maximum and need not equal the full-neighbourhood maximum.
 
     Args:
         explainer: Explainer instance with .explain() method.
         model: Model adapter with predict() or predict_proba().
         instance: Input instance (1D array).
-        representation_fn: Callable that maps input (1D or 2D array) to
-            internal model representation (1D or 2D array). E.g., the
-            pre-ReLU output of the first hidden layer.
+        representation_fn: Callable receiving one 1D input and returning an
+            internal representation as either a 1D vector or one-row 2D
+            array. E.g., the pre-ReLU output of the first hidden layer.
         n_perturbations: Number of perturbations. Default: 50.
-        noise_scale: Gaussian noise std. Default: 0.05.
+        noise_scale: Gaussian noise standard deviation in the supplied feature
+            space. It is unbounded; no data-bound clipping is applied.
         norm_ord: Norm order. Default: 2.
         epsilon_min: Division-by-zero floor. Default: 1e-7.
-        aggregation: "max" (default), "mean", or "median".
+        aggregation: ``"max"`` implements Equation 3; ``"mean"`` and
+            ``"median"`` are noncanonical summaries.
         feature_types: Feature type array ("continuous"/"discrete").
-        discrete_flip_prob: Flip probability for discrete features.
-        seed: Random seed.
+        discrete_flip_prob: Bernoulli replacement success probability.
+        seed: Seed for the local perturbation generator only; it does not seed
+            the explainer, model, or representation_fn.
         return_details: If True, return diagnostic dict.
 
     Returns:
@@ -868,27 +1258,32 @@ def compute_relative_representation_stability(
     Reference:
         Agarwal et al. (2022). Equation 3.
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
+    _validate_relative_parameters(
+        n_perturbations=n_perturbations,
+        noise_scale=noise_scale,
+        norm_ord=norm_ord,
+        epsilon_min=epsilon_min,
+        aggregation=aggregation,
+    )
     n_features = len(instance)
     rng = np.random.default_rng(seed)
 
-    valid_aggs = {"max", "mean", "median"}
-    if aggregation not in valid_aggs:
-        raise ValueError(
-            f"aggregation must be one of {valid_aggs}, got '{aggregation}'"
-        )
-
     # Get original explanation, prediction, and representation
-    original_attr = _get_explanation_vector(explainer, instance, n_features)
+    original_attr, explained_target = _get_explanation_vector_and_target(
+        explainer, instance, n_features, target_class=target_class
+    )
     original_class = _get_predicted_class(model, instance)
-    repr_orig = np.asarray(
-        representation_fn(instance), dtype=np.float64
-    ).flatten()
+    repr_orig = _evaluate_single_vector_fn(representation_fn, instance, name="representation_fn")
 
     # Generate perturbations
     perturbed = _generate_mixed_perturbations(
-        instance, n_perturbations, noise_scale, rng,
-        feature_types=feature_types, discrete_flip_prob=discrete_flip_prob,
+        instance,
+        n_perturbations,
+        noise_scale,
+        rng,
+        feature_types=feature_types,
+        discrete_flip_prob=discrete_flip_prob,
     )
 
     # Evaluate each perturbation
@@ -898,53 +1293,46 @@ def compute_relative_representation_stability(
         x_prime = perturbed[i]
 
         # Same-class filter
-        try:
-            pred_class = _get_predicted_class(model, x_prime)
-        except Exception:
-            continue
+        pred_class = _get_predicted_class(model, x_prime)
         if pred_class != original_class:
             continue
 
         # Get perturbed explanation and representation
-        try:
-            perturbed_attr = _get_explanation_vector(
-                explainer, x_prime, n_features
-            )
-            repr_pert = np.asarray(
-                representation_fn(x_prime), dtype=np.float64
-            ).flatten()
-        except Exception:
-            continue
+        perturbed_attr = _get_explanation_vector(
+            explainer,
+            x_prime,
+            n_features,
+            target_class=target_class,
+            expected_target=explained_target,
+        )
+        repr_pert = _evaluate_single_vector_fn(representation_fn, x_prime, name="representation_fn")
+        if repr_pert.shape != repr_orig.shape:
+            raise ValueError("representation_fn changed output shape across perturbations.")
 
         # Numerator: ||(e_x - e_x') / e_x||_p
-        numerator_vec = _element_wise_percent_change(
-            original_attr, perturbed_attr, epsilon_min
-        )
-        numerator = np.linalg.norm(numerator_vec, ord=norm_ord)
+        numerator_vec = _element_wise_percent_change(original_attr, perturbed_attr, epsilon_min)
+        numerator = _vector_norm(numerator_vec, norm_ord)
 
         # Denominator: max(||(L_x - L_x') / L_x||_p, epsilon_min)
-        denom_vec = _element_wise_percent_change(
-            repr_orig, repr_pert, epsilon_min
-        )
-        denom = max(np.linalg.norm(denom_vec, ord=norm_ord), epsilon_min)
+        denom_vec = _element_wise_percent_change(repr_orig, repr_pert, epsilon_min)
+        denom = max(_vector_norm(denom_vec, norm_ord), epsilon_min)
 
         ratio = float(numerator / denom)
         per_perturbation_scores.append(ratio)
 
     n_valid = len(per_perturbation_scores)
 
-    # Warn if too few valid perturbations for statistically reliable results
+    # Emit an explicitly heuristic low-count diagnostic.
     if 0 < n_valid < 5:
         warnings.warn(
             f"Only {n_valid}/{n_perturbations} perturbations passed the "
-            f"same-class filter. RRS score may be statistically unreliable. "
-            f"Consider increasing n_perturbations or noise_scale.",
+            f"same-class filter. RRS has fewer than five valid draws; this "
+            f"warning threshold is a library diagnostic, not a paper criterion. "
+            f"Consider increasing n_perturbations or decreasing noise_scale.",
             stacklevel=2,
         )
 
-    agg_result = _aggregate_perturbation_scores(
-        per_perturbation_scores, aggregation
-    )
+    agg_result = _aggregate_perturbation_scores(per_perturbation_scores, aggregation)
 
     if not return_details:
         return agg_result["score"]
@@ -957,6 +1345,9 @@ def compute_relative_representation_stability(
         "n_valid": n_valid,
         "n_total": n_perturbations,
         "perturbation_scores": agg_result["perturbation_scores"],
+        "aggregation_is_canonical": aggregation == "max",
+        "perturbation_space": "preprocessed_input_space",
+        "discrete_perturbation_contract": "paper_text_bernoulli_replacement",
     }
 
 
@@ -974,7 +1365,8 @@ def compute_batch_relative_representation_stability(
     discrete_flip_prob: float = 0.03,
     max_instances: Optional[int] = None,
     seed: Optional[int] = None,
-) -> Dict[str, Union[float, list]]:
+    target_class: Optional[int] = None,
+) -> dict:
     """
     Compute Relative Representation Stability over a batch of instances.
 
@@ -984,44 +1376,62 @@ def compute_batch_relative_representation_stability(
         X: Input data (2D array).
         representation_fn: Model representation extractor.
         n_perturbations: Perturbations per instance.
-        noise_scale: Gaussian noise std.
+        noise_scale: Unbounded Gaussian noise standard deviation in the
+            supplied feature space.
         norm_ord: Norm order.
         epsilon_min: Division-by-zero floor.
-        aggregation: Aggregation mode.
+        aggregation: ``"max"`` implements Equation 3; ``"mean"`` and
+            ``"median"`` are noncanonical summaries.
         feature_types: Feature type array.
-        discrete_flip_prob: Flip probability for discrete features.
+        discrete_flip_prob: Bernoulli replacement success probability.
         max_instances: Maximum instances to evaluate.
-        seed: Random seed.
+        seed: Base seed for per-instance local perturbation generators only.
 
     Returns:
-        Dictionary with mean, std, max, min, scores, n_evaluated.
+        Dictionary with statistics over defined scores, plus ``n_attempted``
+        and ``n_undefined`` so same-class-filter failures are explicit.
     """
-    X = np.asarray(X, dtype=np.float64)
+    X = _validate_batch(X)
     n = len(X)
     if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, (int, np.integer)):
+            raise TypeError("max_instances must be an integer or None.")
+        if max_instances <= 0:
+            raise ValueError("max_instances must be greater than zero.")
         n = min(n, max_instances)
 
-    scores = []
+    scores: List[float] = []
     for i in range(n):
-        try:
-            score = compute_relative_representation_stability(
-                explainer, model, X[i],
-                representation_fn=representation_fn,
-                n_perturbations=n_perturbations,
-                noise_scale=noise_scale, norm_ord=norm_ord,
-                epsilon_min=epsilon_min, aggregation=aggregation,
-                feature_types=feature_types,
-                discrete_flip_prob=discrete_flip_prob,
-                seed=seed + i if seed is not None else None,
-            )
-            if not np.isnan(score):
-                scores.append(score)
-        except Exception:
-            continue
+        result = compute_relative_representation_stability(
+            explainer,
+            model,
+            X[i],
+            representation_fn=representation_fn,
+            n_perturbations=n_perturbations,
+            noise_scale=noise_scale,
+            norm_ord=norm_ord,
+            epsilon_min=epsilon_min,
+            aggregation=aggregation,
+            feature_types=feature_types,
+            discrete_flip_prob=discrete_flip_prob,
+            seed=seed + i if seed is not None else None,
+            target_class=target_class,
+        )
+        score = _require_scalar_result(result, "compute_relative_representation_stability")
+        if not np.isnan(score):
+            scores.append(score)
 
     if not scores:
-        return {"mean": float("nan"), "std": 0.0, "max": float("nan"),
-                "min": float("nan"), "scores": [], "n_evaluated": 0}
+        return {
+            "mean": float("nan"),
+            "std": 0.0,
+            "max": float("nan"),
+            "min": float("nan"),
+            "scores": [],
+            "n_evaluated": 0,
+            "n_attempted": n,
+            "n_undefined": n,
+        }
 
     return {
         "mean": float(np.mean(scores)),
@@ -1030,12 +1440,15 @@ def compute_batch_relative_representation_stability(
         "min": float(np.min(scores)),
         "scores": scores,
         "n_evaluated": len(scores),
+        "n_attempted": n,
+        "n_undefined": n - len(scores),
     }
 
 
 # =============================================================================
 # Relative Output Stability (Agarwal et al., 2022 — Equation 5)
 # =============================================================================
+
 
 def compute_relative_output_stability(
     explainer: BaseExplainer,
@@ -1051,6 +1464,7 @@ def compute_relative_output_stability(
     discrete_flip_prob: float = 0.03,
     seed: Optional[int] = None,
     return_details: bool = False,
+    target_class: Optional[int] = None,
 ) -> Union[float, dict]:
     """
     Compute Relative Output Stability (Agarwal et al., 2022, Equation 5).
@@ -1067,22 +1481,34 @@ def compute_relative_output_stability(
     change. This is for black-box models where internal representations are
     not accessible.
 
-    A higher score indicates higher instability. Lower is better.
+    The written Equation 5 and Quantus objective use this absolute-logit
+    denominator. The later OpenXAI author implementation applies its generic
+    relative-norm helper to logits; its scores are therefore not directly
+    comparable.
+
+    A higher score is greater measured instability under this equation and
+    perturbation contract.
+
+    With finitely many generated perturbations, ``aggregation="max"`` is a
+    sampled maximum and need not equal the full-neighbourhood maximum.
 
     Args:
         explainer: Explainer instance with .explain() method.
         model: Model adapter with predict() or predict_proba().
         instance: Input instance (1D array).
-        logit_fn: Callable that maps input (1D or 2D array) to output
-            logits (1D or 2D array). E.g., the pre-softmax layer output.
+        logit_fn: Callable receiving one 1D input and returning logits as a
+            1D vector or one-row 2D array. E.g., a pre-softmax layer output.
         n_perturbations: Number of perturbations. Default: 50.
-        noise_scale: Gaussian noise std. Default: 0.05.
+        noise_scale: Gaussian noise standard deviation in the supplied feature
+            space. It is unbounded; no data-bound clipping is applied.
         norm_ord: Norm order. Default: 2.
         epsilon_min: Division-by-zero floor. Default: 1e-7.
-        aggregation: "max" (default), "mean", or "median".
+        aggregation: ``"max"`` implements Equation 5; ``"mean"`` and
+            ``"median"`` are noncanonical summaries.
         feature_types: Feature type array ("continuous"/"discrete").
-        discrete_flip_prob: Flip probability for discrete features.
-        seed: Random seed.
+        discrete_flip_prob: Bernoulli replacement success probability.
+        seed: Seed for the local perturbation generator only; it does not seed
+            the explainer, model, or logit_fn.
         return_details: If True, return diagnostic dict.
 
     Returns:
@@ -1092,27 +1518,32 @@ def compute_relative_output_stability(
     Reference:
         Agarwal et al. (2022). Equation 5.
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
+    _validate_relative_parameters(
+        n_perturbations=n_perturbations,
+        noise_scale=noise_scale,
+        norm_ord=norm_ord,
+        epsilon_min=epsilon_min,
+        aggregation=aggregation,
+    )
     n_features = len(instance)
     rng = np.random.default_rng(seed)
 
-    valid_aggs = {"max", "mean", "median"}
-    if aggregation not in valid_aggs:
-        raise ValueError(
-            f"aggregation must be one of {valid_aggs}, got '{aggregation}'"
-        )
-
     # Get original explanation, prediction, and logits
-    original_attr = _get_explanation_vector(explainer, instance, n_features)
+    original_attr, explained_target = _get_explanation_vector_and_target(
+        explainer, instance, n_features, target_class=target_class
+    )
     original_class = _get_predicted_class(model, instance)
-    logits_orig = np.asarray(
-        logit_fn(instance), dtype=np.float64
-    ).flatten()
+    logits_orig = _evaluate_single_vector_fn(logit_fn, instance, name="logit_fn")
 
     # Generate perturbations
     perturbed = _generate_mixed_perturbations(
-        instance, n_perturbations, noise_scale, rng,
-        feature_types=feature_types, discrete_flip_prob=discrete_flip_prob,
+        instance,
+        n_perturbations,
+        noise_scale,
+        rng,
+        feature_types=feature_types,
+        discrete_flip_prob=discrete_flip_prob,
     )
 
     # Evaluate each perturbation
@@ -1122,52 +1553,47 @@ def compute_relative_output_stability(
         x_prime = perturbed[i]
 
         # Same-class filter
-        try:
-            pred_class = _get_predicted_class(model, x_prime)
-        except Exception:
-            continue
+        pred_class = _get_predicted_class(model, x_prime)
         if pred_class != original_class:
             continue
 
         # Get perturbed explanation and logits
-        try:
-            perturbed_attr = _get_explanation_vector(
-                explainer, x_prime, n_features
-            )
-            logits_pert = np.asarray(
-                logit_fn(x_prime), dtype=np.float64
-            ).flatten()
-        except Exception:
-            continue
+        perturbed_attr = _get_explanation_vector(
+            explainer,
+            x_prime,
+            n_features,
+            target_class=target_class,
+            expected_target=explained_target,
+        )
+        logits_pert = _evaluate_single_vector_fn(logit_fn, x_prime, name="logit_fn")
+        if logits_pert.shape != logits_orig.shape:
+            raise ValueError("logit_fn changed output shape across perturbations.")
 
         # Numerator: ||(e_x - e_x') / e_x||_p  (element-wise percent change)
-        numerator_vec = _element_wise_percent_change(
-            original_attr, perturbed_attr, epsilon_min
-        )
-        numerator = np.linalg.norm(numerator_vec, ord=norm_ord)
+        numerator_vec = _element_wise_percent_change(original_attr, perturbed_attr, epsilon_min)
+        numerator = _vector_norm(numerator_vec, norm_ord)
 
         # Denominator: max(||h(x) - h(x')||_p, epsilon_min)
         # NOTE: Equation 5 uses ABSOLUTE difference, not percent change
         logit_diff = logits_orig - logits_pert
-        denom = max(np.linalg.norm(logit_diff, ord=norm_ord), epsilon_min)
+        denom = max(_vector_norm(logit_diff, norm_ord), epsilon_min)
 
         ratio = float(numerator / denom)
         per_perturbation_scores.append(ratio)
 
     n_valid = len(per_perturbation_scores)
 
-    # Warn if too few valid perturbations for statistically reliable results
+    # Emit an explicitly heuristic low-count diagnostic.
     if 0 < n_valid < 5:
         warnings.warn(
             f"Only {n_valid}/{n_perturbations} perturbations passed the "
-            f"same-class filter. ROS score may be statistically unreliable. "
-            f"Consider increasing n_perturbations or noise_scale.",
+            f"same-class filter. ROS has fewer than five valid draws; this "
+            f"warning threshold is a library diagnostic, not a paper criterion. "
+            f"Consider increasing n_perturbations or decreasing noise_scale.",
             stacklevel=2,
         )
 
-    agg_result = _aggregate_perturbation_scores(
-        per_perturbation_scores, aggregation
-    )
+    agg_result = _aggregate_perturbation_scores(per_perturbation_scores, aggregation)
 
     if not return_details:
         return agg_result["score"]
@@ -1180,6 +1606,10 @@ def compute_relative_output_stability(
         "n_valid": n_valid,
         "n_total": n_perturbations,
         "perturbation_scores": agg_result["perturbation_scores"],
+        "aggregation_is_canonical": aggregation == "max",
+        "output_space": "logits",
+        "perturbation_space": "preprocessed_input_space",
+        "discrete_perturbation_contract": "paper_text_bernoulli_replacement",
     }
 
 
@@ -1197,7 +1627,8 @@ def compute_batch_relative_output_stability(
     discrete_flip_prob: float = 0.03,
     max_instances: Optional[int] = None,
     seed: Optional[int] = None,
-) -> Dict[str, Union[float, list]]:
+    target_class: Optional[int] = None,
+) -> dict:
     """
     Compute Relative Output Stability over a batch of instances.
 
@@ -1207,44 +1638,62 @@ def compute_batch_relative_output_stability(
         X: Input data (2D array).
         logit_fn: Model logit extractor.
         n_perturbations: Perturbations per instance.
-        noise_scale: Gaussian noise std.
+        noise_scale: Unbounded Gaussian noise standard deviation in the
+            supplied feature space.
         norm_ord: Norm order.
         epsilon_min: Division-by-zero floor.
-        aggregation: Aggregation mode.
+        aggregation: ``"max"`` implements Equation 5; ``"mean"`` and
+            ``"median"`` are noncanonical summaries.
         feature_types: Feature type array.
-        discrete_flip_prob: Flip probability for discrete features.
+        discrete_flip_prob: Bernoulli replacement success probability.
         max_instances: Maximum instances to evaluate.
-        seed: Random seed.
+        seed: Base seed for per-instance local perturbation generators only.
 
     Returns:
-        Dictionary with mean, std, max, min, scores, n_evaluated.
+        Dictionary with statistics over defined scores, plus ``n_attempted``
+        and ``n_undefined`` so same-class-filter failures are explicit.
     """
-    X = np.asarray(X, dtype=np.float64)
+    X = _validate_batch(X)
     n = len(X)
     if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, (int, np.integer)):
+            raise TypeError("max_instances must be an integer or None.")
+        if max_instances <= 0:
+            raise ValueError("max_instances must be greater than zero.")
         n = min(n, max_instances)
 
-    scores = []
+    scores: List[float] = []
     for i in range(n):
-        try:
-            score = compute_relative_output_stability(
-                explainer, model, X[i],
-                logit_fn=logit_fn,
-                n_perturbations=n_perturbations,
-                noise_scale=noise_scale, norm_ord=norm_ord,
-                epsilon_min=epsilon_min, aggregation=aggregation,
-                feature_types=feature_types,
-                discrete_flip_prob=discrete_flip_prob,
-                seed=seed + i if seed is not None else None,
-            )
-            if not np.isnan(score):
-                scores.append(score)
-        except Exception:
-            continue
+        result = compute_relative_output_stability(
+            explainer,
+            model,
+            X[i],
+            logit_fn=logit_fn,
+            n_perturbations=n_perturbations,
+            noise_scale=noise_scale,
+            norm_ord=norm_ord,
+            epsilon_min=epsilon_min,
+            aggregation=aggregation,
+            feature_types=feature_types,
+            discrete_flip_prob=discrete_flip_prob,
+            seed=seed + i if seed is not None else None,
+            target_class=target_class,
+        )
+        score = _require_scalar_result(result, "compute_relative_output_stability")
+        if not np.isnan(score):
+            scores.append(score)
 
     if not scores:
-        return {"mean": float("nan"), "std": 0.0, "max": float("nan"),
-                "min": float("nan"), "scores": [], "n_evaluated": 0}
+        return {
+            "mean": float("nan"),
+            "std": 0.0,
+            "max": float("nan"),
+            "min": float("nan"),
+            "scores": [],
+            "n_evaluated": 0,
+            "n_attempted": n,
+            "n_undefined": n,
+        }
 
     return {
         "mean": float(np.mean(scores)),
@@ -1253,12 +1702,15 @@ def compute_batch_relative_output_stability(
         "min": float(np.min(scores)),
         "scores": scores,
         "n_evaluated": len(scores),
+        "n_attempted": n,
+        "n_undefined": n - len(scores),
     }
 
 
 # =============================================================================
 # Relative Stability — All-in-One Convenience (Agarwal et al., 2022)
 # =============================================================================
+
 
 def compute_relative_stability(
     explainer: BaseExplainer,
@@ -1275,6 +1727,7 @@ def compute_relative_stability(
     discrete_flip_prob: float = 0.03,
     seed: Optional[int] = None,
     return_details: bool = False,
+    target_class: Optional[int] = None,
 ) -> dict:
     """
     Compute all applicable Relative Stability metrics in a single pass.
@@ -1291,13 +1744,16 @@ def compute_relative_stability(
             representation.
         logit_fn: Optional callable for ROS. Maps input → output logits.
         n_perturbations: Number of perturbations. Default: 50.
-        noise_scale: Gaussian noise std. Default: 0.05.
+        noise_scale: Unbounded Gaussian noise standard deviation in the
+            supplied feature space. No data-bound clipping is applied.
         norm_ord: Norm order. Default: 2.
         epsilon_min: Division-by-zero floor. Default: 1e-7.
-        aggregation: "max" (default), "mean", or "median".
+        aggregation: ``"max"`` implements Equations 2/3/5; ``"mean"`` and
+            ``"median"`` are noncanonical summaries.
         feature_types: Feature type array.
-        discrete_flip_prob: Flip probability for discrete features.
-        seed: Random seed.
+        discrete_flip_prob: Bernoulli replacement success probability.
+        seed: Seed for the local perturbation generator only; it does not seed
+            stochastic explainers, models, or supplied callables.
         return_details: If True, each metric value is a diagnostic dict.
             If False, each is a float.
 
@@ -1315,132 +1771,125 @@ def compute_relative_stability(
         ... )
         >>> print(f"RIS={result['ris']:.4f}, RRS={result['rrs']:.4f}")
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
+    _validate_relative_parameters(
+        n_perturbations=n_perturbations,
+        noise_scale=noise_scale,
+        norm_ord=norm_ord,
+        epsilon_min=epsilon_min,
+        aggregation=aggregation,
+    )
     n_features = len(instance)
     rng = np.random.default_rng(seed)
 
-    valid_aggs = {"max", "mean", "median"}
-    if aggregation not in valid_aggs:
-        raise ValueError(
-            f"aggregation must be one of {valid_aggs}, got '{aggregation}'"
-        )
-
     # Get original explanation and prediction
-    original_attr = _get_explanation_vector(explainer, instance, n_features)
+    original_attr, explained_target = _get_explanation_vector_and_target(
+        explainer, instance, n_features, target_class=target_class
+    )
     original_class = _get_predicted_class(model, instance)
 
     # Get original representation and logits if needed
     repr_orig = None
     if representation_fn is not None:
-        repr_orig = np.asarray(
-            representation_fn(instance), dtype=np.float64
-        ).flatten()
+        repr_orig = _evaluate_single_vector_fn(
+            representation_fn, instance, name="representation_fn"
+        )
 
     logits_orig = None
     if logit_fn is not None:
-        logits_orig = np.asarray(
-            logit_fn(instance), dtype=np.float64
-        ).flatten()
+        logits_orig = _evaluate_single_vector_fn(logit_fn, instance, name="logit_fn")
 
     # Generate perturbations (shared across all metrics)
     perturbed = _generate_mixed_perturbations(
-        instance, n_perturbations, noise_scale, rng,
-        feature_types=feature_types, discrete_flip_prob=discrete_flip_prob,
+        instance,
+        n_perturbations,
+        noise_scale,
+        rng,
+        feature_types=feature_types,
+        discrete_flip_prob=discrete_flip_prob,
     )
 
     # Collect per-perturbation scores for each metric
-    ris_scores = []
-    rrs_scores = [] if representation_fn is not None else None
-    ros_scores = [] if logit_fn is not None else None
+    ris_scores: List[float] = []
+    rrs_scores: List[float] = []
+    ros_scores: List[float] = []
 
     for i in range(n_perturbations):
         x_prime = perturbed[i]
 
         # Same-class filter
-        try:
-            pred_class = _get_predicted_class(model, x_prime)
-        except Exception:
-            continue
+        pred_class = _get_predicted_class(model, x_prime)
         if pred_class != original_class:
             continue
 
         # Get perturbed explanation (shared)
-        try:
-            perturbed_attr = _get_explanation_vector(
-                explainer, x_prime, n_features
-            )
-        except Exception:
-            continue
+        perturbed_attr = _get_explanation_vector(
+            explainer,
+            x_prime,
+            n_features,
+            target_class=target_class,
+            expected_target=explained_target,
+        )
 
         # Shared numerator: ||(e_x - e_x') / e_x||_p
-        numerator_vec = _element_wise_percent_change(
-            original_attr, perturbed_attr, epsilon_min
-        )
-        numerator = np.linalg.norm(numerator_vec, ord=norm_ord)
+        numerator_vec = _element_wise_percent_change(original_attr, perturbed_attr, epsilon_min)
+        numerator = _vector_norm(numerator_vec, norm_ord)
 
         # RIS denominator: max(||(x - x') / x||_p, epsilon_min)
-        ris_denom_vec = _element_wise_percent_change(
-            instance, x_prime, epsilon_min
-        )
-        ris_denom = max(
-            np.linalg.norm(ris_denom_vec, ord=norm_ord), epsilon_min
-        )
+        ris_denom_vec = _element_wise_percent_change(instance, x_prime, epsilon_min)
+        ris_denom = max(_vector_norm(ris_denom_vec, norm_ord), epsilon_min)
         ris_scores.append(float(numerator / ris_denom))
 
         # RRS denominator: max(||(L_x - L_x') / L_x||_p, epsilon_min)
         if representation_fn is not None:
-            try:
-                repr_pert = np.asarray(
-                    representation_fn(x_prime), dtype=np.float64
-                ).flatten()
-                rrs_denom_vec = _element_wise_percent_change(
-                    repr_orig, repr_pert, epsilon_min
-                )
-                rrs_denom = max(
-                    np.linalg.norm(rrs_denom_vec, ord=norm_ord), epsilon_min
-                )
-                rrs_scores.append(float(numerator / rrs_denom))
-            except Exception:
-                pass
+            if repr_orig is None:
+                raise RuntimeError("representation_fn anchor evaluation is unavailable")
+            repr_pert = _evaluate_single_vector_fn(
+                representation_fn, x_prime, name="representation_fn"
+            )
+            if repr_pert.shape != repr_orig.shape:
+                raise ValueError("representation_fn changed output shape across perturbations.")
+            rrs_denom_vec = _element_wise_percent_change(repr_orig, repr_pert, epsilon_min)
+            rrs_denom = max(_vector_norm(rrs_denom_vec, norm_ord), epsilon_min)
+            rrs_scores.append(float(numerator / rrs_denom))
 
         # ROS denominator: max(||h(x) - h(x')||_p, epsilon_min)
         if logit_fn is not None:
-            try:
-                logits_pert = np.asarray(
-                    logit_fn(x_prime), dtype=np.float64
-                ).flatten()
-                logit_diff = logits_orig - logits_pert
-                ros_denom = max(
-                    np.linalg.norm(logit_diff, ord=norm_ord), epsilon_min
-                )
-                ros_scores.append(float(numerator / ros_denom))
-            except Exception:
-                pass
+            if logits_orig is None:
+                raise RuntimeError("logit_fn anchor evaluation is unavailable")
+            logits_pert = _evaluate_single_vector_fn(logit_fn, x_prime, name="logit_fn")
+            if logits_pert.shape != logits_orig.shape:
+                raise ValueError("logit_fn changed output shape across perturbations.")
+            logit_diff = logits_orig - logits_pert
+            ros_denom = max(_vector_norm(logit_diff, norm_ord), epsilon_min)
+            ros_scores.append(float(numerator / ros_denom))
 
     # Aggregate
     ris_agg = _aggregate_perturbation_scores(ris_scores, aggregation)
     rrs_agg = (
         _aggregate_perturbation_scores(rrs_scores, aggregation)
-        if rrs_scores is not None else None
+        if representation_fn is not None
+        else None
     )
     ros_agg = (
-        _aggregate_perturbation_scores(ros_scores, aggregation)
-        if ros_scores is not None else None
+        _aggregate_perturbation_scores(ros_scores, aggregation) if logit_fn is not None else None
     )
 
     n_valid = len(ris_scores)
 
-    # Warn if too few valid perturbations for statistically reliable results
+    # Emit an explicitly heuristic low-count diagnostic.
     if 0 < n_valid < 5:
         warnings.warn(
             f"Only {n_valid}/{n_perturbations} perturbations passed the "
-            f"same-class filter. Relative stability scores may be "
-            f"statistically unreliable. Consider increasing "
-            f"n_perturbations or noise_scale.",
+            f"same-class filter. Relative stability has fewer than five valid "
+            f"draws; this warning threshold is a library diagnostic, not a "
+            f"paper criterion. Consider increasing "
+            f"n_perturbations or decreasing noise_scale.",
             stacklevel=2,
         )
 
     if return_details:
+
         def _build_detail(agg, n_v, n_t):
             if agg is None:
                 return None
@@ -1452,18 +1901,21 @@ def compute_relative_stability(
                 "n_valid": n_v,
                 "n_total": n_t,
                 "perturbation_scores": agg["perturbation_scores"],
+                "aggregation_is_canonical": aggregation == "max",
+                "perturbation_space": "preprocessed_input_space",
+                "discrete_perturbation_contract": "paper_text_bernoulli_replacement",
             }
 
         return {
             "ris": _build_detail(ris_agg, n_valid, n_perturbations),
             "rrs": _build_detail(
                 rrs_agg,
-                len(rrs_scores) if rrs_scores is not None else 0,
+                len(rrs_scores),
                 n_perturbations,
             ),
             "ros": _build_detail(
                 ros_agg,
-                len(ros_scores) if ros_scores is not None else 0,
+                len(ros_scores),
                 n_perturbations,
             ),
         }
@@ -1490,6 +1942,7 @@ def compute_batch_relative_stability(
     discrete_flip_prob: float = 0.03,
     max_instances: Optional[int] = None,
     seed: Optional[int] = None,
+    target_class: Optional[int] = None,
 ) -> dict:
     """
     Compute all applicable Relative Stability metrics over a batch.
@@ -1501,58 +1954,74 @@ def compute_batch_relative_stability(
         representation_fn: Optional callable for RRS.
         logit_fn: Optional callable for ROS.
         n_perturbations: Perturbations per instance.
-        noise_scale: Gaussian noise std.
+        noise_scale: Unbounded Gaussian noise standard deviation in the
+            supplied feature space.
         norm_ord: Norm order.
         epsilon_min: Division-by-zero floor.
-        aggregation: Aggregation mode.
+        aggregation: ``"max"`` implements Equations 2/3/5; ``"mean"`` and
+            ``"median"`` are noncanonical summaries.
         feature_types: Feature type array.
-        discrete_flip_prob: Flip probability for discrete features.
+        discrete_flip_prob: Bernoulli replacement success probability.
         max_instances: Maximum instances to evaluate.
-        seed: Random seed.
+        seed: Base seed for per-instance local perturbation generators only.
 
     Returns:
         Dict with keys "ris", "rrs", "ros". Each is a dict with
         mean, std, max, min, scores, n_evaluated (or None if not computed).
     """
-    X = np.asarray(X, dtype=np.float64)
+    X = _validate_batch(X)
     n = len(X)
     if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, (int, np.integer)):
+            raise TypeError("max_instances must be an integer or None.")
+        if max_instances <= 0:
+            raise ValueError("max_instances must be greater than zero.")
         n = min(n, max_instances)
 
-    ris_scores = []
-    rrs_scores = [] if representation_fn is not None else None
-    ros_scores = [] if logit_fn is not None else None
+    ris_scores: List[float] = []
+    rrs_scores: List[float] = []
+    ros_scores: List[float] = []
 
     for i in range(n):
-        try:
-            result = compute_relative_stability(
-                explainer, model, X[i],
-                representation_fn=representation_fn,
-                logit_fn=logit_fn,
-                n_perturbations=n_perturbations,
-                noise_scale=noise_scale, norm_ord=norm_ord,
-                epsilon_min=epsilon_min, aggregation=aggregation,
-                feature_types=feature_types,
-                discrete_flip_prob=discrete_flip_prob,
-                seed=seed + i if seed is not None else None,
-            )
-            if not np.isnan(result["ris"]):
-                ris_scores.append(result["ris"])
-            if rrs_scores is not None and result["rrs"] is not None:
-                if not np.isnan(result["rrs"]):
-                    rrs_scores.append(result["rrs"])
-            if ros_scores is not None and result["ros"] is not None:
-                if not np.isnan(result["ros"]):
-                    ros_scores.append(result["ros"])
-        except Exception:
-            continue
+        result = compute_relative_stability(
+            explainer,
+            model,
+            X[i],
+            representation_fn=representation_fn,
+            logit_fn=logit_fn,
+            n_perturbations=n_perturbations,
+            noise_scale=noise_scale,
+            norm_ord=norm_ord,
+            epsilon_min=epsilon_min,
+            aggregation=aggregation,
+            feature_types=feature_types,
+            discrete_flip_prob=discrete_flip_prob,
+            seed=seed + i if seed is not None else None,
+            target_class=target_class,
+        )
+        if not np.isnan(result["ris"]):
+            ris_scores.append(result["ris"])
+        if result["rrs"] is not None:
+            if not np.isnan(result["rrs"]):
+                rrs_scores.append(result["rrs"])
+        if result["ros"] is not None:
+            if not np.isnan(result["ros"]):
+                ros_scores.append(result["ros"])
 
-    def _batch_stats(scores_list):
+    def _batch_stats(scores_list: Optional[List[float]]) -> Optional[dict]:
         if scores_list is None:
             return None
         if not scores_list:
-            return {"mean": float("nan"), "std": 0.0, "max": float("nan"),
-                    "min": float("nan"), "scores": [], "n_evaluated": 0}
+            return {
+                "mean": float("nan"),
+                "std": 0.0,
+                "max": float("nan"),
+                "min": float("nan"),
+                "scores": [],
+                "n_evaluated": 0,
+                "n_attempted": n,
+                "n_undefined": n,
+            }
         return {
             "mean": float(np.mean(scores_list)),
             "std": float(np.std(scores_list)),
@@ -1560,18 +2029,21 @@ def compute_batch_relative_stability(
             "min": float(np.min(scores_list)),
             "scores": scores_list,
             "n_evaluated": len(scores_list),
+            "n_attempted": n,
+            "n_undefined": n - len(scores_list),
         }
 
     return {
         "ris": _batch_stats(ris_scores),
-        "rrs": _batch_stats(rrs_scores),
-        "ros": _batch_stats(ros_scores),
+        "rrs": _batch_stats(rrs_scores if representation_fn is not None else None),
+        "ros": _batch_stats(ros_scores if logit_fn is not None else None),
     }
 
 
 # =============================================================================
 # Consistency (Dasgupta et al., 2022 — ICML)
 # =============================================================================
+
 
 def _get_top_k_features(
     attribution_vector: np.ndarray,
@@ -1597,7 +2069,7 @@ def _get_top_k_features(
 def _get_model_prediction(
     model,
     instance: np.ndarray,
-) -> int:
+):
     """
     Get the predicted class label for a single instance.
 
@@ -1608,27 +2080,10 @@ def _get_model_prediction(
         instance: 1D input array.
 
     Returns:
-        Integer predicted class label.
+        Predicted label or output-column index. Arbitrary label dtypes are
+        preserved when the model's ``predict`` method returns labels.
     """
-    instance_2d = instance.reshape(1, -1)
-
-    if hasattr(model, 'predict_proba'):
-        proba = model.predict_proba(instance_2d)
-        if isinstance(proba, np.ndarray) and proba.ndim >= 1:
-            if proba.ndim == 2:
-                return int(np.argmax(proba[0]))
-            else:
-                return int(np.argmax(proba))
-
-    if hasattr(model, 'predict'):
-        pred = model.predict(instance_2d)
-        if isinstance(pred, np.ndarray):
-            pred = pred.flatten()[0]
-        return int(pred)
-
-    raise ValueError(
-        "Model must have a predict() or predict_proba() method."
-    )
+    return _get_predicted_class(model, instance)
 
 
 def compute_consistency(
@@ -1636,52 +2091,61 @@ def compute_consistency(
     model,
     X: np.ndarray,
     top_k: int = 3,
-    max_pairs: int = None,
-    seed: int = None,
+    max_pairs: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> float:
     """
-    Compute Consistency of an explanation method (Dasgupta et al., 2022).
+    Compute a top-k-discretised empirical Consistency estimate.
 
-    Consistency measures the probability that two inputs receiving the
-    **same explanation** (identical top-k important features) also receive
-    the **same prediction**:
+    Dasgupta et al. define global consistency as the expected local
+    probability that a second input receiving the same explanation also
+    receives the same prediction. Their Section 4.2 explicitly permits a
+    discretisation ``psi`` for continuous explanation spaces. This endpoint
+    chooses ``psi`` to be the unordered set of top-k absolute-attribution
+    feature indices:
 
-        Consistency = P( f(x) = f(x') | E(x) = E(x') )
+        m_c = E_x[P(f(x') = f(x) | psi(E(x')) = psi(E(x)))].
 
-    where E(x) = E(x') means the top-k features by absolute attribution
-    magnitude are the same set, and f(x) = f(x') means the predicted
-    class labels match.
+    This is one declared operationalisation, not a unique canonical
+    discretisation. It intentionally ignores attribution sign and magnitude.
 
-    A higher score indicates more faithful explanations — the explanation
-    captures the model's decision boundary well. A score of 1.0 means
-    that whenever two instances have the same important features, the
-    model always predicts the same class for them.
+    The exact branch implements the paper's finite-sample estimator: it
+    computes one leave-self-out local score per query and averages those
+    scores with equal query weight. A query whose discretised explanation is
+    unique contributes zero because its consistency is unverifiable from the
+    sample. A higher value is greater empirical conditional prediction
+    agreement under this discretisation.
 
     The metric is operationalised by:
       1. Computing explanations for all instances in X.
       2. Discretising each explanation to its top-k feature set.
       3. Grouping instances that share the same top-k set.
-      4. For every pair within each group, checking prediction agreement.
-      5. Returning the fraction of agreeing pairs across all groups.
+      4. Computing prediction agreement with every same-group peer for each
+         query, excluding the query itself.
+      5. Averaging the query-local scores, not pooling unordered pairs.
 
     Args:
         explainer: Explainer instance with .explain() method.
         model: Model adapter with predict() or predict_proba().
         X: Input data (2D array of shape (n_instances, n_features)).
-            Should contain enough instances for meaningful pair comparisons.
+            At least two instances are required for a defined result. Repeated
+            top-k sets determine how many peer comparisons are available.
         top_k: Number of top features to define the discrete explanation.
-            Default: 3. Should be < n_features. Smaller k gives stricter
-            explanation equivalence (fewer matching pairs but higher
-            precision); larger k gives looser matching.
-        max_pairs: Maximum total pairs to evaluate (None = all pairs).
-            Useful for large datasets where the number of pairs can
-            grow quadratically. If set, pairs are sampled uniformly.
-        seed: Random seed for pair sampling (only used when max_pairs
-            is set).
+            Default: 3. Must be an integer smaller than n_features. The
+            number of possible top-k sets is combinatorial and is not
+            monotone in k, so k must be treated as a reported
+            discretisation parameter.
+        max_pairs: Historical parameter name. If None, compute the exact
+            finite-sample estimator. If set, perform this many with-replacement
+            Monte Carlo draws: sample a query uniformly, then sample one of
+            its same-explanation peers uniformly. This is an unbiased estimate
+            of the same query-weighted target.
+        seed: Random seed for Monte Carlo sampling when max_pairs is set.
 
     Returns:
         Consistency score (float) in [0, 1]. Higher = more consistent.
-        Returns NaN if no matching explanation pairs are found.
+        Returns NaN only when X contains fewer than two instances. If no
+        explanation repeats, the conservative finite-sample estimate is 0.
 
     Example:
         >>> from explainiverse.evaluation import compute_consistency
@@ -1693,9 +2157,11 @@ def compute_consistency(
         Evaluating Faithfulness of Local Explanations. ICML.
         https://proceedings.mlr.press/v162/dasgupta22a.html
     """
-    X = np.asarray(X, dtype=np.float64)
+    X = _validate_batch(X)
     n_instances, n_features = X.shape
 
+    if isinstance(top_k, (bool, np.bool_)) or not isinstance(top_k, (int, np.integer)):
+        raise TypeError("top_k must be an integer.")
     if top_k < 1:
         raise ValueError(f"top_k must be >= 1, got {top_k}")
     if top_k >= n_features:
@@ -1706,87 +2172,85 @@ def compute_consistency(
         )
     if n_instances < 2:
         return float("nan")
+    if max_pairs is not None:
+        if isinstance(max_pairs, bool) or not isinstance(max_pairs, (int, np.integer)):
+            raise TypeError("max_pairs must be an integer or None.")
+        if max_pairs <= 0:
+            raise ValueError("max_pairs must be greater than zero.")
 
     rng = np.random.default_rng(seed)
 
     # Step 1: Compute explanations and predictions for all instances
-    top_k_sets = []   # frozenset per instance
+    top_k_sets = []  # frozenset per instance
     predictions = []  # predicted class per instance
-    valid_indices = []
-
     for i in range(n_instances):
-        try:
-            attr = _get_explanation_vector(explainer, X[i], n_features)
-            pred = _get_model_prediction(model, X[i])
-            top_k_sets.append(_get_top_k_features(attr, top_k))
-            predictions.append(pred)
-            valid_indices.append(i)
-        except Exception:
-            continue
-
-    if len(valid_indices) < 2:
-        return float("nan")
+        attr = _get_explanation_vector(explainer, X[i], n_features)
+        pred = _get_model_prediction(model, X[i])
+        top_k_sets.append(_get_top_k_features(attr, top_k))
+        predictions.append(pred)
 
     # Step 2: Group instances by their top-k explanation set
-    groups = {}  # frozenset -> list of indices into valid_indices
+    groups: Dict[frozenset, List[int]] = {}
     for idx, topk_set in enumerate(top_k_sets):
         if topk_set not in groups:
             groups[topk_set] = []
         groups[topk_set].append(idx)
 
-    # Step 3: Evaluate prediction agreement within each group
-    agree_count = 0
-    total_pairs = 0
+    # Definition 1 is E_x[P(f(x')=f(x) | e(x')=e(x))]. Therefore the exact
+    # empirical estimator first computes a local score for every query x and
+    # then gives every query equal weight. Pooling unordered pairs instead
+    # incorrectly overweights large explanation groups.
+    if max_pairs is None:
+        local_scores = []
+        for i, explanation_label in enumerate(top_k_sets):
+            peers = [j for j in groups[explanation_label] if j != i]
+            if not peers:
+                # The paper's Section 4.1 estimator multiplies singleton
+                # explanation groups by zero because they are unverifiable.
+                local_scores.append(0.0)
+                continue
+            local_scores.append(float(np.mean([predictions[j] == predictions[i] for j in peers])))
+        return float(np.mean(local_scores))
 
-    # Collect all within-group pairs
-    all_pairs = []
-    for group_indices in groups.values():
-        if len(group_indices) < 2:
+    # Unbiased Monte Carlo approximation of the same query-weighted quantity:
+    # draw x uniformly, then x' uniformly from x's same-explanation peers.
+    sampled_scores = []
+    query_indices = rng.integers(0, n_instances, size=max_pairs)
+    for i in query_indices:
+        peers = [j for j in groups[top_k_sets[i]] if j != i]
+        if not peers:
+            sampled_scores.append(0.0)
             continue
-        for i, j in combinations(group_indices, 2):
-            all_pairs.append((i, j))
-
-    if not all_pairs:
-        return float("nan")
-
-    # Optionally subsample pairs
-    if max_pairs is not None and len(all_pairs) > max_pairs:
-        pair_indices = rng.choice(
-            len(all_pairs), size=max_pairs, replace=False
-        )
-        all_pairs = [all_pairs[p] for p in pair_indices]
-
-    for i, j in all_pairs:
-        if predictions[i] == predictions[j]:
-            agree_count += 1
-        total_pairs += 1
-
-    return float(agree_count / total_pairs)
+        j = peers[int(rng.integers(0, len(peers)))]
+        sampled_scores.append(float(predictions[j] == predictions[i]))
+    return float(np.mean(sampled_scores))
 
 
 def compute_batch_consistency(
     explainer: BaseExplainer,
     model,
     X: np.ndarray,
-    top_k_values: List[int] = None,
-    max_pairs: int = None,
-    seed: int = None,
-) -> Dict[str, Union[float, Dict[int, float]]]:
+    top_k_values: Optional[List[int]] = None,
+    max_pairs: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> dict:
     """
     Compute Consistency across multiple top-k values.
 
-    Evaluating consistency at different levels of explanation granularity
-    (different k values) gives a more complete picture of how well the
-    explanation captures the model's decision boundary.
+    This reports the finite-sample consistency statistic under each selected
+    top-k discretisation. The cross-k mean is descriptive and does not establish
+    that an explanation captures a decision boundary.
 
     Args:
         explainer: Explainer instance.
         model: Model adapter.
         X: Input data (2D array).
         top_k_values: List of top-k values to evaluate.
-            Default: [1, 2, 3, 5] (if n_features > 5).
-        max_pairs: Maximum pairs per top-k evaluation.
-        seed: Random seed.
+            By default, use the entries from [1, 2, 3, 5] that are strictly
+            smaller than the feature count.
+        max_pairs: Historical name for the number of Monte Carlo query-peer
+            draws per top-k evaluation; None computes the exact estimator.
+        seed: Seed for Monte Carlo query-peer sampling only.
 
     Returns:
         Dictionary with:
@@ -1795,13 +2259,21 @@ def compute_batch_consistency(
             - "top_k_values": List of k values evaluated
             - "n_instances": Number of instances in X
     """
-    X = np.asarray(X)
+    X = _validate_batch(X)
     n_features = X.shape[1]
 
     if top_k_values is None:
         top_k_values = [k for k in [1, 2, 3, 5] if k < n_features]
     else:
-        top_k_values = [k for k in top_k_values if k < n_features]
+        top_k_values = list(top_k_values)
+        for k in top_k_values:
+            if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)):
+                raise TypeError("Every top_k_values entry must be an integer.")
+            if k < 1 or k >= n_features:
+                raise ValueError(
+                    "Every top_k_values entry must be at least 1 and smaller "
+                    "than the number of features."
+                )
 
     if not top_k_values:
         return {
@@ -1814,7 +2286,10 @@ def compute_batch_consistency(
     scores = {}
     for k in top_k_values:
         scores[k] = compute_consistency(
-            explainer, model, X, top_k=k,
+            explainer,
+            model,
+            X,
+            top_k=k,
             max_pairs=max_pairs,
             seed=seed,
         )
@@ -1831,29 +2306,33 @@ def compute_batch_consistency(
 
 
 # =============================================================================
-# Avg-Sensitivity (Yeh et al., 2019)
+# Mean-sensitivity heuristic (noncanonical compatibility endpoint)
 # =============================================================================
+
 
 def compute_avg_sensitivity(
     explainer: BaseExplainer,
     instance: np.ndarray,
     radius: float = 0.1,
     n_samples: int = 50,
-    norm_ord: Union[int, float, str] = 2,
+    norm_ord: Union[int, float] = 2,
     perturb_norm: str = "l2",
-    normalize: bool = True,
-    seed: int = None,
+    normalize: bool = False,
+    seed: Optional[int] = None,
+    target_class: Optional[int] = None,
 ) -> float:
     """
-    Compute Avg-Sensitivity of an explanation method.
+    Compute a Monte Carlo mean-sensitivity heuristic.
 
-    Avg-Sensitivity measures the expected change in explanation when the
+    This function measures the expected change in explanation when the
     input is uniformly perturbed within a ball of radius r:
 
         AvgSens(E, x, r) = E_{||δ||_p ≤ r} [ ||E(x + δ) - E(x)||_q ]
 
-    Unlike Max-Sensitivity, this captures the typical (rather than
-    worst-case) robustness behaviour. A lower score is better.
+    Unlike Max-Sensitivity, this captures typical rather than worst-case
+    behaviour. Yeh et al. (2019) define Max-Sensitivity, not this average;
+    the name is retained for compatibility with evaluation toolkits. A lower
+    value is a smaller mean sampled explanation change under this contract.
 
     Args:
         explainer: Explainer instance with .explain() method.
@@ -1862,26 +2341,38 @@ def compute_avg_sensitivity(
         n_samples: Number of Monte Carlo samples. Default: 50.
         norm_ord: Norm order for explanation differences.
         perturb_norm: Perturbation ball norm ("l2" or "linf").
-        normalize: If True, normalize by original explanation norm.
-        seed: Random seed.
+        normalize: Optional noncanonical relative normalization. Default False.
+        seed: Seed for the local perturbation generator only. It does not seed
+            a stochastic explainer.
+        target_class: Optional fixed output-column index.
 
     Returns:
-        Avg-Sensitivity score (float). Lower = more robust.
+        Mean sampled explanation change (float).
 
-    Reference:
-        Yeh et al. (2019). On the (In)fidelity and Sensitivity of
-        Explanations. NeurIPS.
+    Relation:
+        Uses Yeh et al.'s perturbation-neighbourhood contrast, but replaces
+        their canonical maximum with a mean; it must not be reported as the
+        paper's Max-Sensitivity.
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
+    _validate_sampling_parameters(n_samples=n_samples, radius=radius)
+    _validate_norm_order(norm_ord)
+    if not isinstance(normalize, (bool, np.bool_)):
+        raise TypeError("normalize must be a boolean.")
     n_features = len(instance)
     rng = np.random.default_rng(seed)
 
     # Get original explanation
-    original_attr = _get_explanation_vector(explainer, instance, n_features)
-    original_norm = np.linalg.norm(original_attr, ord=norm_ord)
+    original_attr, explained_target = _get_explanation_vector_and_target(
+        explainer, instance, n_features, target_class=target_class
+    )
+    original_norm = _vector_norm(original_attr, norm_ord)
 
-    if normalize and original_norm < 1e-12:
-        return 0.0
+    if normalize and original_norm == 0:
+        raise ValueError(
+            "Normalized sensitivity is undefined for a zero-norm original "
+            "explanation. Use normalize=False."
+        )
 
     # Generate perturbations
     if perturb_norm == "l2":
@@ -1894,21 +2385,19 @@ def compute_avg_sensitivity(
     # Compute mean explanation distance
     diffs = []
     for i in range(n_samples):
-        try:
-            perturbed_attr = _get_explanation_vector(
-                explainer, perturbed[i], n_features
-            )
-            diff = np.linalg.norm(original_attr - perturbed_attr, ord=norm_ord)
-            diffs.append(diff)
-        except Exception:
-            continue
-
-    if not diffs:
-        return float("nan")
+        perturbed_attr = _get_explanation_vector(
+            explainer,
+            perturbed[i],
+            n_features,
+            target_class=target_class,
+            expected_target=explained_target,
+        )
+        diff = _vector_norm(original_attr - perturbed_attr, norm_ord)
+        diffs.append(diff)
 
     mean_diff = np.mean(diffs)
 
-    if normalize and original_norm > 1e-12:
+    if normalize:
         return float(mean_diff / original_norm)
     return float(mean_diff)
 
@@ -1918,12 +2407,13 @@ def compute_batch_avg_sensitivity(
     X: np.ndarray,
     radius: float = 0.1,
     n_samples: int = 50,
-    norm_ord: Union[int, float, str] = 2,
+    norm_ord: Union[int, float] = 2,
     perturb_norm: str = "l2",
-    normalize: bool = True,
-    max_instances: int = None,
-    seed: int = None,
-) -> Dict[str, float]:
+    normalize: bool = False,
+    max_instances: Optional[int] = None,
+    seed: Optional[int] = None,
+    target_class: Optional[int] = None,
+) -> dict:
     """
     Compute Avg-Sensitivity over a batch of instances.
 
@@ -1936,33 +2426,44 @@ def compute_batch_avg_sensitivity(
         perturb_norm: Perturbation ball norm.
         normalize: If True, normalize by original explanation norm.
         max_instances: Maximum instances to evaluate.
-        seed: Random seed.
+        seed: Base seed for per-instance local perturbation generators only.
 
     Returns:
         Dictionary with mean, std, max, min, scores, n_evaluated.
     """
-    X = np.asarray(X)
+    X = _validate_batch(X)
     n = len(X)
     if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, (int, np.integer)):
+            raise TypeError("max_instances must be an integer or None.")
+        if max_instances <= 0:
+            raise ValueError("max_instances must be greater than zero.")
         n = min(n, max_instances)
 
     scores = []
     for i in range(n):
-        try:
-            score = compute_avg_sensitivity(
-                explainer, X[i], radius=radius, n_samples=n_samples,
-                norm_ord=norm_ord, perturb_norm=perturb_norm,
-                normalize=normalize,
-                seed=seed + i if seed is not None else None,
-            )
-            if not np.isnan(score):
-                scores.append(score)
-        except Exception:
-            continue
+        score = compute_avg_sensitivity(
+            explainer,
+            X[i],
+            radius=radius,
+            n_samples=n_samples,
+            norm_ord=norm_ord,
+            perturb_norm=perturb_norm,
+            normalize=normalize,
+            seed=seed + i if seed is not None else None,
+            target_class=target_class,
+        )
+        scores.append(score)
 
     if not scores:
-        return {"mean": float("nan"), "std": 0.0, "max": float("nan"),
-                "min": float("nan"), "scores": [], "n_evaluated": 0}
+        return {
+            "mean": float("nan"),
+            "std": 0.0,
+            "max": float("nan"),
+            "min": float("nan"),
+            "scores": [],
+            "n_evaluated": 0,
+        }
 
     return {
         "mean": float(np.mean(scores)),
@@ -1975,133 +2476,87 @@ def compute_batch_avg_sensitivity(
 
 
 # =============================================================================
-# Continuity (Montavon et al., 2018; Alvarez-Melis & Jaakkola, 2018)
+# Finite-sample local Lipschitz estimate (compatibility name: Continuity)
 # =============================================================================
+
 
 def compute_continuity(
     explainer: BaseExplainer,
     instance: np.ndarray,
     X_reference: np.ndarray,
     k_neighbors: int = 5,
-    norm_ord: Union[int, float, str] = 2,
+    norm_ord: Union[int, float] = 2,
     input_distance: str = "euclidean",
-    seed: int = None,
+    seed: Optional[int] = None,
+    target_class: Optional[int] = None,
 ) -> float:
+    """Compute a k-neighbour finite-sample local Lipschitz estimate.
+
+    The prior implementation under this public name was an uncited Spearman
+    rank-distance heuristic and has been removed. This compatibility endpoint
+    now evaluates
+
+        max_j ||E(x) - E(x_j)|| / d(x, x_j).
+
+    Alvarez-Melis & Jaakkola (2018, Equation 2) use the same fixed-anchor
+    finite-sample maximum over an epsilon neighbourhood with Euclidean norms.
+    Here the k nearest non-identical reference points define an adaptive
+    finite-sample neighbourhood. ``input_distance='euclidean'`` and
+    ``norm_ord=2`` recover their distance choices; other explicit choices are
+    generalized norm/distance variants. This is not the image-translation
+    ``Continuity`` metric implemented by Quantus. ``seed`` is retained for
+    compatibility and is unused. Lower values indicate greater local
+    stability.
     """
-    Compute Continuity of an explanation method.
+    del seed
+    instance = _validate_instance(instance)
+    X_reference = _validate_batch(X_reference, "X_reference")
+    _validate_norm_order(norm_ord)
+    if X_reference.shape[1] != instance.size:
+        raise ValueError("X_reference must have the same feature count as instance.")
+    if isinstance(k_neighbors, bool) or not isinstance(k_neighbors, (int, np.integer)):
+        raise TypeError("k_neighbors must be an integer.")
+    if k_neighbors <= 0:
+        raise ValueError("k_neighbors must be greater than zero.")
 
-    Continuity measures whether nearby inputs receive similar explanations.
-    It computes the Spearman rank correlation between input-space distances
-    and explanation-space distances for the k nearest neighbours of the
-    query instance:
+    k_neighbors = min(k_neighbors, len(X_reference))
 
-        Continuity(E, x, X) = SpearmanCorr(
-            [ ||x − x_i|| ]_{i=1}^k,
-            [ ||E(x) − E(x_i)|| ]_{i=1}^k
+    input_dists = cdist(instance.reshape(1, -1), X_reference, metric=input_distance).reshape(-1)
+    finite_nonzero = np.flatnonzero(np.isfinite(input_dists) & (input_dists > 0))
+    selected = finite_nonzero[np.argsort(input_dists[finite_nonzero])][:k_neighbors]
+    if selected.size == 0:
+        return float("nan")
+
+    n_features = instance.size
+    original_attr, explained_target = _get_explanation_vector_and_target(
+        explainer, instance, n_features, target_class=target_class
+    )
+    ratios = []
+    for index in selected:
+        neighbor_attr = _get_explanation_vector(
+            explainer,
+            X_reference[index],
+            n_features,
+            target_class=target_class,
+            expected_target=explained_target,
         )
-
-    A score of +1 indicates perfect continuity: as inputs get closer, their
-    explanations also get proportionally closer.  A score near 0 or negative
-    indicates that explanation distances do not track input distances.
-
-    Args:
-        explainer: Explainer instance with .explain() method.
-        instance: Query instance (1D array).
-        X_reference: Reference dataset to find neighbours in (2D array).
-            Typically the training or validation set.
-        k_neighbors: Number of nearest neighbours. Default: 5.
-            Must be ≥ 3 for a meaningful rank correlation.
-        norm_ord: Norm order for explanation-space distances.
-        input_distance: Distance metric for input space.
-            Any metric accepted by scipy.spatial.distance.cdist.
-            Default: "euclidean".
-        seed: Random seed (unused, reserved for future stochastic variants).
-
-    Returns:
-        Spearman rank correlation coefficient (float) in [-1, 1].
-        Higher = more continuous explanations.
-        Returns NaN if fewer than 3 valid neighbours are found.
-
-    Reference:
-        Montavon, G., Samek, W., & Müller, K. R. (2018). Methods for
-        interpreting and understanding deep neural networks.
-
-        Alvarez-Melis, D., & Jaakkola, T. S. (2018). On the Robustness of
-        Interpretability Methods.
-    """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
-    X_reference = np.asarray(X_reference, dtype=np.float64)
-    n_features = len(instance)
-
-    if len(X_reference) < k_neighbors:
-        k_neighbors = len(X_reference)
-
-    if k_neighbors < 3:
-        return float("nan")
-
-    # Find k nearest neighbours by input distance
-    input_dists = cdist(
-        instance.reshape(1, -1), X_reference, metric=input_distance
-    ).flatten()
-
-    # Exclude the instance itself if it appears in the reference set
-    # (distance ≈ 0)
-    neighbor_indices = np.argsort(input_dists)
-    selected_indices = []
-    for idx in neighbor_indices:
-        if input_dists[idx] > 1e-12:
-            selected_indices.append(idx)
-        if len(selected_indices) == k_neighbors:
-            break
-
-    if len(selected_indices) < 3:
-        return float("nan")
-
-    # Get original explanation
-    original_attr = _get_explanation_vector(explainer, instance, n_features)
-
-    # Compute input and explanation distances for each neighbour
-    d_input = []
-    d_explanation = []
-
-    for idx in selected_indices:
-        neighbor = X_reference[idx]
-        try:
-            neighbor_attr = _get_explanation_vector(explainer, neighbor, n_features)
-        except Exception:
-            continue
-
-        d_input.append(input_dists[idx])
-        d_explanation.append(
-            np.linalg.norm(original_attr - neighbor_attr, ord=norm_ord)
-        )
-
-    if len(d_input) < 3:
-        return float("nan")
-
-    # Spearman rank correlation
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=stats.ConstantInputWarning)
-        correlation, _ = stats.spearmanr(d_input, d_explanation)
-
-    if np.isnan(correlation):
-        # Can happen if all distances are identical
-        return 0.0
-
-    return float(correlation)
+        numerator = _vector_norm(original_attr - neighbor_attr, norm_ord)
+        ratios.append(float(numerator / input_dists[index]))
+    return float(np.max(ratios))
 
 
 def compute_batch_continuity(
     explainer: BaseExplainer,
     X: np.ndarray,
     k_neighbors: int = 5,
-    norm_ord: Union[int, float, str] = 2,
+    norm_ord: Union[int, float] = 2,
     input_distance: str = "euclidean",
-    max_instances: int = None,
-    seed: int = None,
-) -> Dict[str, float]:
+    max_instances: Optional[int] = None,
+    seed: Optional[int] = None,
+    target_class: Optional[int] = None,
+) -> dict:
     """
-    Compute Continuity over a batch of instances.
+    Compute k-neighbour local Lipschitz estimates over a batch.
 
     Each instance is evaluated against the remaining instances in X as the
     reference set (leave-one-out).
@@ -2113,34 +2568,61 @@ def compute_batch_continuity(
         norm_ord: Norm order for explanation distances.
         input_distance: Input-space distance metric.
         max_instances: Maximum instances to evaluate.
-        seed: Random seed.
+        seed: Retained for compatibility; unused by this deterministic
+            reference-neighbour calculation.
 
     Returns:
         Dictionary with mean, std, max, min, scores, n_evaluated.
     """
-    X = np.asarray(X)
+    X = _validate_batch(X)
     n = len(X)
     if max_instances is not None:
+        if isinstance(max_instances, bool) or not isinstance(max_instances, (int, np.integer)):
+            raise TypeError("max_instances must be an integer or None.")
+        if max_instances <= 0:
+            raise ValueError("max_instances must be greater than zero.")
         n = min(n, max_instances)
+
+    if len(X) < 2:
+        return {
+            "mean": float("nan"),
+            "std": 0.0,
+            "max": float("nan"),
+            "min": float("nan"),
+            "scores": [],
+            "n_evaluated": 0,
+            "n_attempted": n,
+            "n_undefined": n,
+        }
 
     scores = []
     for i in range(n):
-        try:
-            # Use all other instances as reference
-            reference = np.delete(X, i, axis=0)
-            score = compute_continuity(
-                explainer, X[i], reference,
-                k_neighbors=k_neighbors, norm_ord=norm_ord,
-                input_distance=input_distance, seed=seed,
-            )
-            if not np.isnan(score):
-                scores.append(score)
-        except Exception:
-            continue
+        # Use all other instances as reference.
+        reference = np.delete(X, i, axis=0)
+        score = compute_continuity(
+            explainer,
+            X[i],
+            reference,
+            k_neighbors=k_neighbors,
+            norm_ord=norm_ord,
+            input_distance=input_distance,
+            seed=seed,
+            target_class=target_class,
+        )
+        if not np.isnan(score):
+            scores.append(score)
 
     if not scores:
-        return {"mean": float("nan"), "std": 0.0, "max": float("nan"),
-                "min": float("nan"), "scores": [], "n_evaluated": 0}
+        return {
+            "mean": float("nan"),
+            "std": 0.0,
+            "max": float("nan"),
+            "min": float("nan"),
+            "scores": [],
+            "n_evaluated": 0,
+            "n_attempted": n,
+            "n_undefined": n,
+        }
 
     return {
         "mean": float(np.mean(scores)),
@@ -2149,4 +2631,6 @@ def compute_batch_continuity(
         "min": float(np.min(scores)),
         "scores": scores,
         "n_evaluated": len(scores),
+        "n_attempted": n,
+        "n_undefined": n - len(scores),
     }

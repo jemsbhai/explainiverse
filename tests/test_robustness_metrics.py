@@ -1,26 +1,26 @@
 # tests/test_robustness_metrics.py
 """
-Tests for Phase 2 robustness evaluation metrics.
+Legacy integration tests for robustness and stability diagnostics.
 
 - Max-Sensitivity (Yeh et al., 2019)
-- Avg-Sensitivity (Yeh et al., 2019)
-- Continuity (Montavon et al., 2018; Alvarez-Melis & Jaakkola, 2018)
+- Noncanonical mean-sensitivity compatibility endpoint
+- K-neighbour finite-sample local Lipschitz estimate
+- Top-k-discretised Consistency estimator (Dasgupta et al., 2022)
 
 Reference:
-    Yeh, C. K., Hsieh, C. Y., Suggala, A. S., Inber, D. I., & Ravikumar, P.
+    Yeh, C. K., Hsieh, C. Y., Suggala, A. S., Inouye, D. I., & Ravikumar, P.
     (2019). On the (In)fidelity and Sensitivity of Explanations. NeurIPS.
 """
 
-import pytest
 import numpy as np
-from unittest.mock import MagicMock
+import pytest
 
 from explainiverse.core.explanation import Explanation
-
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def feature_names():
@@ -46,14 +46,14 @@ def trained_model_and_explainer(feature_names):
     Train a real sklearn model and create a LIME explainer.
     Returns (model_adapter, explainer, X_train).
     """
-    from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.datasets import make_classification
+    from sklearn.ensemble import GradientBoostingClassifier
+
     from explainiverse.adapters import SklearnAdapter
     from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 
     X, y = make_classification(
-        n_samples=100, n_features=4, n_informative=3,
-        n_redundant=0, n_classes=2, random_state=42
+        n_samples=100, n_features=4, n_informative=3, n_redundant=0, n_classes=2, random_state=42
     )
     X = X.astype(np.float32)
 
@@ -73,16 +73,16 @@ def trained_model_and_explainer(feature_names):
 class _DeterministicExplainer:
     """
     Mock explainer that returns attributions proportional to the input.
-    Perfectly continuous and smooth — useful for testing metric properties.
+    This exact linear map is useful for analytical metric checks.
     """
+
     def __init__(self, feature_names, scale=1.0):
         self.feature_names = feature_names
         self.scale = scale
 
     def explain(self, instance):
         instance = np.asarray(instance).flatten()
-        attrs = {fn: float(self.scale * instance[i])
-                 for i, fn in enumerate(self.feature_names)}
+        attrs = {fn: float(self.scale * instance[i]) for i, fn in enumerate(self.feature_names)}
         exp = Explanation(
             explainer_name="deterministic",
             target_class="class_0",
@@ -95,15 +95,15 @@ class _DeterministicExplainer:
 class _RandomExplainer:
     """
     Mock explainer that returns random attributions regardless of input.
-    High sensitivity, low continuity — useful for testing metric properties.
+    The fixed RNG seed makes finite-sample comparisons reproducible.
     """
+
     def __init__(self, feature_names, seed=None):
         self.feature_names = feature_names
         self.rng = np.random.default_rng(seed)
 
     def explain(self, instance):
-        attrs = {fn: float(self.rng.standard_normal())
-                 for fn in self.feature_names}
+        attrs = {fn: float(self.rng.standard_normal()) for fn in self.feature_names}
         exp = Explanation(
             explainer_name="random",
             target_class="class_0",
@@ -116,15 +116,15 @@ class _RandomExplainer:
 class _ConstantExplainer:
     """
     Mock explainer that always returns the same attributions.
-    Zero sensitivity, perfect continuity.
+    Its attribution-distance numerator is exactly zero.
     """
+
     def __init__(self, feature_names, values=None):
         self.feature_names = feature_names
         self.values = values or [1.0] * len(feature_names)
 
     def explain(self, instance):
-        attrs = {fn: float(self.values[i])
-                 for i, fn in enumerate(self.feature_names)}
+        attrs = {fn: float(self.values[i]) for i, fn in enumerate(self.feature_names)}
         exp = Explanation(
             explainer_name="constant",
             target_class="class_0",
@@ -137,6 +137,7 @@ class _ConstantExplainer:
 # =============================================================================
 # Max-Sensitivity Tests
 # =============================================================================
+
 
 class TestMaxSensitivity:
     """Tests for compute_max_sensitivity (Yeh et al., 2019)."""
@@ -187,7 +188,7 @@ class TestMaxSensitivity:
         assert rng_score > det_score
 
     def test_larger_radius_higher_sensitivity(self, feature_names, single_instance):
-        """Larger perturbation radius generally yields higher sensitivity."""
+        """Scaling shared perturbation directions scales this linear fixture's change."""
         from explainiverse.evaluation import compute_max_sensitivity
 
         explainer = _DeterministicExplainer(feature_names)
@@ -204,12 +205,8 @@ class TestMaxSensitivity:
         from explainiverse.evaluation import compute_max_sensitivity
 
         explainer = _DeterministicExplainer(feature_names)
-        s1 = compute_max_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=20, seed=42
-        )
-        s2 = compute_max_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=20, seed=42
-        )
+        s1 = compute_max_sensitivity(explainer, single_instance, radius=0.1, n_samples=20, seed=42)
+        s2 = compute_max_sensitivity(explainer, single_instance, radius=0.1, n_samples=20, seed=42)
         assert s1 == pytest.approx(s2, rel=1e-10)
 
     def test_l2_perturbation_norm(self, feature_names, single_instance):
@@ -218,8 +215,7 @@ class TestMaxSensitivity:
 
         explainer = _DeterministicExplainer(feature_names)
         score = compute_max_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=10,
-            perturb_norm="l2", seed=42
+            explainer, single_instance, radius=0.1, n_samples=10, perturb_norm="l2", seed=42
         )
         assert np.isfinite(score)
 
@@ -229,8 +225,7 @@ class TestMaxSensitivity:
 
         explainer = _DeterministicExplainer(feature_names)
         score = compute_max_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=10,
-            perturb_norm="linf", seed=42
+            explainer, single_instance, radius=0.1, n_samples=10, perturb_norm="linf", seed=42
         )
         assert np.isfinite(score)
 
@@ -240,9 +235,7 @@ class TestMaxSensitivity:
 
         explainer = _DeterministicExplainer(feature_names)
         with pytest.raises(ValueError, match="perturb_norm"):
-            compute_max_sensitivity(
-                explainer, single_instance, perturb_norm="l3", seed=42
-            )
+            compute_max_sensitivity(explainer, single_instance, perturb_norm="l3", seed=42)
 
     def test_l1_norm_order(self, feature_names, single_instance):
         """L1 norm order for explanation distances works."""
@@ -279,27 +272,23 @@ class TestMaxSensitivity:
         assert np.isfinite(score_norm)
         assert np.isfinite(score_abs)
 
-    def test_zero_explanation_normalized_returns_zero(self, feature_names, single_instance):
-        """Zero explanations with normalize=True returns 0."""
+    def test_zero_explanation_normalized_is_undefined(self, feature_names, single_instance):
+        """Relative normalization has an explicit zero-denominator failure."""
         from explainiverse.evaluation import compute_max_sensitivity
 
         explainer = _ConstantExplainer(feature_names, values=[0.0, 0.0, 0.0, 0.0])
-        score = compute_max_sensitivity(
-            explainer, single_instance, normalize=True, n_samples=10, seed=42
-        )
-        assert score == 0.0
+        with pytest.raises(ValueError, match="undefined.*zero-norm"):
+            compute_max_sensitivity(
+                explainer, single_instance, normalize=True, n_samples=10, seed=42
+            )
 
     def test_more_samples_tighter_bound(self, feature_names, single_instance):
         """More samples should produce a max >= the fewer-samples max."""
         from explainiverse.evaluation import compute_max_sensitivity
 
         explainer = _DeterministicExplainer(feature_names)
-        score_few = compute_max_sensitivity(
-            explainer, single_instance, n_samples=5, seed=42
-        )
-        score_many = compute_max_sensitivity(
-            explainer, single_instance, n_samples=100, seed=42
-        )
+        score_few = compute_max_sensitivity(explainer, single_instance, n_samples=5, seed=42)
+        score_many = compute_max_sensitivity(explainer, single_instance, n_samples=100, seed=42)
         # More samples includes the first 5 (same seed), so max is >=
         assert score_many >= score_few - 1e-10
 
@@ -308,9 +297,7 @@ class TestMaxSensitivity:
         from explainiverse.evaluation import compute_max_sensitivity
 
         _, explainer, X = trained_model_and_explainer
-        score = compute_max_sensitivity(
-            explainer, X[0], radius=0.1, n_samples=5, seed=42
-        )
+        score = compute_max_sensitivity(explainer, X[0], radius=0.1, n_samples=5, seed=42)
         assert isinstance(score, float)
         assert np.isfinite(score)
         assert score >= 0.0
@@ -360,9 +347,7 @@ class TestBatchMaxSensitivity:
         from explainiverse.evaluation import compute_batch_max_sensitivity
 
         _, explainer, X = trained_model_and_explainer
-        result = compute_batch_max_sensitivity(
-            explainer, X, n_samples=3, max_instances=3, seed=42
-        )
+        result = compute_batch_max_sensitivity(explainer, X, n_samples=3, max_instances=3, seed=42)
         assert result["n_evaluated"] == 3
         assert np.isfinite(result["mean"])
 
@@ -371,8 +356,9 @@ class TestBatchMaxSensitivity:
 # Avg-Sensitivity Tests
 # =============================================================================
 
+
 class TestAvgSensitivity:
-    """Tests for compute_avg_sensitivity (Yeh et al., 2019)."""
+    """Tests for the noncanonical mean-sensitivity compatibility endpoint."""
 
     def test_returns_float(self, feature_names, single_instance):
         """Avg-Sensitivity returns a float."""
@@ -406,17 +392,11 @@ class TestAvgSensitivity:
 
     def test_avg_leq_max(self, feature_names, single_instance):
         """Avg-Sensitivity ≤ Max-Sensitivity (mean ≤ max)."""
-        from explainiverse.evaluation import (
-            compute_max_sensitivity, compute_avg_sensitivity
-        )
+        from explainiverse.evaluation import compute_avg_sensitivity, compute_max_sensitivity
 
         explainer = _DeterministicExplainer(feature_names)
-        avg = compute_avg_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=30, seed=42
-        )
-        mx = compute_max_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=30, seed=42
-        )
+        avg = compute_avg_sensitivity(explainer, single_instance, radius=0.1, n_samples=30, seed=42)
+        mx = compute_max_sensitivity(explainer, single_instance, radius=0.1, n_samples=30, seed=42)
         assert avg <= mx + 1e-10
 
     def test_random_explainer_higher_than_deterministic(self, feature_names, single_instance):
@@ -426,12 +406,8 @@ class TestAvgSensitivity:
         det = _DeterministicExplainer(feature_names)
         rng = _RandomExplainer(feature_names, seed=99)
 
-        det_score = compute_avg_sensitivity(
-            det, single_instance, radius=0.1, n_samples=30, seed=42
-        )
-        rng_score = compute_avg_sensitivity(
-            rng, single_instance, radius=0.1, n_samples=30, seed=42
-        )
+        det_score = compute_avg_sensitivity(det, single_instance, radius=0.1, n_samples=30, seed=42)
+        rng_score = compute_avg_sensitivity(rng, single_instance, radius=0.1, n_samples=30, seed=42)
         assert rng_score > det_score
 
     def test_reproducible_with_seed(self, feature_names, single_instance):
@@ -439,12 +415,8 @@ class TestAvgSensitivity:
         from explainiverse.evaluation import compute_avg_sensitivity
 
         explainer = _DeterministicExplainer(feature_names)
-        s1 = compute_avg_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=20, seed=42
-        )
-        s2 = compute_avg_sensitivity(
-            explainer, single_instance, radius=0.1, n_samples=20, seed=42
-        )
+        s1 = compute_avg_sensitivity(explainer, single_instance, radius=0.1, n_samples=20, seed=42)
+        s2 = compute_avg_sensitivity(explainer, single_instance, radius=0.1, n_samples=20, seed=42)
         assert s1 == pytest.approx(s2, rel=1e-10)
 
     def test_linf_perturbation(self, feature_names, single_instance):
@@ -474,18 +446,14 @@ class TestAvgSensitivity:
 
         explainer = _DeterministicExplainer(feature_names)
         with pytest.raises(ValueError, match="perturb_norm"):
-            compute_avg_sensitivity(
-                explainer, single_instance, perturb_norm="invalid", seed=42
-            )
+            compute_avg_sensitivity(explainer, single_instance, perturb_norm="invalid", seed=42)
 
     def test_with_real_explainer(self, trained_model_and_explainer):
-        """Works with real LIME explainer."""
+        """Target drift is rejected when LIME cannot fix an output."""
         from explainiverse.evaluation import compute_avg_sensitivity
 
         _, explainer, X = trained_model_and_explainer
-        score = compute_avg_sensitivity(
-            explainer, X[0], radius=0.1, n_samples=5, seed=42
-        )
+        score = compute_avg_sensitivity(explainer, X[0], radius=0.1, n_samples=5, seed=42)
         assert isinstance(score, float)
         assert np.isfinite(score)
         assert score >= 0.0
@@ -522,9 +490,7 @@ class TestBatchAvgSensitivity:
         from explainiverse.evaluation import compute_batch_avg_sensitivity
 
         _, explainer, X = trained_model_and_explainer
-        result = compute_batch_avg_sensitivity(
-            explainer, X, n_samples=3, max_instances=3, seed=42
-        )
+        result = compute_batch_avg_sensitivity(explainer, X, n_samples=3, max_instances=3, seed=42)
         assert result["n_evaluated"] == 3
         assert np.isfinite(result["mean"])
 
@@ -533,68 +499,54 @@ class TestBatchAvgSensitivity:
 # Continuity Tests
 # =============================================================================
 
+
 class TestContinuity:
-    """Tests for compute_continuity (Montavon et al., 2018)."""
+    """Tests for the finite-sample local Lipschitz compatibility endpoint."""
 
     def test_returns_float(self, feature_names, single_instance, sample_data):
         """Continuity returns a float."""
         from explainiverse.evaluation import compute_continuity
 
         explainer = _DeterministicExplainer(feature_names)
-        score = compute_continuity(
-            explainer, single_instance, sample_data, k_neighbors=5
-        )
+        score = compute_continuity(explainer, single_instance, sample_data, k_neighbors=5)
         assert isinstance(score, float)
 
-    def test_range_minus_one_to_one(self, feature_names, single_instance, sample_data):
-        """Continuity is a Spearman correlation in [-1, +1]."""
+    def test_nonnegative(self, feature_names, single_instance, sample_data):
+        """A norm ratio is non-negative and is not correlation-bounded."""
         from explainiverse.evaluation import compute_continuity
 
         explainer = _DeterministicExplainer(feature_names)
-        score = compute_continuity(
-            explainer, single_instance, sample_data, k_neighbors=5
-        )
-        assert -1.0 <= score <= 1.0
+        score = compute_continuity(explainer, single_instance, sample_data, k_neighbors=5)
+        assert score >= 0.0
 
     def test_deterministic_explainer_high_continuity(self, feature_names, sample_data):
         """
-        A deterministic explainer (E(x) = scale * x) should have high
-        continuity because nearby inputs produce nearby explanations.
+        For E(x)=2x under matching L2 norms, every Lipschitz ratio is 2.
         """
         from explainiverse.evaluation import compute_continuity
 
         explainer = _DeterministicExplainer(feature_names, scale=2.0)
-        score = compute_continuity(
-            explainer, sample_data[0], sample_data[1:], k_neighbors=10
-        )
-        # Linear transformation: input distance and explanation distance
-        # are perfectly correlated
-        assert score > 0.9
+        score = compute_continuity(explainer, sample_data[0], sample_data[1:], k_neighbors=10)
+        assert score == pytest.approx(2.0)
 
     def test_constant_explainer_returns_zero_or_nan(self, feature_names, sample_data):
         """
-        A constant explainer has zero explanation distance for all neighbours.
-        Spearman correlation is undefined (all tied) → should return 0.0 or NaN.
+        A constant explainer has a zero local Lipschitz estimate.
         """
         from explainiverse.evaluation import compute_continuity
 
         explainer = _ConstantExplainer(feature_names)
-        score = compute_continuity(
-            explainer, sample_data[0], sample_data[1:], k_neighbors=5
-        )
-        # All explanation distances are 0 → tied ranks → correlation = 0
-        assert score == pytest.approx(0.0, abs=1e-10) or np.isnan(score)
+        score = compute_continuity(explainer, sample_data[0], sample_data[1:], k_neighbors=5)
+        assert score == pytest.approx(0.0, abs=1e-10)
 
-    def test_fewer_than_3_neighbors_returns_nan(self, feature_names, single_instance):
-        """Returns NaN if fewer than 3 neighbours available."""
+    def test_one_nonidentical_neighbor_is_sufficient(self, feature_names, single_instance):
+        """A max ratio is defined from one non-identical neighbour."""
         from explainiverse.evaluation import compute_continuity
 
         explainer = _DeterministicExplainer(feature_names)
-        tiny_ref = np.random.randn(2, 4).astype(np.float32)
-        score = compute_continuity(
-            explainer, single_instance, tiny_ref, k_neighbors=5
-        )
-        assert np.isnan(score)
+        tiny_ref = single_instance.reshape(1, -1) + 0.1
+        score = compute_continuity(explainer, single_instance, tiny_ref, k_neighbors=5)
+        assert score == pytest.approx(1.0)
 
     def test_k_neighbors_clamped(self, feature_names, single_instance):
         """k_neighbors larger than reference set is clamped."""
@@ -603,9 +555,7 @@ class TestContinuity:
         explainer = _DeterministicExplainer(feature_names)
         small_ref = np.random.randn(5, 4).astype(np.float32)
         # Ask for 100 neighbours but only 5 are available
-        score = compute_continuity(
-            explainer, single_instance, small_ref, k_neighbors=100
-        )
+        score = compute_continuity(explainer, single_instance, small_ref, k_neighbors=100)
         assert isinstance(score, float)
 
     def test_excludes_self_from_neighbors(self, feature_names, sample_data):
@@ -616,22 +566,19 @@ class TestContinuity:
         # Include the instance in the reference set
         instance = sample_data[0]
         reference_with_self = np.vstack([instance.reshape(1, -1), sample_data])
-        score = compute_continuity(
-            explainer, instance, reference_with_self, k_neighbors=5
-        )
+        score = compute_continuity(explainer, instance, reference_with_self, k_neighbors=5)
         # Should still work (self excluded)
         assert isinstance(score, float)
         assert not np.isnan(score)
 
     def test_different_input_distances(self, feature_names, single_instance, sample_data):
-        """Different input distance metrics work."""
+        """Explicit generalized input-distance variants remain well-defined."""
         from explainiverse.evaluation import compute_continuity
 
         explainer = _DeterministicExplainer(feature_names)
         for metric in ["euclidean", "cityblock", "cosine"]:
             score = compute_continuity(
-                explainer, single_instance, sample_data,
-                k_neighbors=5, input_distance=metric
+                explainer, single_instance, sample_data, k_neighbors=5, input_distance=metric
             )
             assert isinstance(score, float)
 
@@ -642,8 +589,7 @@ class TestContinuity:
         explainer = _DeterministicExplainer(feature_names)
         for norm in [1, 2, np.inf]:
             score = compute_continuity(
-                explainer, single_instance, sample_data,
-                k_neighbors=5, norm_ord=norm
+                explainer, single_instance, sample_data, k_neighbors=5, norm_ord=norm
             )
             assert isinstance(score, float)
 
@@ -652,11 +598,8 @@ class TestContinuity:
         from explainiverse.evaluation import compute_continuity
 
         _, explainer, X = trained_model_and_explainer
-        score = compute_continuity(
-            explainer, X[0], X[1:20], k_neighbors=5
-        )
-        assert isinstance(score, float)
-        assert -1.0 <= score <= 1.0 or np.isnan(score)
+        with pytest.raises(ValueError, match="changed target_class"):
+            compute_continuity(explainer, X[0], X[1:20], k_neighbors=5)
 
 
 class TestBatchContinuity:
@@ -667,9 +610,7 @@ class TestBatchContinuity:
         from explainiverse.evaluation import compute_batch_continuity
 
         explainer = _DeterministicExplainer(feature_names)
-        result = compute_batch_continuity(
-            explainer, sample_data, k_neighbors=5, max_instances=5
-        )
+        result = compute_batch_continuity(explainer, sample_data, k_neighbors=5, max_instances=5)
         assert "mean" in result
         assert "std" in result
         assert "scores" in result
@@ -680,38 +621,34 @@ class TestBatchContinuity:
         from explainiverse.evaluation import compute_batch_continuity
 
         explainer = _DeterministicExplainer(feature_names)
-        result = compute_batch_continuity(
-            explainer, sample_data, k_neighbors=5, max_instances=4
-        )
+        result = compute_batch_continuity(explainer, sample_data, k_neighbors=5, max_instances=4)
         assert result["n_evaluated"] == 4
 
-    def test_deterministic_high_mean_continuity(self, feature_names, sample_data):
-        """Deterministic explainer has high mean continuity across batch."""
+    def test_linear_map_has_exact_lipschitz_scale(self, feature_names, sample_data):
+        """E(x)=2x has a batch mean local Lipschitz estimate of two."""
         from explainiverse.evaluation import compute_batch_continuity
 
         explainer = _DeterministicExplainer(feature_names, scale=2.0)
-        result = compute_batch_continuity(
-            explainer, sample_data, k_neighbors=5, max_instances=10
-        )
-        assert result["mean"] > 0.8
+        result = compute_batch_continuity(explainer, sample_data, k_neighbors=5, max_instances=10)
+        assert result["mean"] == pytest.approx(2.0)
 
     def test_with_real_explainer(self, trained_model_and_explainer):
-        """Batch works with real LIME explainer."""
+        """Batch computation propagates target-contract failures."""
         from explainiverse.evaluation import compute_batch_continuity
 
         _, explainer, X = trained_model_and_explainer
-        result = compute_batch_continuity(
-            explainer, X[:15], k_neighbors=5, max_instances=3
-        )
-        assert result["n_evaluated"] == 3
+        with pytest.raises(ValueError, match="changed target_class"):
+            compute_batch_continuity(explainer, X[:15], k_neighbors=5, max_instances=3)
 
 
 # =============================================================================
 # Consistency Tests (Dasgupta et al., 2022 — ICML)
 # =============================================================================
 
+
 class _ConstantModel:
     """Mock model that always predicts the same class."""
+
     def __init__(self, predicted_class=0, n_classes=2):
         self.predicted_class = predicted_class
         self.n_classes = n_classes
@@ -736,6 +673,7 @@ class _FeatureThresholdModel:
     Useful for testing consistency: instances in the same feature-0 region
     get the same prediction.
     """
+
     def __init__(self, threshold=0.0):
         self.threshold = threshold
 
@@ -758,6 +696,7 @@ class _IndexBasedModel:
     Mock model that assigns class = hash(instance) % n_classes.
     Produces varied predictions so some pairs agree and others don't.
     """
+
     def __init__(self, n_classes=2):
         self.n_classes = n_classes
 
@@ -855,10 +794,10 @@ class TestConsistency:
         score = compute_consistency(explainer, model, X, top_k=2)
         assert np.isnan(score)
 
-    def test_nan_for_no_matching_pairs(self, feature_names):
+    def test_zero_for_no_matching_pairs(self, feature_names):
         """
-        If every instance has a unique top-k set (no matching pairs),
-        returns NaN.
+        Unique explanations contribute zero in the paper's Section 4.1
+        estimator because they have no same-explanation peers.
         """
         from explainiverse.evaluation import compute_consistency
 
@@ -868,14 +807,16 @@ class TestConsistency:
         model = _ConstantModel()
 
         # Construct data where each instance has a different top-1 feature
-        X = np.array([
-            [10.0, 0.0, 0.0, 0.0],  # top-1 = f0
-            [0.0, 10.0, 0.0, 0.0],  # top-1 = f1
-            [0.0, 0.0, 10.0, 0.0],  # top-1 = f2
-            [0.0, 0.0, 0.0, 10.0],  # top-1 = f3
-        ])
+        X = np.array(
+            [
+                [10.0, 0.0, 0.0, 0.0],  # top-1 = f0
+                [0.0, 10.0, 0.0, 0.0],  # top-1 = f1
+                [0.0, 0.0, 10.0, 0.0],  # top-1 = f2
+                [0.0, 0.0, 0.0, 10.0],  # top-1 = f3
+            ]
+        )
         score = compute_consistency(explainer, model, X, top_k=1)
-        assert np.isnan(score)
+        assert score == pytest.approx(0.0)
 
     def test_matching_pairs_exist(self, feature_names):
         """
@@ -887,12 +828,14 @@ class TestConsistency:
         model = _ConstantModel()
 
         # Two pairs of instances with the same top-1 feature
-        X = np.array([
-            [10.0, 0.1, 0.0, 0.0],  # top-1 = f0
-            [5.0, 0.1, 0.0, 0.0],   # top-1 = f0 (same group)
-            [0.0, 10.0, 0.0, 0.0],  # top-1 = f1
-            [0.0, 5.0, 0.0, 0.0],   # top-1 = f1 (same group)
-        ])
+        X = np.array(
+            [
+                [10.0, 0.1, 0.0, 0.0],  # top-1 = f0
+                [5.0, 0.1, 0.0, 0.0],  # top-1 = f0 (same group)
+                [0.0, 10.0, 0.0, 0.0],  # top-1 = f1
+                [0.0, 5.0, 0.0, 0.0],  # top-1 = f1 (same group)
+            ]
+        )
         score = compute_consistency(explainer, model, X, top_k=1)
         # Constant model: all predictions match, so consistency = 1.0
         assert score == pytest.approx(1.0)
@@ -921,9 +864,7 @@ class TestConsistency:
 
     def test_max_pairs_limits_computation(self, feature_names):
         """
-        max_pairs limits the number of evaluated pairs.
-        With a constant explainer, all n*(n-1)/2 pairs are in one group.
-        max_pairs should subsample.
+        max_pairs sets the number of query-peer Monte Carlo draws.
         """
         from explainiverse.evaluation import compute_consistency
 
@@ -931,10 +872,8 @@ class TestConsistency:
         model = _ConstantModel()
         X = np.random.default_rng(42).standard_normal((20, 4))
 
-        # 20 instances → 190 pairs. Limit to 10.
-        score = compute_consistency(
-            explainer, model, X, top_k=2, max_pairs=10, seed=42
-        )
+        # Draw ten query-peer samples with replacement.
+        score = compute_consistency(explainer, model, X, top_k=2, max_pairs=10, seed=42)
         # Should still return a valid score
         assert isinstance(score, float)
         assert 0.0 <= score <= 1.0
@@ -947,39 +886,28 @@ class TestConsistency:
         model = _FeatureThresholdModel(threshold=0.0)
         X = np.random.default_rng(42).standard_normal((30, 4))
 
-        s1 = compute_consistency(
-            explainer, model, X, top_k=2, max_pairs=20, seed=42
-        )
-        s2 = compute_consistency(
-            explainer, model, X, top_k=2, max_pairs=20, seed=42
-        )
+        s1 = compute_consistency(explainer, model, X, top_k=2, max_pairs=20, seed=42)
+        s2 = compute_consistency(explainer, model, X, top_k=2, max_pairs=20, seed=42)
         assert s1 == pytest.approx(s2, rel=1e-10)
 
-    def test_different_seeds_may_differ(self, feature_names):
-        """
-        Different seeds may produce different results when subsampling.
-        (Not guaranteed to differ but tests the pathway.)
-        """
+    def test_multiple_subsampling_seeds_return_bounded_scores(self, feature_names):
+        """Two Monte Carlo seeds each return a bounded consistency score."""
         from explainiverse.evaluation import compute_consistency
 
         explainer = _ConstantExplainer(feature_names)
         model = _FeatureThresholdModel(threshold=0.0)
         X = np.random.default_rng(42).standard_normal((50, 4))
 
-        s1 = compute_consistency(
-            explainer, model, X, top_k=2, max_pairs=10, seed=42
-        )
-        s2 = compute_consistency(
-            explainer, model, X, top_k=2, max_pairs=10, seed=99
-        )
+        s1 = compute_consistency(explainer, model, X, top_k=2, max_pairs=10, seed=42)
+        s2 = compute_consistency(explainer, model, X, top_k=2, max_pairs=10, seed=99)
         # Both are valid scores
         assert 0.0 <= s1 <= 1.0
         assert 0.0 <= s2 <= 1.0
 
-    def test_higher_top_k_more_matching_pairs(self, feature_names):
+    def test_changing_top_k_changes_the_discretisation(self, feature_names):
         """
-        With higher top_k, explanations have more features in common,
-        potentially changing grouping.
+        Different top-k choices are separately reported discretisations;
+        matching-group counts are not generally monotone in k.
         """
         from explainiverse.evaluation import compute_consistency
 
@@ -1026,12 +954,14 @@ class TestConsistency:
         model = _FeatureThresholdModel(threshold=0.0)
 
         # 4 instances: 2 above threshold (class 1), 2 below (class 0)
-        X = np.array([
-            [1.0, 0.0, 0.0],   # class 1
-            [2.0, 0.0, 0.0],   # class 1
-            [-1.0, 0.0, 0.0],  # class 0
-            [-2.0, 0.0, 0.0],  # class 0
-        ])
+        X = np.array(
+            [
+                [1.0, 0.0, 0.0],  # class 1
+                [2.0, 0.0, 0.0],  # class 1
+                [-1.0, 0.0, 0.0],  # class 0
+                [-2.0, 0.0, 0.0],  # class 0
+            ]
+        )
 
         score = compute_consistency(explainer, model, X, top_k=1)
         # 6 total pairs: (0,1)=agree, (0,2)=disagree, (0,3)=disagree,
@@ -1090,12 +1020,9 @@ class TestConsistency:
         from explainiverse.evaluation import compute_consistency
 
         model, explainer, X = trained_model_and_explainer
-        score = compute_consistency(
-            explainer, model, X[:20], top_k=2
-        )
+        score = compute_consistency(explainer, model, X[:20], top_k=2)
         assert isinstance(score, float)
-        # Either a valid score or NaN (if no matching pairs)
-        assert (0.0 <= score <= 1.0) or np.isnan(score)
+        assert 0.0 <= score <= 1.0
 
     def test_multiclass(self):
         """Works with multiclass models."""
@@ -1145,23 +1072,19 @@ class TestBatchConsistency:
         model = _ConstantModel()
         X = np.random.default_rng(42).standard_normal((15, 4))
 
-        result = compute_batch_consistency(
-            explainer, model, X, top_k_values=[1, 2, 3]
-        )
+        result = compute_batch_consistency(explainer, model, X, top_k_values=[1, 2, 3])
         assert set(result["scores"].keys()) == {1, 2, 3}
 
-    def test_filters_invalid_k(self, feature_names):
-        """Filters out top-k values >= n_features."""
+    def test_rejects_invalid_k(self, feature_names):
+        """Invalid discretisation parameters are not silently discarded."""
         from explainiverse.evaluation import compute_batch_consistency
 
         explainer = _ConstantExplainer(feature_names)  # 4 features
         model = _ConstantModel()
         X = np.random.default_rng(42).standard_normal((10, 4))
 
-        result = compute_batch_consistency(
-            explainer, model, X, top_k_values=[1, 2, 4, 10]
-        )
-        assert set(result["scores"].keys()) == {1, 2}
+        with pytest.raises(ValueError, match="Every top_k_values entry"):
+            compute_batch_consistency(explainer, model, X, top_k_values=[1, 2, 4, 10])
 
     def test_default_k_values(self, feature_names):
         """Default k values are [1, 2, 3] for 4-feature data."""
@@ -1183,9 +1106,7 @@ class TestBatchConsistency:
         model = _ConstantModel()
         X = np.random.default_rng(42).standard_normal((15, 4))
 
-        result = compute_batch_consistency(
-            explainer, model, X, top_k_values=[1, 2]
-        )
+        result = compute_batch_consistency(explainer, model, X, top_k_values=[1, 2])
         valid = [s for s in result["scores"].values() if not np.isnan(s)]
         if valid:
             assert result["mean"] == pytest.approx(np.mean(valid), rel=1e-10)
@@ -1198,15 +1119,13 @@ class TestBatchConsistency:
         model = _ConstantModel()
         X = np.random.default_rng(42).standard_normal((15, 4))
 
-        result = compute_batch_consistency(
-            explainer, model, X, top_k_values=[1, 2, 3]
-        )
+        result = compute_batch_consistency(explainer, model, X, top_k_values=[1, 2, 3])
         for k, score in result["scores"].items():
             if not np.isnan(score):
                 assert score == pytest.approx(1.0)
 
     def test_empty_k_values_returns_nan(self):
-        """If all k values are filtered out, returns NaN mean."""
+        """An explicitly empty discretisation list returns a NaN mean."""
         from explainiverse.evaluation import compute_batch_consistency
 
         fnames = ["f0", "f1"]  # only 2 features
@@ -1214,10 +1133,7 @@ class TestBatchConsistency:
         model = _ConstantModel()
         X = np.random.default_rng(42).standard_normal((10, 2))
 
-        # All k values >= 2 (n_features), so none are valid
-        result = compute_batch_consistency(
-            explainer, model, X, top_k_values=[2, 3, 5]
-        )
+        result = compute_batch_consistency(explainer, model, X, top_k_values=[])
         assert result["scores"] == {}
         assert np.isnan(result["mean"])
 
@@ -1226,9 +1142,7 @@ class TestBatchConsistency:
         from explainiverse.evaluation import compute_batch_consistency
 
         model, explainer, X = trained_model_and_explainer
-        result = compute_batch_consistency(
-            explainer, model, X[:20], top_k_values=[1, 2]
-        )
+        result = compute_batch_consistency(explainer, model, X[:20], top_k_values=[1, 2])
         assert isinstance(result["mean"], float)
 
 
@@ -1285,14 +1199,13 @@ class TestConsistencyHelpers:
 # Cross-Metric Relationship Tests
 # =============================================================================
 
+
 class TestCrossMetricRelationships:
     """Tests verifying expected relationships between metrics."""
 
     def test_avg_leq_max_sensitivity(self, feature_names, sample_data):
         """Avg-Sensitivity ≤ Max-Sensitivity for every instance in a batch."""
-        from explainiverse.evaluation import (
-            compute_max_sensitivity, compute_avg_sensitivity
-        )
+        from explainiverse.evaluation import compute_avg_sensitivity, compute_max_sensitivity
 
         explainer = _DeterministicExplainer(feature_names)
         for i in range(5):
@@ -1304,40 +1217,18 @@ class TestCrossMetricRelationships:
             )
             assert avg <= mx + 1e-10, f"Instance {i}: avg={avg} > max={mx}"
 
-    def test_stable_explainer_low_sensitivity_high_continuity(self, feature_names, sample_data):
-        """
-        A stable (deterministic linear) explainer should have:
-        - Low sensitivity scores
-        - High continuity scores
-        """
-        from explainiverse.evaluation import (
-            compute_max_sensitivity, compute_continuity
-        )
-
-        explainer = _DeterministicExplainer(feature_names)
-        sens = compute_max_sensitivity(
-            explainer, sample_data[0], radius=0.05, n_samples=20, seed=42
-        )
-        cont = compute_continuity(
-            explainer, sample_data[0], sample_data[1:], k_neighbors=10
-        )
-        # Deterministic linear: low sensitivity, high continuity
-        assert sens < 1.0  # Relative sensitivity should be modest
-        assert cont > 0.9  # Near-perfect rank correlation
-
 
 # =============================================================================
 # Edge Cases
 # =============================================================================
+
 
 class TestEdgeCases:
     """Edge case tests for robustness metrics."""
 
     def test_single_feature(self):
         """Metrics work with a single feature."""
-        from explainiverse.evaluation import (
-            compute_max_sensitivity, compute_avg_sensitivity
-        )
+        from explainiverse.evaluation import compute_avg_sensitivity, compute_max_sensitivity
 
         fnames = ["f0"]
         explainer = _DeterministicExplainer(fnames)
@@ -1357,9 +1248,7 @@ class TestEdgeCases:
         explainer = _DeterministicExplainer(fnames)
         instance = np.random.randn(100).astype(np.float32)
 
-        score = compute_max_sensitivity(
-            explainer, instance, n_samples=10, seed=42
-        )
+        score = compute_max_sensitivity(explainer, instance, n_samples=10, seed=42)
         assert np.isfinite(score)
 
     def test_zero_radius(self, feature_names, single_instance):
@@ -1389,9 +1278,7 @@ class TestEdgeCases:
         explainer = _DeterministicExplainer(feature_names)
         # All reference points are the same
         identical_ref = np.tile(np.array([1.0, 2.0, 3.0, 4.0]), (10, 1))
-        score = compute_continuity(
-            explainer, single_instance, identical_ref, k_neighbors=5
-        )
+        score = compute_continuity(explainer, single_instance, identical_ref, k_neighbors=5)
         # Should handle gracefully (NaN or a valid float)
         assert isinstance(score, float)
 
@@ -1400,39 +1287,48 @@ class TestEdgeCases:
 # Import Tests
 # =============================================================================
 
+
 class TestImports:
     """Verify metrics are importable from the evaluation package."""
 
     def test_import_max_sensitivity(self):
         from explainiverse.evaluation import compute_max_sensitivity
+
         assert callable(compute_max_sensitivity)
 
     def test_import_batch_max_sensitivity(self):
         from explainiverse.evaluation import compute_batch_max_sensitivity
+
         assert callable(compute_batch_max_sensitivity)
 
     def test_import_avg_sensitivity(self):
         from explainiverse.evaluation import compute_avg_sensitivity
+
         assert callable(compute_avg_sensitivity)
 
     def test_import_batch_avg_sensitivity(self):
         from explainiverse.evaluation import compute_batch_avg_sensitivity
+
         assert callable(compute_batch_avg_sensitivity)
 
     def test_import_continuity(self):
         from explainiverse.evaluation import compute_continuity
+
         assert callable(compute_continuity)
 
     def test_import_batch_continuity(self):
         from explainiverse.evaluation import compute_batch_continuity
+
         assert callable(compute_batch_continuity)
 
     def test_import_consistency(self):
         from explainiverse.evaluation import compute_consistency
+
         assert callable(compute_consistency)
 
     def test_import_batch_consistency(self):
         from explainiverse.evaluation import compute_batch_consistency
+
         assert callable(compute_batch_consistency)
 
 

@@ -1,80 +1,226 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-// @ts-ignore
-import { ExplainerRegistry, ExplainerMeta } from '../../src/core/registry';
-// @ts-ignore
+import { beforeEach, describe, expect, it } from 'vitest';
+
 import { BaseExplainer } from '../../src/core/explainer';
-// @ts-ignore
 import { Explanation } from '../../src/core/explanation';
+import {
+  ExplainerRegistry,
+  type ExplainerConstructor,
+  type ExplainerMeta,
+  type FilterCriteria,
+  type ModelType,
+} from '../../src/core/registry';
 
 class MockExplainer extends BaseExplainer {
-    async explain(instance: any): Promise<Explanation> {
-        return new Explanation('Mock', 'test', {});
-    }
+  public explain(_instance: unknown): Promise<Explanation> {
+    return Promise.resolve(new Explanation('Mock', 'test', {}));
+  }
+}
+
+class BatchMockExplainer extends MockExplainer {
+  public explainBatch(instances: readonly unknown[]): Promise<Explanation[]> {
+    return Promise.all(instances.map((instance) => this.explain(instance)));
+  }
+}
+
+function localMeta(overrides: Partial<ExplainerMeta> = {}): ExplainerMeta {
+  return {
+    scope: 'local',
+    model_types: ['any'],
+    data_types: ['tabular'],
+    ...overrides,
+  };
 }
 
 describe('ExplainerRegistry', () => {
-    let registry: any;
+  let registry: ExplainerRegistry;
 
-    beforeEach(() => {
-        registry = new ExplainerRegistry();
-    });
+  beforeEach(() => {
+    registry = new ExplainerRegistry();
+  });
 
-    it('should register and retrieve an explainer', () => {
-        const meta = {
-            scope: 'local',
-            model_types: ['any'],
-            data_types: ['tabular'],
-            description: 'Test explainer'
-        };
+  it('registers immutable normalized metadata with conservative defaults', () => {
+    const modelTypes: ModelType[] = ['any'];
+    registry.register('mock', MockExplainer, localMeta({ model_types: modelTypes }));
+    modelTypes[0] = 'tree';
 
-        registry.register('mock', MockExplainer, meta);
+    const entry = registry.get('mock');
+    expect(entry.class).toBe(MockExplainer);
+    expect(entry.meta.model_types).toEqual(['any']);
+    expect(entry.meta.claim_status).toBe('unverified');
+    expect(entry.meta.claim_scope).toMatch(/not completed an accuracy audit/i);
+    expect(entry.meta.requires_training_data).toBe(false);
+    expect(entry.meta.supports_batching).toBe(false);
+    expect(() => (entry.meta.model_types as ModelType[]).push('tree')).toThrow(TypeError);
+  });
 
-        expect(registry.get('mock')).toEqual({
-            class: MockExplainer,
-            meta: meta
-        });
-    });
+  it('requires explicit scope for verified and quarantined claims', () => {
+    expect(() =>
+      registry.register(
+        'verified',
+        MockExplainer,
+        localMeta({ claim_status: 'verified' }),
+      ),
+    ).toThrow(/claim_scope/);
+    expect(() =>
+      registry.register(
+        'quarantined',
+        MockExplainer,
+        localMeta({ claim_status: 'quarantined' }),
+      ),
+    ).toThrow(/claim_scope/);
 
-    it('should list registered explainers', () => {
-        const meta = { scope: 'local', model_types: ['any'], data_types: ['tabular'] };
-        registry.register('mock1', MockExplainer, meta);
-        registry.register('mock2', MockExplainer, meta);
+    registry.register(
+      'scoped',
+      MockExplainer,
+      localMeta({ claim_status: 'verified', claim_scope: 'Test-only behavior.' }),
+    );
+    expect(registry.get('scoped').meta.claim_scope).toBe('Test-only behavior.');
+  });
 
-        expect(registry.listExplainers()).toEqual(['mock1', 'mock2']);
-    });
+  it.each([
+    ['', RangeError],
+    ['   ', RangeError],
+    [' padded', RangeError],
+    [3, TypeError],
+  ])('rejects malformed registry name %#', (name, errorType) => {
+    expect(() =>
+      registry.register(name as string, MockExplainer, localMeta()),
+    ).toThrow(errorType);
+  });
 
-    it('should create an explainer instance', () => {
-        const meta = { scope: 'local', model_types: ['any'], data_types: ['tabular'] };
-        registry.register('mock', MockExplainer, meta);
+  it('handles prototype-like names without object-key collisions', () => {
+    registry.register('__proto__', MockExplainer, localMeta());
+    registry.register('constructor', MockExplainer, localMeta());
+    expect(registry.listExplainers()).toEqual(['__proto__', 'constructor']);
+  });
 
-        const explainer = registry.create('mock', 'some_model');
-        expect(explainer).toBeInstanceOf(MockExplainer);
-        expect(explainer.model).toBe('some_model');
-    });
+  it('rejects classes that do not implement explain', () => {
+    class NotAnExplainer {}
+    expect(() =>
+      registry.register(
+        'bad',
+        NotAnExplainer as unknown as ExplainerConstructor,
+        localMeta(),
+      ),
+    ).toThrow(TypeError);
+  });
 
-    it('should throw error when getting unregistered explainer', () => {
-        expect(() => registry.get('unknown')).toThrow();
-    });
+  it.each([
+    { scope: 'unknown' },
+    { model_types: [] },
+    { model_types: ['tree', 'tree'] },
+    { data_types: ['unknown'] },
+    { task_types: ['unknown'] },
+    { description: '   ' },
+    { supports_batching: 'yes' },
+    { claim_status: 'complete' },
+  ])('rejects malformed metadata %#', (override) => {
+    expect(() =>
+      registry.register(
+        'bad',
+        MockExplainer,
+        localMeta(override as unknown as Partial<ExplainerMeta>),
+      ),
+    ).toThrow();
+  });
 
-    it('should filter explainers by criteria', () => {
-        const meta1 = { scope: 'local', model_types: ['tree'], data_types: ['tabular'] };
-        const meta2 = { scope: 'global', model_types: ['any'], data_types: ['tabular'] };
-        const meta3 = { scope: 'local', model_types: ['neural'], data_types: ['image'] };
+  it('rejects false batching claims and accepts a matching public method', () => {
+    expect(() =>
+      registry.register(
+        'bad_batch',
+        MockExplainer,
+        localMeta({ supports_batching: true }),
+      ),
+    ).toThrow(/explainBatch/);
 
-        registry.register('local1', MockExplainer, meta1);
-        registry.register('global1', MockExplainer, meta2);
-        registry.register('image1', MockExplainer, meta3);
+    registry.register(
+      'batch',
+      BatchMockExplainer,
+      localMeta({ supports_batching: true }),
+    );
+    expect(registry.get('batch').meta.supports_batching).toBe(true);
+  });
 
-        const local = registry.filter({ scope: 'local' });
-        expect(local).toContain('local1');
-        expect(local).toContain('image1');
-        expect(local.length).toBe(2);
+  it('rejects duplicate names unless override is explicitly true', () => {
+    registry.register('mock', MockExplainer, localMeta({ description: 'first' }));
+    expect(() => registry.register('mock', MockExplainer, localMeta())).toThrow(
+      /already registered/,
+    );
+    expect(() =>
+      registry.register(
+        'mock',
+        MockExplainer,
+        localMeta(),
+        'yes' as unknown as boolean,
+      ),
+    ).toThrow(TypeError);
 
-        expect(registry.filter({ data_type: 'image' })).toEqual(['image1']);
+    registry.register(
+      'mock',
+      MockExplainer,
+      localMeta({ description: 'replacement' }),
+      true,
+    );
+    expect(registry.get('mock').meta.description).toBe('replacement');
+  });
 
-        const treeCompatible = registry.filter({ model_type: 'tree' });
-        expect(treeCompatible).toContain('local1');
-        expect(treeCompatible).toContain('global1'); // 'any' matches 'tree'
-        expect(treeCompatible.length).toBe(2);
-    });
+  it('lists in registration order and creates with caller-supplied arguments', () => {
+    registry.register('mock1', MockExplainer, localMeta());
+    registry.register('mock2', MockExplainer, localMeta());
+
+    expect(registry.listExplainers()).toEqual(['mock1', 'mock2']);
+    const model = { predict: () => [] };
+    const explainer = registry.create('mock1', model);
+    expect(explainer).toBeInstanceOf(MockExplainer);
+    expect(explainer.model).toBe(model);
+  });
+
+  it('throws a descriptive error for an unknown explainer', () => {
+    expect(() => registry.get('unknown')).toThrow("Explainer 'unknown' is not registered");
+  });
+
+  it('filters exact metadata while treating model type any as a wildcard', () => {
+    registry.register(
+      'local_tree',
+      MockExplainer,
+      localMeta({
+        model_types: ['tree'],
+        task_types: ['classification'],
+      }),
+    );
+    registry.register(
+      'global_any',
+      MockExplainer,
+      {
+        scope: 'global',
+        model_types: ['any'],
+        data_types: ['tabular'],
+        task_types: ['regression'],
+      },
+    );
+    registry.register(
+      'image',
+      MockExplainer,
+      localMeta({ model_types: ['neural'], data_types: ['image'] }),
+    );
+
+    expect(registry.filter({ scope: 'local' })).toEqual(['local_tree', 'image']);
+    expect(registry.filter({ data_type: 'image' })).toEqual(['image']);
+    expect(registry.filter({ model_type: 'tree' })).toEqual([
+      'local_tree',
+      'global_any',
+    ]);
+    expect(registry.filter({ task_type: 'regression' })).toEqual(['global_any']);
+    expect(registry.filter()).toEqual(['local_tree', 'global_any', 'image']);
+  });
+
+  it('rejects invalid or misspelled filter criteria instead of silently ignoring them', () => {
+    expect(() => registry.filter(null as unknown as FilterCriteria)).toThrow(TypeError);
+    expect(() =>
+      registry.filter({ modelType: 'tree' } as unknown as FilterCriteria),
+    ).toThrow(/unknown filter criteria/);
+    expect(() =>
+      registry.filter({ data_type: 'audio' } as unknown as FilterCriteria),
+    ).toThrow(RangeError);
+  });
 });

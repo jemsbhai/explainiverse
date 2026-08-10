@@ -1,12 +1,16 @@
 # tests/test_insertion_deletion.py
-"""
-Comprehensive tests for Insertion AUC and Deletion AUC (Petsiuk et al., 2018).
+"""Contract tests for numeric-vector insertion/deletion adaptations.
 
 Insertion AUC: progressively adds features most-important-first onto baseline,
-measuring prediction recovery. Higher AUC = better explanation.
+measuring a fixed target output's recovery under the chosen baseline.
 
 Deletion AUC: progressively removes features most-important-first from original,
-measuring prediction degradation. Lower AUC = better explanation.
+measuring that fixed output along the deletion path.
+
+The AUC orientations describe these perturbation curves; they do not establish
+a general ordering of explanation quality. Petsiuk et al. use image-specific
+insertion and deletion operators, so these numeric-vector results are not
+directly comparable to the published benchmark.
 
 Tests cover:
 1. Basic functionality (return types, valid ranges)
@@ -20,31 +24,30 @@ Tests cover:
 9. Multiple model types (LogisticRegression, RandomForest, GradientBoosting)
 10. Multiple explainers (LIME-style vs SHAP-style attributions)
 11. Edge cases (few features, many features, zero/identical attributions)
-12. Semantic validation (good explanations vs random)
-13. Target class handling
-14. use_absolute parameter
-15. Complementarity (insertion + deletion relationship)
+12. Target class handling
+13. use_absolute parameter
+14. Endpoint relationships
 """
 import numpy as np
 import pytest
 from sklearn.datasets import load_iris, load_wine
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 
 from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation.faithfulness_extended import (
-    compute_deletion_auc,
     compute_batch_deletion_auc,
-    compute_insertion_auc,
     compute_batch_insertion_auc,
+    compute_deletion_auc,
+    compute_insertion_auc,
     compute_insertion_deletion_auc,
 )
-
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def setup_iris():
@@ -126,10 +129,7 @@ def setup_batch(setup_model):
         attr_values = np.abs(attr_values)
         attr_values[0] *= 2  # Emphasize first feature
 
-        attributions = {
-            feature_names[j]: float(attr_values[j])
-            for j in range(n_features)
-        }
+        attributions = {feature_names[j]: float(attr_values[j]) for j in range(n_features)}
 
         exp = Explanation(
             explainer_name="test_explainer",
@@ -142,19 +142,18 @@ def setup_batch(setup_model):
     return model, X, explanations
 
 
-def create_explanation(attributions: np.ndarray, feature_names=None) -> Explanation:
+def create_explanation(
+    attributions: np.ndarray, feature_names=None, target_class="class_0"
+) -> Explanation:
     """Helper to create Explanation objects."""
     if feature_names is None:
         feature_names = [f"feature_{i}" for i in range(len(attributions))]
 
-    attr_dict = {
-        feature_names[i]: float(attributions[i])
-        for i in range(len(attributions))
-    }
+    attr_dict = {feature_names[i]: float(attributions[i]) for i in range(len(attributions))}
 
     return Explanation(
         explainer_name="test_explainer",
-        target_class="class_0",
+        target_class=target_class,
         explanation_data={"feature_attributions": attr_dict},
         feature_names=feature_names,
     )
@@ -172,27 +171,21 @@ class TestDeletionAUCBasic:
         """Deletion AUC returns a float value."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert isinstance(result, float)
 
     def test_returns_finite(self, setup_model):
         """Deletion AUC returns a finite (non-NaN, non-inf) value."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(result)
 
     def test_result_in_valid_range(self, setup_model):
         """Deletion AUC is bounded [0, 1] for probability outputs."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert 0.0 <= result <= 1.0 + 1e-6
 
     def test_multiple_instances(self, setup_model):
@@ -201,9 +194,7 @@ class TestDeletionAUCBasic:
         scores = []
         for i in range(5):
             exp = create_explanation(np.abs(np.random.randn(4)))
-            score = compute_deletion_auc(
-                model, X[i], exp, baseline="mean", background_data=X
-            )
+            score = compute_deletion_auc(model, X[i], exp, baseline="mean", background_data=X)
             scores.append(score)
         assert all(np.isfinite(s) for s in scores)
         assert len(set(scores)) > 1  # Not all identical
@@ -212,9 +203,7 @@ class TestDeletionAUCBasic:
         """Deletion AUC works with scalar baseline."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline=0.0
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline=0.0)
         assert isinstance(result, float) and np.isfinite(result)
 
 
@@ -230,27 +219,21 @@ class TestInsertionAUCBasic:
         """Insertion AUC returns a float value."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert isinstance(result, float)
 
     def test_returns_finite(self, setup_model):
         """Insertion AUC returns a finite value."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(result)
 
     def test_result_in_valid_range(self, setup_model):
         """Insertion AUC is bounded [0, 1] for probability outputs."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert 0.0 <= result <= 1.0 + 1e-6
 
     def test_multiple_instances(self, setup_model):
@@ -259,9 +242,7 @@ class TestInsertionAUCBasic:
         scores = []
         for i in range(5):
             exp = create_explanation(np.abs(np.random.randn(4)))
-            score = compute_insertion_auc(
-                model, X[i], exp, baseline="mean", background_data=X
-            )
+            score = compute_insertion_auc(model, X[i], exp, baseline="mean", background_data=X)
             scores.append(score)
         assert all(np.isfinite(s) for s in scores)
 
@@ -269,9 +250,7 @@ class TestInsertionAUCBasic:
         """Insertion AUC works with scalar baseline."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline=0.0
-        )
+        result = compute_insertion_auc(model, X[0], exp, baseline=0.0)
         assert isinstance(result, float) and np.isfinite(result)
 
 
@@ -288,13 +267,17 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert isinstance(result, dict)
         expected_keys = {
-            "auc", "curve", "fractions", "feature_order",
-            "n_features", "target_class", "original_prediction"
+            "auc",
+            "curve",
+            "fractions",
+            "feature_order",
+            "n_features",
+            "target_class",
+            "original_prediction",
         }
         assert set(result.keys()) == expected_keys
 
@@ -303,14 +286,18 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert isinstance(result, dict)
         expected_keys = {
-            "auc", "curve", "fractions", "feature_order",
-            "n_features", "target_class", "baseline_prediction",
-            "final_prediction"
+            "auc",
+            "curve",
+            "fractions",
+            "feature_order",
+            "n_features",
+            "target_class",
+            "baseline_prediction",
+            "final_prediction",
         }
         assert set(result.keys()) == expected_keys
 
@@ -319,8 +306,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert len(result["curve"]) == 5  # 4 features + initial
         assert len(result["fractions"]) == 5
@@ -330,8 +316,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert len(result["curve"]) == 5
         assert len(result["fractions"]) == 5
@@ -341,8 +326,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         fracs = result["fractions"]
         assert fracs[0] == 0.0
@@ -354,8 +338,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         fracs = result["fractions"]
         assert fracs[0] == 0.0
@@ -366,8 +349,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         # First point should be the original prediction
         assert result["curve"][0] == result["original_prediction"]
@@ -377,8 +359,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert result["curve"][0] == result["baseline_prediction"]
 
@@ -387,8 +368,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert len(result["feature_order"]) == 4
         assert result["n_features"] == 4
@@ -398,8 +378,7 @@ class TestReturnCurve:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert sorted(result["feature_order"].tolist()) == [0, 1, 2, 3]
 
@@ -407,12 +386,9 @@ class TestReturnCurve:
         """AUC in return_curve matches scalar return."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        scalar = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        scalar = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         detailed = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         assert abs(scalar - detailed["auc"]) < 1e-10
 
@@ -430,8 +406,7 @@ class TestNSteps:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=2
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=2
         )
         assert isinstance(result, float) and np.isfinite(result)
 
@@ -440,8 +415,7 @@ class TestNSteps:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=2
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=2
         )
         assert isinstance(result, float) and np.isfinite(result)
 
@@ -450,8 +424,7 @@ class TestNSteps:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=3, return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=3, return_curve=True
         )
         assert len(result["curve"]) == 4  # 3 steps + initial
 
@@ -460,8 +433,7 @@ class TestNSteps:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=1, return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=1, return_curve=True
         )
         assert len(result["curve"]) == 2
 
@@ -469,12 +441,9 @@ class TestNSteps:
         """n_steps=n_features should behave like default (one per feature)."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        default = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        default = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         stepped = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=4
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=4
         )
         assert abs(default - stepped) < 1e-6
 
@@ -483,8 +452,7 @@ class TestNSteps:
         model, X, y = setup_wine
         exp = create_explanation(np.abs(np.random.randn(13)))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=5
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=5
         )
         assert isinstance(result, float) and np.isfinite(result)
 
@@ -501,27 +469,21 @@ class TestBaselineTypes:
         """Works with mean baseline."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(result)
 
     def test_median_baseline(self, setup_model):
         """Works with median baseline."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline="median", background_data=X
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline="median", background_data=X)
         assert np.isfinite(result)
 
     def test_zero_baseline(self, setup_model):
         """Works with zero scalar baseline."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline=0.0
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline=0.0)
         assert np.isfinite(result)
 
     def test_array_baseline(self, setup_model):
@@ -529,9 +491,7 @@ class TestBaselineTypes:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         baseline_arr = np.array([1.0, 2.0, 3.0, 4.0])
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline=baseline_arr
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline=baseline_arr)
         assert np.isfinite(result)
 
     def test_callable_baseline(self, setup_model):
@@ -539,9 +499,7 @@ class TestBaselineTypes:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp,
-            baseline=lambda bg: np.percentile(bg, 25, axis=0),
-            background_data=X
+            model, X[0], exp, baseline=lambda bg: np.percentile(bg, 25, axis=0), background_data=X
         )
         assert np.isfinite(result)
 
@@ -549,32 +507,24 @@ class TestBaselineTypes:
         """Insertion works with mean baseline."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(result)
 
     def test_insertion_zero_baseline(self, setup_model):
         """Insertion works with zero baseline."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline=0.0
-        )
+        result = compute_insertion_auc(model, X[0], exp, baseline=0.0)
         assert np.isfinite(result)
 
-    def test_different_baselines_give_different_results(self, setup_model):
-        """Different baselines produce different scores."""
+    def test_multiple_baselines_return_finite_results(self, setup_model):
+        """Mean and zero baselines both satisfy the numeric API contract."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        score_mean = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        score_zero = compute_deletion_auc(
-            model, X[0], exp, baseline=0.0
-        )
-        # They should generally differ
-        assert abs(score_mean - score_zero) > 1e-8 or True  # May be same for simple models
+        score_mean = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        score_zero = compute_deletion_auc(model, X[0], exp, baseline=0.0)
+        assert np.isfinite(score_mean)
+        assert np.isfinite(score_zero)
 
 
 # =============================================================================
@@ -589,8 +539,7 @@ class TestBatchOperations:
         """Batch deletion returns dict with expected keys."""
         model, X, explanations = setup_batch
         result = compute_batch_deletion_auc(
-            model, X[:10], explanations,
-            baseline="mean"
+            model, X[:10], explanations, baseline="mean", background_data=X[10:]
         )
         assert isinstance(result, dict)
         assert set(result.keys()) == {"mean", "std", "min", "max", "n_samples"}
@@ -599,8 +548,7 @@ class TestBatchOperations:
         """Batch insertion returns dict with expected keys."""
         model, X, explanations = setup_batch
         result = compute_batch_insertion_auc(
-            model, X[:10], explanations,
-            baseline="mean"
+            model, X[:10], explanations, baseline="mean", background_data=X[10:]
         )
         assert isinstance(result, dict)
         assert set(result.keys()) == {"mean", "std", "min", "max", "n_samples"}
@@ -609,8 +557,7 @@ class TestBatchOperations:
         """Batch deletion processes correct number of samples."""
         model, X, explanations = setup_batch
         result = compute_batch_deletion_auc(
-            model, X[:10], explanations,
-            baseline="mean"
+            model, X[:10], explanations, baseline="mean", background_data=X[10:]
         )
         assert result["n_samples"] == 10
 
@@ -618,8 +565,7 @@ class TestBatchOperations:
         """Batch insertion processes correct number of samples."""
         model, X, explanations = setup_batch
         result = compute_batch_insertion_auc(
-            model, X[:10], explanations,
-            baseline="mean"
+            model, X[:10], explanations, baseline="mean", background_data=X[10:]
         )
         assert result["n_samples"] == 10
 
@@ -627,8 +573,12 @@ class TestBatchOperations:
         """max_samples limits batch size."""
         model, X, explanations = setup_batch
         result = compute_batch_deletion_auc(
-            model, X[:10], explanations,
-            baseline="mean", max_samples=5
+            model,
+            X[:10],
+            explanations,
+            baseline="mean",
+            max_samples=5,
+            background_data=X[10:],
         )
         assert result["n_samples"] <= 5
 
@@ -636,8 +586,12 @@ class TestBatchOperations:
         """max_samples limits batch size."""
         model, X, explanations = setup_batch
         result = compute_batch_insertion_auc(
-            model, X[:10], explanations,
-            baseline="mean", max_samples=5
+            model,
+            X[:10],
+            explanations,
+            baseline="mean",
+            max_samples=5,
+            background_data=X[10:],
         )
         assert result["n_samples"] <= 5
 
@@ -645,8 +599,7 @@ class TestBatchOperations:
         """Batch deletion statistics are consistent."""
         model, X, explanations = setup_batch
         result = compute_batch_deletion_auc(
-            model, X[:10], explanations,
-            baseline="mean"
+            model, X[:10], explanations, baseline="mean", background_data=X[10:]
         )
         assert result["min"] <= result["mean"] <= result["max"]
         assert result["std"] >= 0
@@ -655,8 +608,7 @@ class TestBatchOperations:
         """Batch insertion statistics are consistent."""
         model, X, explanations = setup_batch
         result = compute_batch_insertion_auc(
-            model, X[:10], explanations,
-            baseline="mean"
+            model, X[:10], explanations, baseline="mean", background_data=X[10:]
         )
         assert result["min"] <= result["mean"] <= result["max"]
         assert result["std"] >= 0
@@ -665,8 +617,12 @@ class TestBatchOperations:
         """Batch operations work with n_steps parameter."""
         model, X, explanations = setup_batch
         result = compute_batch_deletion_auc(
-            model, X[:10], explanations,
-            baseline="mean", n_steps=3
+            model,
+            X[:10],
+            explanations,
+            baseline="mean",
+            n_steps=3,
+            background_data=X[10:],
         )
         assert result["n_samples"] > 0
 
@@ -683,36 +639,24 @@ class TestMultipleModels:
         """Works with LogisticRegression."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        ins_score = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        ins_score = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score) and np.isfinite(ins_score)
 
     def test_random_forest(self, setup_rf_model):
         """Works with RandomForest."""
         model, X, y = setup_rf_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        ins_score = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        ins_score = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score) and np.isfinite(ins_score)
 
     def test_gradient_boosting(self, setup_gb_model):
         """Works with GradientBoosting."""
         model, X, y = setup_gb_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        ins_score = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        ins_score = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score) and np.isfinite(ins_score)
 
 
@@ -733,12 +677,8 @@ class TestEdgeCases:
         model.fit(X, y)
 
         exp = create_explanation(np.array([0.8, 0.2]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        ins_score = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        ins_score = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score) and np.isfinite(ins_score)
 
     def test_many_features(self):
@@ -750,39 +690,29 @@ class TestEdgeCases:
         model.fit(X, y)
 
         exp = create_explanation(np.abs(np.random.randn(20)))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score)
 
     def test_zero_attributions(self, setup_model):
         """Handles all-zero attributions gracefully."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.0, 0.0, 0.0, 0.0]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        ins_score = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        ins_score = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score) and np.isfinite(ins_score)
 
     def test_identical_attributions(self, setup_model):
         """Handles identical attribution values."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.5, 0.5, 0.5]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score)
 
     def test_negative_attributions(self, setup_model):
         """Handles negative attribution values correctly."""
         model, X, y = setup_model
         exp = create_explanation(np.array([-0.5, -0.3, -0.1, -0.8]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score)
 
     def test_mixed_sign_attributions(self, setup_model):
@@ -790,8 +720,7 @@ class TestEdgeCases:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, -0.3, 0.1, -0.8]))
         del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            use_absolute=True
+            model, X[0], exp, baseline="mean", background_data=X, use_absolute=True
         )
         assert np.isfinite(del_score)
 
@@ -799,115 +728,22 @@ class TestEdgeCases:
         """Handles very small attribution values."""
         model, X, y = setup_model
         exp = create_explanation(np.array([1e-10, 1e-11, 1e-12, 1e-9]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score)
 
     def test_very_large_attributions(self, setup_model):
         """Handles very large attribution values."""
         model, X, y = setup_model
         exp = create_explanation(np.array([1e6, 1e5, 1e4, 1e7]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score)
 
     def test_single_dominant_attribution(self, setup_model):
         """Handles one feature dominating all others."""
         model, X, y = setup_model
         exp = create_explanation(np.array([100.0, 0.001, 0.001, 0.001]))
-        del_score = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        del_score = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(del_score)
-
-
-# =============================================================================
-# 9. Semantic Validation
-# =============================================================================
-
-
-class TestSemanticValidation:
-    """Tests verifying metric behaviour matches theoretical expectations."""
-
-    def test_good_explanation_lower_deletion(self, setup_model):
-        """
-        Good explanations (correct feature ordering) should generally yield
-        lower Deletion AUC than random attributions, because removing truly
-        important features first causes faster prediction drop.
-        """
-        model, X, y = setup_model
-        instance = X[0]
-
-        # Good explanation: use model coefficients as attributions
-        coeffs = np.abs(model.coef_[0]) if model.coef_.ndim == 2 else np.abs(model.coef_)
-        good_exp = create_explanation(coeffs[:4])
-
-        # Random explanation
-        np.random.seed(99)
-        random_exp = create_explanation(np.random.rand(4) * 0.01 + 0.01)
-
-        good_score = compute_deletion_auc(
-            model, instance, good_exp, baseline="mean", background_data=X
-        )
-        random_score = compute_deletion_auc(
-            model, instance, random_exp, baseline="mean", background_data=X
-        )
-        # Good explanation should have lower or equal deletion AUC
-        assert good_score <= random_score + 0.15  # Allow small tolerance
-
-    def test_good_explanation_higher_insertion(self, setup_model):
-        """
-        Good explanations should generally yield higher Insertion AUC than
-        random attributions, because inserting truly important features first
-        causes faster prediction recovery.
-        """
-        model, X, y = setup_model
-        instance = X[0]
-
-        coeffs = np.abs(model.coef_[0]) if model.coef_.ndim == 2 else np.abs(model.coef_)
-        good_exp = create_explanation(coeffs[:4])
-
-        np.random.seed(99)
-        random_exp = create_explanation(np.random.rand(4) * 0.01 + 0.01)
-
-        good_score = compute_insertion_auc(
-            model, instance, good_exp, baseline="mean", background_data=X
-        )
-        random_score = compute_insertion_auc(
-            model, instance, random_exp, baseline="mean", background_data=X
-        )
-        # Good explanation should have higher or equal insertion AUC
-        assert good_score >= random_score - 0.15
-
-    def test_insertion_generally_increases(self, setup_model):
-        """Insertion curve should generally trend upward."""
-        model, X, y = setup_model
-        coeffs = np.abs(model.coef_[0]) if model.coef_.ndim == 2 else np.abs(model.coef_)
-        exp = create_explanation(coeffs[:4])
-
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
-        )
-        curve = result["curve"]
-        # Final prediction should be >= baseline prediction (generally)
-        assert curve[-1] >= curve[0] - 0.1
-
-    def test_deletion_generally_decreases(self, setup_model):
-        """Deletion curve should generally trend downward."""
-        model, X, y = setup_model
-        coeffs = np.abs(model.coef_[0]) if model.coef_.ndim == 2 else np.abs(model.coef_)
-        exp = create_explanation(coeffs[:4])
-
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
-        )
-        curve = result["curve"]
-        # Original prediction should generally be >= final prediction
-        assert curve[0] >= curve[-1] - 0.1
 
 
 # =============================================================================
@@ -918,68 +754,67 @@ class TestSemanticValidation:
 class TestTargetClass:
     """Tests for target_class parameter."""
 
-    def test_auto_target_class(self, setup_model):
-        """Auto-detects target class as predicted class."""
+    def test_implicit_target_uses_explanation_identity(self, setup_model):
+        """The implicit target comes from the explanation identity."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
-        # Should have set a valid target class
-        assert result["target_class"] in [0, 1, 2]
+        assert result["target_class"] == 0
 
     def test_explicit_target_class_0(self, setup_model):
         """Works with explicitly set target_class=0."""
         model, X, y = setup_model
-        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
+        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]), target_class=0)
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            target_class=0, return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, target_class=0, return_curve=True
         )
         assert result["target_class"] == 0
 
     def test_explicit_target_class_1(self, setup_model):
         """Works with target_class=1."""
         model, X, y = setup_model
-        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
+        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]), target_class=1)
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            target_class=1, return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, target_class=1, return_curve=True
         )
         assert result["target_class"] == 1
 
     def test_explicit_target_class_2(self, setup_model):
         """Works with target_class=2."""
         model, X, y = setup_model
-        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
+        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]), target_class=2)
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            target_class=2
+            model, X[0], exp, baseline="mean", background_data=X, target_class=2
         )
         assert np.isfinite(result)
 
-    def test_different_target_classes_different_scores(self, setup_model):
-        """Different target classes generally produce different scores."""
+    def test_each_target_tracks_its_declared_model_output(self, setup_model):
+        """Each aligned explanation reports the requested model output."""
         model, X, y = setup_model
-        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        scores = []
+        expected_outputs = model.predict_proba(X[0].reshape(1, -1))[0]
         for tc in range(3):
-            score = compute_deletion_auc(
-                model, X[0], exp, baseline="mean", background_data=X,
-                target_class=tc
+            exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]), target_class=tc)
+            result = compute_deletion_auc(
+                model,
+                X[0],
+                exp,
+                baseline="mean",
+                background_data=X,
+                target_class=tc,
+                return_curve=True,
             )
-            scores.append(score)
-        # At least some should differ
-        assert len(set(round(s, 8) for s in scores)) >= 2
+            assert result["target_class"] == tc
+            assert np.isclose(result["original_prediction"], expected_outputs[tc])
+            assert np.isfinite(result["auc"])
 
     def test_insertion_target_class(self, setup_model):
         """Insertion AUC respects target_class."""
         model, X, y = setup_model
-        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
+        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]), target_class=1)
         result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            target_class=1, return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, target_class=1, return_curve=True
         )
         assert result["target_class"] == 1
 
@@ -997,8 +832,13 @@ class TestUseAbsolute:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.1, -0.8, 0.3, -0.5]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            use_absolute=True, return_curve=True
+            model,
+            X[0],
+            exp,
+            baseline="mean",
+            background_data=X,
+            use_absolute=True,
+            return_curve=True,
         )
         # Feature 1 (|-0.8|=0.8) should be first in removal order
         assert result["feature_order"][0] == 1
@@ -1008,26 +848,27 @@ class TestUseAbsolute:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.1, -0.8, 0.3, -0.5]))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            use_absolute=False, return_curve=True
+            model,
+            X[0],
+            exp,
+            baseline="mean",
+            background_data=X,
+            use_absolute=False,
+            return_curve=True,
         )
         # Feature 2 (0.3, highest positive) should be first
         assert result["feature_order"][0] == 2
 
-    def test_use_absolute_affects_score(self, setup_model):
-        """Different use_absolute settings produce different scores."""
+    def test_use_absolute_modes_return_finite_scores(self, setup_model):
+        """Both attribution-ordering modes satisfy the numeric score contract."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.1, -0.8, 0.3, -0.5]))
         score_abs = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            use_absolute=True
+            model, X[0], exp, baseline="mean", background_data=X, use_absolute=True
         )
         score_raw = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            use_absolute=False
+            model, X[0], exp, baseline="mean", background_data=X, use_absolute=False
         )
-        # Should generally produce different values with mixed-sign attributions
-        # (can be same in degenerate cases, so just check both are finite)
         assert np.isfinite(score_abs) and np.isfinite(score_raw)
 
     def test_insertion_use_absolute(self, setup_model):
@@ -1035,8 +876,13 @@ class TestUseAbsolute:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.1, -0.8, 0.3, -0.5]))
         result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            use_absolute=True, return_curve=True
+            model,
+            X[0],
+            exp,
+            baseline="mean",
+            background_data=X,
+            use_absolute=True,
+            return_curve=True,
         )
         assert result["feature_order"][0] == 1  # |-0.8| is largest
 
@@ -1066,9 +912,7 @@ class TestCombined:
         result = compute_insertion_deletion_auc(
             model, X[0], exp, baseline="mean", background_data=X
         )
-        assert abs(
-            result["delta"] - (result["insertion_auc"] - result["deletion_auc"])
-        ) < 1e-10
+        assert abs(result["delta"] - (result["insertion_auc"] - result["deletion_auc"])) < 1e-10
 
     def test_combined_matches_individual(self, setup_model):
         """Combined scores match individual function calls."""
@@ -1077,12 +921,8 @@ class TestCombined:
         combined = compute_insertion_deletion_auc(
             model, X[0], exp, baseline="mean", background_data=X
         )
-        ins = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        dele = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        ins = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        dele = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert abs(combined["insertion_auc"] - ins) < 1e-10
         assert abs(combined["deletion_auc"] - dele) < 1e-10
 
@@ -1091,18 +931,16 @@ class TestCombined:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result = compute_insertion_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=2
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=2
         )
         assert all(np.isfinite(v) for v in result.values())
 
     def test_combined_with_target_class(self, setup_model):
         """Combined function forwards target_class."""
         model, X, y = setup_model
-        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
+        exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]), target_class=1)
         result = compute_insertion_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            target_class=1
+            model, X[0], exp, baseline="mean", background_data=X, target_class=1
         )
         assert all(np.isfinite(v) for v in result.values())
 
@@ -1113,24 +951,7 @@ class TestCombined:
 
 
 class TestComplementarity:
-    """Tests verifying the complementary nature of insertion/deletion."""
-
-    def test_good_explanation_positive_delta(self, setup_model):
-        """
-        A good explanation should generally have positive delta
-        (insertion > deletion), meaning it both recovers prediction fast
-        and degrades it fast.
-        """
-        model, X, y = setup_model
-        coeffs = np.abs(model.coef_[0]) if model.coef_.ndim == 2 else np.abs(model.coef_)
-        exp = create_explanation(coeffs[:4])
-
-        result = compute_insertion_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        # Good explanation should generally have positive delta
-        # (but allow for edge cases with tolerance)
-        assert result["delta"] > -0.3
+    """Tests exact endpoint relationships between the two paths."""
 
     def test_insertion_endpoint_matches_deletion_start(self, setup_model):
         """
@@ -1142,12 +963,10 @@ class TestComplementarity:
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
 
         ins = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         dele = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
 
         # Final insertion point ≈ start of deletion curve
@@ -1166,18 +985,14 @@ class TestWineDataset:
         """Deletion AUC works on Wine (13 features)."""
         model, X, y = setup_wine
         exp = create_explanation(np.abs(np.random.randn(13)))
-        result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(result)
 
     def test_insertion_wine(self, setup_wine):
         """Insertion AUC works on Wine (13 features)."""
         model, X, y = setup_wine
         exp = create_explanation(np.abs(np.random.randn(13)))
-        result = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        result = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert np.isfinite(result)
 
     def test_combined_wine(self, setup_wine):
@@ -1194,8 +1009,7 @@ class TestWineDataset:
         model, X, y = setup_wine
         exp = create_explanation(np.abs(np.random.randn(13)))
         result = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            n_steps=5, return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, n_steps=5, return_curve=True
         )
         assert len(result["curve"]) == 6  # 5 steps + initial
 
@@ -1209,8 +1023,12 @@ class TestWineDataset:
             explanations.append(exp)
 
         result = compute_batch_deletion_auc(
-            model, X[:10], explanations,
-            baseline="mean", max_samples=10
+            model,
+            X[:10],
+            explanations,
+            baseline="mean",
+            max_samples=10,
+            background_data=X[10:],
         )
         assert result["n_samples"] > 0
 
@@ -1227,24 +1045,16 @@ class TestReproducibility:
         """Same inputs produce same Deletion AUC."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        score1 = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        score2 = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        score1 = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        score2 = compute_deletion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert score1 == score2
 
     def test_insertion_deterministic(self, setup_model):
         """Same inputs produce same Insertion AUC."""
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
-        score1 = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
-        score2 = compute_insertion_auc(
-            model, X[0], exp, baseline="mean", background_data=X
-        )
+        score1 = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
+        score2 = compute_insertion_auc(model, X[0], exp, baseline="mean", background_data=X)
         assert score1 == score2
 
     def test_curve_deterministic(self, setup_model):
@@ -1252,12 +1062,10 @@ class TestReproducibility:
         model, X, y = setup_model
         exp = create_explanation(np.array([0.5, 0.3, 0.1, 0.8]))
         result1 = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         result2 = compute_deletion_auc(
-            model, X[0], exp, baseline="mean", background_data=X,
-            return_curve=True
+            model, X[0], exp, baseline="mean", background_data=X, return_curve=True
         )
         np.testing.assert_array_equal(result1["curve"], result2["curve"])
         np.testing.assert_array_equal(result1["feature_order"], result2["feature_order"])

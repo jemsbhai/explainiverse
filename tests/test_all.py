@@ -14,10 +14,7 @@ import sys
 
 def run_all_tests():
     """Run all pytest tests."""
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/", "-v", "--tb=short"],
-        cwd="."
-    )
+    result = subprocess.run([sys.executable, "-m", "pytest", "tests/", "-v", "--tb=short"], cwd=".")
     sys.exit(result.returncode)
 
 

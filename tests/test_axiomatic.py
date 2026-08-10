@@ -1,11 +1,13 @@
 # tests/test_axiomatic.py
 """
-Tests for Phase 6 axiomatic evaluation metrics.
+Tests for axiom-related checks and explicitly scoped diagnostics.
 
-- Completeness (Sundararajan et al., 2017)
-- Non-Sensitivity (Nguyen & Martínez, 2020)
-- Input Invariance (Kindermans et al., 2017)
-- Symmetry (Sundararajan et al., 2017)
+- Pointwise completeness residual (Sundararajan et al., 2017)
+- Non-Sensitivity set mismatch (Nguyen & Martínez, 2020)
+- Translation sensitivity and a restricted compensated input-shift check
+  (Kindermans et al., 2017)
+- Caller-certified symmetric-pair attribution disparity
+  (Sundararajan et al., 2017)
 
 References:
     Sundararajan, M., Taly, A., & Yan, Q. (2017). Axiomatic Attribution
@@ -18,31 +20,30 @@ References:
     Model Interpretability. arXiv:2007.07584.
 """
 
-import pytest
 import numpy as np
-from unittest.mock import MagicMock
+import pytest
 
 from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation.axiomatic import (
-    compute_completeness,
-    compute_completeness_score,
-    compute_batch_completeness,
-    compute_non_sensitivity,
-    compute_non_sensitivity_score,
-    compute_batch_non_sensitivity,
-    compute_input_invariance,
-    compute_batch_input_invariance,
-    compute_symmetry,
-    compute_symmetry_score,
-    compute_batch_symmetry,
     _detect_non_sensitive_features,
     _safe_model_output,
+    compute_batch_completeness,
+    compute_batch_input_invariance,
+    compute_batch_non_sensitivity,
+    compute_batch_symmetry,
+    compute_completeness,
+    compute_completeness_score,
+    compute_input_invariance,
+    compute_non_sensitivity,
+    compute_non_sensitivity_score,
+    compute_symmetry,
+    compute_symmetry_score,
 )
-
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def feature_names():
@@ -74,9 +75,11 @@ def linear_model_fn():
     Features 2 and 3 are non-sensitive (zero weight).
     """
     weights = np.array([0.5, 1.0, 0.0, 0.0])
+
     def model_fn(x):
         x = np.asarray(x, dtype=np.float64).flatten()
         return float(np.dot(weights, x))
+
     return model_fn
 
 
@@ -87,9 +90,11 @@ def symmetric_model_fn():
     Swapping x0 and x1 does not change output.
     """
     weights = np.array([1.0, 1.0, 2.0, 3.0])
+
     def model_fn(x):
         x = np.asarray(x, dtype=np.float64).flatten()
         return float(np.dot(weights, x))
+
     return model_fn
 
 
@@ -98,23 +103,26 @@ def trained_model_and_explainer(feature_names):
     """
     Train a real sklearn model and create a LIME explainer.
     """
-    from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.datasets import make_classification
+    from sklearn.ensemble import GradientBoostingClassifier
+
     from explainiverse.adapters import SklearnAdapter
     from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 
     X, y = make_classification(
-        n_samples=100, n_features=4, n_informative=3,
-        n_redundant=0, n_classes=2, random_state=42,
+        n_samples=100,
+        n_features=4,
+        n_informative=3,
+        n_redundant=0,
+        n_classes=2,
+        random_state=42,
     )
     X = X.astype(np.float32)
 
     clf = GradientBoostingClassifier(n_estimators=20, random_state=42)
     clf.fit(X, y)
 
-    adapter = SklearnAdapter(
-        clf, feature_names=feature_names, class_names=["class_0", "class_1"]
-    )
+    adapter = SklearnAdapter(clf, feature_names=feature_names, class_names=["class_0", "class_1"])
     explainer = LimeExplainer(
         model=adapter,
         training_data=X,
@@ -128,11 +136,13 @@ def trained_model_and_explainer(feature_names):
 # Mock Explainers
 # =============================================================================
 
+
 class _PerfectCompletenessExplainer:
     """
     Mock explainer that returns attributions summing to exactly f(x) - f(baseline).
     Completeness score should be 0.0.
     """
+
     def __init__(self, feature_names, model_fn, baseline=None):
         self.feature_names = feature_names
         self.model_fn = model_fn
@@ -142,7 +152,8 @@ class _PerfectCompletenessExplainer:
         instance = np.asarray(instance, dtype=np.float64).flatten()
         n = len(instance)
         baseline = (
-            np.zeros(n) if self.baseline is None
+            np.zeros(n)
+            if self.baseline is None
             else np.asarray(self.baseline, dtype=np.float64).flatten()
         )
         target_sum = self.model_fn(instance) - self.model_fn(baseline)
@@ -162,6 +173,7 @@ class _BadCompletenessExplainer:
     Mock explainer that always returns uniform attributions of fixed value.
     Will violate completeness unless coincidentally correct.
     """
+
     def __init__(self, feature_names, fixed_value=0.25):
         self.feature_names = feature_names
         self.fixed_value = fixed_value
@@ -181,6 +193,7 @@ class _SymmetricExplainer:
     """
     Mock explainer that gives equal attribution to symmetric features.
     """
+
     def __init__(self, feature_names):
         self.feature_names = feature_names
 
@@ -206,6 +219,7 @@ class _AsymmetricExplainer:
     """
     Mock explainer that gives different attribution to symmetric features.
     """
+
     def __init__(self, feature_names):
         self.feature_names = feature_names
 
@@ -227,6 +241,7 @@ class _NonSensitiveAwareExplainer:
     """
     Mock explainer that gives zero attribution to non-sensitive features.
     """
+
     def __init__(self, feature_names, sensitive_mask):
         self.feature_names = feature_names
         self.sensitive_mask = sensitive_mask
@@ -252,6 +267,7 @@ class _NonSensitiveUnawareExplainer:
     """
     Mock explainer that assigns attribution to all features including non-sensitive ones.
     """
+
     def __init__(self, feature_names):
         self.feature_names = feature_names
 
@@ -270,6 +286,7 @@ class _NonSensitiveUnawareExplainer:
 # =============================================================================
 # COMPLETENESS TESTS
 # =============================================================================
+
 
 class TestCompletenessBasic:
     """Basic functionality tests for Completeness."""
@@ -337,7 +354,7 @@ class TestCompletenessBasic:
     def test_negative_attributions(self, linear_model_fn):
         """Negative attributions should work correctly."""
         x = np.array([1.0, -2.0, 0.0, 0.0])
-        f_diff = linear_model_fn(x) - linear_model_fn(np.zeros(4))
+        linear_model_fn(x) - linear_model_fn(np.zeros(4))
         # f(x) = 0.5*1 + 1.0*(-2) = -1.5
         attrs = np.array([-1.5, 0.0, 0.0, 0.0])
         result = compute_completeness(attrs, linear_model_fn, x)
@@ -352,7 +369,9 @@ class TestCompletenessWithOutputFunc:
         attrs = np.array([0.1, 0.2, 0.3, 0.4])
         r1 = compute_completeness(attrs, linear_model_fn, single_instance)
         r2 = compute_completeness(
-            attrs, linear_model_fn, single_instance,
+            attrs,
+            linear_model_fn,
+            single_instance,
             output_func=lambda x: x,
         )
         assert abs(r1 - r2) < 1e-10
@@ -364,7 +383,9 @@ class TestCompletenessWithOutputFunc:
         squared_diff = f_x**2 - f_b**2
         attrs = np.array([squared_diff, 0.0, 0.0, 0.0])
         result = compute_completeness(
-            attrs, linear_model_fn, single_instance,
+            attrs,
+            linear_model_fn,
+            single_instance,
             output_func=lambda x: x**2,
         )
         assert result < 1e-10
@@ -387,7 +408,9 @@ class TestCompletenessErrors:
         attrs = np.array([0.1, 0.2, 0.3, 0.4])
         with pytest.raises(ValueError, match="baseline length"):
             compute_completeness(
-                attrs, linear_model_fn, single_instance,
+                attrs,
+                linear_model_fn,
+                single_instance,
                 baseline=np.array([1.0, 2.0]),
             )
 
@@ -414,10 +437,11 @@ class TestCompletenessHighLevel:
     def test_with_real_explainer(self, trained_model_and_explainer):
         """Completeness score with a real trained model and LIME explainer."""
         adapter, explainer, X = trained_model_and_explainer
-        model_fn = lambda x: float(
-            adapter.predict(x.reshape(1, -1))[0, 1]
-        )
-        result = compute_completeness_score(explainer, model_fn, X[0])
+
+        def model_fn(x):
+            return float(adapter.predict(x.reshape(1, -1))[0, 1])
+
+        result = compute_completeness_score(explainer, model_fn, X[0], verify_determinism=False)
         assert isinstance(result, float)
         assert result >= 0.0
 
@@ -506,56 +530,77 @@ class TestCompletenessBatch:
 # NON-SENSITIVITY TESTS
 # =============================================================================
 
+
 class TestNonSensitivityDetection:
     """Tests for automatic non-sensitive feature detection."""
 
     def test_detect_zero_weight_features(self, linear_model_fn, single_instance):
         """Features with zero weight should be detected as non-sensitive."""
         mask = _detect_non_sensitive_features(
-            linear_model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            linear_model_fn,
+            single_instance,
+            n_perturbations=20,
+            tolerance=1e-5,
+            seed=42,
         )
         # Features 2 and 3 have zero weight
-        assert mask[2] == True
-        assert mask[3] == True
+        assert mask[2]
+        assert mask[3]
 
     def test_detect_nonzero_weight_features(self, linear_model_fn, single_instance):
         """Features with nonzero weight should be detected as sensitive."""
         mask = _detect_non_sensitive_features(
-            linear_model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            linear_model_fn,
+            single_instance,
+            n_perturbations=20,
+            tolerance=1e-5,
+            seed=42,
         )
         # Features 0 and 1 have nonzero weight
-        assert mask[0] == False
-        assert mask[1] == False
+        assert not mask[0]
+        assert not mask[1]
 
     def test_all_sensitive_model(self, single_instance):
         """Model that uses all features should detect none as non-sensitive."""
+
         def model_fn(x):
             return float(np.sum(x))
+
         mask = _detect_non_sensitive_features(
-            model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            model_fn,
+            single_instance,
+            n_perturbations=20,
+            tolerance=1e-5,
+            seed=42,
         )
         assert not np.any(mask)
 
     def test_all_non_sensitive_model(self, single_instance):
         """Constant model should detect all features as non-sensitive."""
+
         def model_fn(x):
             return 1.0
+
         mask = _detect_non_sensitive_features(
-            model_fn, single_instance,
-            n_perturbations=10, tolerance=1e-5, seed=42,
+            model_fn,
+            single_instance,
+            n_perturbations=10,
+            tolerance=1e-5,
+            seed=42,
         )
         assert np.all(mask)
 
     def test_seed_reproducibility(self, linear_model_fn, single_instance):
         """Same seed should give same detection results."""
         m1 = _detect_non_sensitive_features(
-            linear_model_fn, single_instance, seed=123,
+            linear_model_fn,
+            single_instance,
+            seed=123,
         )
         m2 = _detect_non_sensitive_features(
-            linear_model_fn, single_instance, seed=123,
+            linear_model_fn,
+            single_instance,
+            seed=123,
         )
         np.testing.assert_array_equal(m1, m2)
 
@@ -566,24 +611,35 @@ class TestNonSensitivityBasic:
     def test_returns_float(self, linear_model_fn, single_instance):
         attrs = np.array([0.1, 0.2, 0.3, 0.4])
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance, seed=42,
+            attrs,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
         assert isinstance(result, float)
 
     def test_non_negative(self, linear_model_fn, single_instance):
         attrs = np.array([0.1, 0.2, 0.3, 0.4])
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance, seed=42,
+            attrs,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
         assert result >= 0.0
 
     def test_zero_for_no_non_sensitive(self, single_instance):
         """If model uses all features, score should be 0 (vacuously satisfied)."""
+
         def model_fn(x):
             return float(np.sum(x))
+
         attrs = np.array([0.5, 0.5, 0.5, 0.5])
         result = compute_non_sensitivity(
-            attrs, model_fn, single_instance, seed=42,
+            attrs,
+            model_fn,
+            single_instance,
+            non_sensitive_features=np.zeros(4, dtype=bool),
         )
         assert result == 0.0
 
@@ -591,8 +647,10 @@ class TestNonSensitivityBasic:
         """Zero attribution on non-sensitive features → score = 0."""
         attrs = np.array([0.5, 1.0, 0.0, 0.0])  # f2, f3 get zero
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            attrs,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
         assert result < 1e-10
 
@@ -600,21 +658,25 @@ class TestNonSensitivityBasic:
         """Attributing to non-sensitive features → positive score."""
         attrs = np.array([0.1, 0.2, 0.5, 0.8])  # f2, f3 get nonzero
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            attrs,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
-        # Should be approximately |0.5| + |0.8| = 1.3
-        assert result > 1.0
+        # Both reference-zero features are absent from the attribution-zero set.
+        assert result == 2.0
 
     def test_user_provided_mask(self, linear_model_fn, single_instance):
         """User-provided non-sensitive mask should be used directly."""
         ns_mask = np.array([False, False, True, True])
         attrs = np.array([0.1, 0.2, 0.5, 0.8])
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance,
+            attrs,
+            linear_model_fn,
+            single_instance,
             non_sensitive_features=ns_mask,
         )
-        expected = abs(0.5) + abs(0.8)
+        expected = 2.0  # |A0 symmetric_difference X0|
         assert abs(result - expected) < 1e-10
 
     def test_normalize(self, linear_model_fn, single_instance):
@@ -622,36 +684,42 @@ class TestNonSensitivityBasic:
         attrs = np.array([0.1, 0.2, 0.5, 0.8])
         ns_mask = np.array([False, False, True, True])
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance,
-            non_sensitive_features=ns_mask, normalize=True,
+            attrs,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=ns_mask,
+            normalize=True,
         )
         assert 0.0 <= result <= 1.0
-        total = np.sum(np.abs(attrs))
-        ns_total = abs(0.5) + abs(0.8)
-        assert abs(result - ns_total / total) < 1e-10
+        assert result == 2 / 4
 
     def test_normalize_zero_attribution(self, linear_model_fn, single_instance):
-        """Normalized with all-zero attributions should return 0."""
+        """False zeros on sensitive features count as mismatches."""
         attrs = np.zeros(4)
         ns_mask = np.array([False, False, True, True])
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance,
-            non_sensitive_features=ns_mask, normalize=True,
+            attrs,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=ns_mask,
+            normalize=True,
         )
-        assert result == 0.0
+        assert result == 2 / 4
 
     def test_all_features_non_sensitive(self, single_instance):
         """Constant model: all features non-sensitive."""
+
         def model_fn(x):
             return 42.0
+
         attrs = np.array([0.1, 0.2, 0.3, 0.4])
         result = compute_non_sensitivity(
-            attrs, model_fn, single_instance,
-            n_perturbations=10, tolerance=1e-5, seed=42,
+            attrs,
+            model_fn,
+            single_instance,
+            non_sensitive_features=np.ones(4, dtype=bool),
         )
-        # All features are non-sensitive, score = sum(|attrs|)
-        expected = np.sum(np.abs(attrs))
-        assert abs(result - expected) < 1e-10
+        assert result == 4.0
 
 
 class TestNonSensitivityErrors:
@@ -672,7 +740,9 @@ class TestNonSensitivityErrors:
         ns_mask = np.array([True, False])
         with pytest.raises(ValueError, match="non_sensitive_features length"):
             compute_non_sensitivity(
-                attrs, linear_model_fn, single_instance,
+                attrs,
+                linear_model_fn,
+                single_instance,
                 non_sensitive_features=ns_mask,
             )
 
@@ -685,8 +755,10 @@ class TestNonSensitivityHighLevel:
         sensitive_mask = [True, True, False, False]
         explainer = _NonSensitiveAwareExplainer(feature_names, sensitive_mask)
         result = compute_non_sensitivity_score(
-            explainer, linear_model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            explainer,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
         assert result < 1e-10
 
@@ -696,23 +768,32 @@ class TestNonSensitivityHighLevel:
         aware = _NonSensitiveAwareExplainer(feature_names, sensitive_mask)
         unaware = _NonSensitiveUnawareExplainer(feature_names)
         score_aware = compute_non_sensitivity_score(
-            aware, linear_model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            aware,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
         score_unaware = compute_non_sensitivity_score(
-            unaware, linear_model_fn, single_instance,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            unaware,
+            linear_model_fn,
+            single_instance,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
         assert score_aware < score_unaware
 
     def test_with_real_explainer(self, trained_model_and_explainer):
-        """Non-Sensitivity score with a real trained model and LIME."""
+        """Non-Sensitivity accepts a caller-supplied reference set."""
         adapter, explainer, X = trained_model_and_explainer
-        model_fn = lambda x: float(
-            adapter.predict(x.reshape(1, -1))[0, 1]
-        )
+
+        def model_fn(x):
+            return float(adapter.predict(x.reshape(1, -1))[0, 1])
+
         result = compute_non_sensitivity_score(
-            explainer, model_fn, X[0], seed=42,
+            explainer,
+            model_fn,
+            X[0],
+            non_sensitive_features=np.zeros(X.shape[1], dtype=bool),
+            verify_determinism=False,
         )
         assert isinstance(result, float)
         assert result >= 0.0
@@ -742,7 +823,7 @@ class TestNonSensitivityBatch:
             explainer=explainer,
             model_fn=linear_model_fn,
             X=sample_data,
-            n_perturbations=20, tolerance=1e-5, seed=42,
+            non_sensitive_features=np.array([False, False, True, True]),
         )
         assert result["n_evaluated"] == len(sample_data)
 
@@ -772,101 +853,138 @@ class TestNonSensitivityBatch:
 # INPUT INVARIANCE TESTS
 # =============================================================================
 
+
 class TestInputInvarianceBasic:
-    """Basic functionality tests for Input Invariance (simplified)."""
+    """Tests for the warned, uncompensated translation diagnostic."""
 
     def test_returns_float(self, single_instance):
         """Score should be a float."""
-        explain_fn = lambda x: np.array([0.1, 0.2, 0.3, 0.4])
+
+        def explain_fn(x):
+            return np.array([0.1, 0.2, 0.3, 0.4])
+
         result = compute_input_invariance(explain_fn, single_instance, seed=42)
         assert isinstance(result, float)
 
     def test_non_negative(self, single_instance):
         """Score should be non-negative."""
-        explain_fn = lambda x: np.array([0.1, 0.2, 0.3, 0.4])
+
+        def explain_fn(x):
+            return np.array([0.1, 0.2, 0.3, 0.4])
+
         result = compute_input_invariance(explain_fn, single_instance, seed=42)
         assert result >= 0.0
 
     def test_constant_explainer_invariant(self, single_instance):
-        """Explainer returning constant values is trivially input invariant."""
-        explain_fn = lambda x: np.array([1.0, 1.0, 1.0, 1.0])
+        """Constant explanation vectors have zero translation sensitivity."""
+
+        def explain_fn(x):
+            return np.array([1.0, 1.0, 1.0, 1.0])
+
         result = compute_input_invariance(explain_fn, single_instance, seed=42)
         assert result < 1e-10
 
     def test_gradient_explainer_invariant(self, single_instance):
-        """Pure gradient explainer (constant output) should be invariant."""
+        """A constant gradient vector has zero translation sensitivity."""
         # Gradient of linear model is constant
         gradient = np.array([0.5, 1.0, 0.0, 0.0])
-        explain_fn = lambda x: gradient.copy()
+
+        def explain_fn(x):
+            return gradient.copy()
+
         result = compute_input_invariance(explain_fn, single_instance, seed=42)
         assert result < 1e-10
 
     def test_grad_times_input_not_invariant(self, single_instance):
-        """Gradient × Input is NOT input invariant (shift carries through)."""
+        """Gradient × Input changes under an uncompensated input shift."""
         gradient = np.array([0.5, 1.0, 0.3, 0.2])
-        explain_fn = lambda x: gradient * np.asarray(x)
+
+        def explain_fn(x):
+            return gradient * np.asarray(x)
+
         result = compute_input_invariance(explain_fn, single_instance, seed=42)
         assert result > 0.0  # Should violate
 
     def test_with_explicit_shift_float(self, single_instance):
         """Explicit float shift."""
-        explain_fn = lambda x: np.array([1.0, 1.0, 1.0, 1.0])
+
+        def explain_fn(x):
+            return np.array([1.0, 1.0, 1.0, 1.0])
+
         result = compute_input_invariance(
-            explain_fn, single_instance, shift=2.0,
+            explain_fn,
+            single_instance,
+            shift=2.0,
         )
         assert result < 1e-10
 
     def test_with_explicit_shift_array(self, single_instance):
         """Explicit array shift."""
-        explain_fn = lambda x: np.array([1.0, 1.0, 1.0, 1.0])
+
+        def explain_fn(x):
+            return np.array([1.0, 1.0, 1.0, 1.0])
+
         shift = np.array([0.5, -0.5, 1.0, -1.0])
         result = compute_input_invariance(
-            explain_fn, single_instance, shift=shift,
+            explain_fn,
+            single_instance,
+            shift=shift,
         )
         assert result < 1e-10
 
     def test_seed_reproducibility(self, single_instance):
         """Same seed should produce same result."""
         gradient = np.array([0.5, 1.0, 0.3, 0.2])
-        explain_fn = lambda x: gradient * np.asarray(x)
+
+        def explain_fn(x):
+            return gradient * np.asarray(x)
+
         r1 = compute_input_invariance(explain_fn, single_instance, seed=99)
         r2 = compute_input_invariance(explain_fn, single_instance, seed=99)
         assert abs(r1 - r2) < 1e-10
 
-    def test_different_seeds_different_results(self, single_instance):
-        """Different seeds should generally produce different results."""
+    @pytest.mark.parametrize("seed", [1, 2])
+    def test_seeded_shift_matches_exact_randomstate_rms(self, single_instance, seed):
+        """The seed selects the exact shift used in the reported RMS equation."""
         gradient = np.array([0.5, 1.0, 0.3, 0.2])
-        explain_fn = lambda x: gradient * np.asarray(x)
-        r1 = compute_input_invariance(explain_fn, single_instance, seed=1)
-        r2 = compute_input_invariance(explain_fn, single_instance, seed=2)
-        # Not guaranteed but very likely different
-        # Just check both are valid
-        assert r1 >= 0.0
-        assert r2 >= 0.0
+
+        def explain_fn(x):
+            return gradient * np.asarray(x)
+
+        result = compute_input_invariance(explain_fn, single_instance, seed=seed)
+        shift = np.random.RandomState(seed).uniform(-1.0, 1.0, single_instance.size)
+        expected = np.sqrt(np.mean(np.square(gradient * shift)))
+        assert result == pytest.approx(expected)
 
     def test_larger_shift_larger_violation_for_grad_input(self, single_instance):
         """For grad×input, larger shift should mean larger violation."""
         gradient = np.array([1.0, 1.0, 1.0, 1.0])
-        explain_fn = lambda x: gradient * np.asarray(x)
+
+        def explain_fn(x):
+            return gradient * np.asarray(x)
+
         r_small = compute_input_invariance(explain_fn, single_instance, shift=0.1)
         r_large = compute_input_invariance(explain_fn, single_instance, shift=10.0)
         assert r_large > r_small
 
-    def test_normalized_by_n_features(self):
-        """Score should be normalized by number of features."""
-        # Same total L2 diff but different n_features
-        explain_fn_4 = lambda x: np.asarray(x)  # identity
+    def test_reports_per_feature_rms(self):
+        """A uniform unit shift has unit per-feature RMS at any dimension."""
+
+        # The per-feature change is one in both dimensions.
+        def explain_fn_4(x):
+            return np.asarray(x)  # identity
+
         x4 = np.ones(4)
         r4 = compute_input_invariance(explain_fn_4, x4, shift=1.0)
 
-        explain_fn_8 = lambda x: np.asarray(x)
+        def explain_fn_8(x):
+            return np.asarray(x)
+
         x8 = np.ones(8)
         r8 = compute_input_invariance(explain_fn_8, x8, shift=1.0)
 
-        # r4 = ||shift||_2 / 4 = 2/4 = 0.5
-        # r8 = ||shift||_2 / 8 = 2√2/8 ≈ 0.354
-        # Different because n_features normalizes
-        assert r4 != r8
+        assert r4 == pytest.approx(1.0)
+        assert r8 == pytest.approx(1.0)
 
 
 class TestInputInvarianceErrors:
@@ -877,23 +995,29 @@ class TestInputInvarianceErrors:
             compute_input_invariance("not_callable", single_instance)
 
     def test_shift_wrong_length(self, single_instance):
-        explain_fn = lambda x: np.array([1.0, 1.0, 1.0, 1.0])
+        def explain_fn(x):
+            return np.array([1.0, 1.0, 1.0, 1.0])
+
         with pytest.raises(ValueError, match="shift length"):
             compute_input_invariance(
-                explain_fn, single_instance,
+                explain_fn,
+                single_instance,
                 shift=np.array([1.0, 2.0]),
             )
 
 
 class TestInputInvarianceSemantic:
-    """Semantic validation tests for Input Invariance."""
+    """Relative behavior of the uncompensated translation diagnostic."""
 
     def test_invariant_method_beats_non_invariant(self, single_instance):
-        """Gradient (invariant) should score lower than Grad×Input (not invariant)."""
+        """A constant vector changes less than Gradient × Input."""
         gradient = np.array([0.5, 1.0, 0.3, 0.2])
 
-        invariant_fn = lambda x: gradient.copy()
-        non_invariant_fn = lambda x: gradient * np.asarray(x)
+        def invariant_fn(x):
+            return gradient.copy()
+
+        def non_invariant_fn(x):
+            return gradient * np.asarray(x)
 
         score_inv = compute_input_invariance(invariant_fn, single_instance, seed=42)
         score_non = compute_input_invariance(non_invariant_fn, single_instance, seed=42)
@@ -902,27 +1026,39 @@ class TestInputInvarianceSemantic:
 
 
 class TestInputInvarianceBatch:
-    """Batch tests for Input Invariance."""
+    """Batch tests for uncompensated translation sensitivity."""
 
     def test_batch_basic(self, sample_data):
         """Batch computation should work."""
-        explain_fn = lambda x: np.array([1.0, 1.0, 1.0, 1.0])
+
+        def explain_fn(x):
+            return np.array([1.0, 1.0, 1.0, 1.0])
+
         result = compute_batch_input_invariance(explain_fn, sample_data, seed=42)
         assert result["n_evaluated"] == len(sample_data)
         assert result["mean"] < 1e-10
 
     def test_batch_max_instances(self, sample_data):
         """Test max_instances parameter."""
-        explain_fn = lambda x: np.array([1.0, 1.0, 1.0, 1.0])
+
+        def explain_fn(x):
+            return np.array([1.0, 1.0, 1.0, 1.0])
+
         result = compute_batch_input_invariance(
-            explain_fn, sample_data, max_instances=3, seed=42,
+            explain_fn,
+            sample_data,
+            max_instances=3,
+            seed=42,
         )
         assert result["n_evaluated"] == 3
 
     def test_batch_statistics(self, sample_data):
         """Verify batch statistics."""
         gradient = np.array([0.5, 1.0, 0.3, 0.2])
-        explain_fn = lambda x: gradient * np.asarray(x)
+
+        def explain_fn(x):
+            return gradient * np.asarray(x)
+
         result = compute_batch_input_invariance(explain_fn, sample_data, seed=42)
         scores = result["scores"]
         assert abs(result["mean"] - np.mean(scores)) < 1e-10
@@ -933,14 +1069,14 @@ class TestInputInvarianceBatch:
 # INPUT INVARIANCE PYTORCH TESTS
 # =============================================================================
 
+
 class TestInputInvariancePyTorch:
-    """Tests for Input Invariance with PyTorch model compensation."""
+    """Tests for the supported compensated PyTorch input-shift construction."""
 
     @pytest.fixture
     def simple_pytorch_model(self):
         """Create a simple PyTorch linear model."""
         try:
-            import torch
             import torch.nn as nn
         except ImportError:
             pytest.skip("PyTorch not available")
@@ -955,17 +1091,16 @@ class TestInputInvariancePyTorch:
 
     def test_import_guard(self):
         """Should work if torch is available, skip otherwise."""
-        try:
-            import torch
-        except ImportError:
-            pytest.skip("PyTorch not available")
+        pytest.importorskip("torch")
 
         from explainiverse.evaluation.axiomatic import compute_input_invariance_pytorch
+
         assert callable(compute_input_invariance_pytorch)
 
     def test_returns_float(self, simple_pytorch_model):
         """Score should be a float."""
         import torch
+
         from explainiverse.evaluation.axiomatic import compute_input_invariance_pytorch
 
         def explain_fn(model, x):
@@ -978,14 +1113,18 @@ class TestInputInvariancePyTorch:
 
         instance = np.array([1.0, 2.0, 3.0, 4.0])
         result = compute_input_invariance_pytorch(
-            simple_pytorch_model, explain_fn, instance, seed=42,
+            simple_pytorch_model,
+            explain_fn,
+            instance,
+            seed=42,
         )
         assert isinstance(result, float)
         assert result >= 0.0
 
     def test_gradient_method_is_invariant(self, simple_pytorch_model):
-        """Pure gradient method should be approximately input invariant."""
+        """Compare gradients for one verified compensated input pair."""
         import torch
+
         from explainiverse.evaluation.axiomatic import compute_input_invariance_pytorch
 
         def explain_fn(model, x):
@@ -997,23 +1136,23 @@ class TestInputInvariancePyTorch:
 
         instance = np.array([1.0, 2.0, 3.0, 4.0])
         result = compute_input_invariance_pytorch(
-            simple_pytorch_model, explain_fn, instance,
-            shift=0.5, seed=42,
+            simple_pytorch_model,
+            explain_fn,
+            instance,
+            shift=0.5,
+            seed=42,
         )
-        # Gradient of ReLU network may not be perfectly invariant
-        # but should be relatively small
         assert isinstance(result, float)
         assert result >= 0.0
 
     def test_does_not_modify_original_model(self, simple_pytorch_model):
         """Original model should not be modified (deep copy is used)."""
         import torch
+
         from explainiverse.evaluation.axiomatic import compute_input_invariance_pytorch
 
         # Save original parameters
-        original_params = {
-            name: p.clone() for name, p in simple_pytorch_model.named_parameters()
-        }
+        original_params = {name: p.clone() for name, p in simple_pytorch_model.named_parameters()}
 
         def explain_fn(model, x):
             x_t = torch.tensor(x, dtype=torch.float32).unsqueeze(0).requires_grad_(True)
@@ -1024,17 +1163,20 @@ class TestInputInvariancePyTorch:
 
         instance = np.array([1.0, 2.0, 3.0, 4.0])
         compute_input_invariance_pytorch(
-            simple_pytorch_model, explain_fn, instance, seed=42,
+            simple_pytorch_model,
+            explain_fn,
+            instance,
+            seed=42,
         )
 
         # Check original model is unchanged
         for name, p in simple_pytorch_model.named_parameters():
-            assert torch.allclose(p, original_params[name]), \
-                f"Parameter {name} was modified!"
+            assert torch.allclose(p, original_params[name]), f"Parameter {name} was modified!"
 
     def test_batch_pytorch(self, simple_pytorch_model):
         """Batch Input Invariance PyTorch should work."""
         import torch
+
         from explainiverse.evaluation.axiomatic import compute_batch_input_invariance_pytorch
 
         def explain_fn(model, x):
@@ -1046,7 +1188,10 @@ class TestInputInvariancePyTorch:
 
         X = np.random.randn(5, 4).astype(np.float64)
         result = compute_batch_input_invariance_pytorch(
-            simple_pytorch_model, explain_fn, X, seed=42,
+            simple_pytorch_model,
+            explain_fn,
+            X,
+            seed=42,
         )
         assert result["n_evaluated"] == 5
         assert result["mean"] >= 0.0
@@ -1056,8 +1201,9 @@ class TestInputInvariancePyTorch:
 # SYMMETRY TESTS
 # =============================================================================
 
+
 class TestSymmetryBasic:
-    """Basic functionality tests for Symmetry."""
+    """Basic functionality tests for conditional pair disparity."""
 
     def test_returns_float(self):
         attrs = np.array([0.5, 0.5, 0.3, 0.1])
@@ -1070,7 +1216,7 @@ class TestSymmetryBasic:
         assert result >= 0.0
 
     def test_perfect_symmetry(self):
-        """Equal attributions for symmetric features → score = 0."""
+        """Equal attributions for a caller-certified pair give zero disparity."""
         attrs = np.array([0.5, 0.5, 0.3, 0.1])
         result = compute_symmetry(attrs, symmetric_pairs=[(0, 1)])
         assert result < 1e-10
@@ -1082,10 +1228,10 @@ class TestSymmetryBasic:
         assert abs(result - 0.6) < 1e-10
 
     def test_empty_pairs(self):
-        """Empty pairs should return 0."""
+        """No tested pair is an undefined symmetry evaluation."""
         attrs = np.array([0.5, 0.3, 0.1, 0.8])
-        result = compute_symmetry(attrs, symmetric_pairs=[])
-        assert result == 0.0
+        with pytest.raises(ValueError, match="undefined"):
+            compute_symmetry(attrs, symmetric_pairs=[])
 
     def test_multiple_pairs(self):
         """Multiple symmetric pairs."""
@@ -1121,10 +1267,10 @@ class TestSymmetryBasic:
         assert r_large > r_small
 
     def test_single_feature(self):
-        """Single feature attribution."""
+        """One feature cannot form a symmetric pair."""
         attrs = np.array([1.0])
-        result = compute_symmetry(attrs, symmetric_pairs=[])
-        assert result == 0.0
+        with pytest.raises(ValueError, match="undefined"):
+            compute_symmetry(attrs, symmetric_pairs=[])
 
 
 class TestSymmetryErrors:
@@ -1173,9 +1319,14 @@ class TestSymmetryHighLevel:
         assert s_sym < s_asym
 
     def test_with_real_explainer(self, trained_model_and_explainer):
-        """Symmetry score with a real explainer should return valid float."""
+        """Pair-disparity diagnostic with a real explainer returns a float."""
         adapter, explainer, X = trained_model_and_explainer
-        result = compute_symmetry_score(explainer, X[0], symmetric_pairs=[(0, 1)])
+        result = compute_symmetry_score(
+            explainer,
+            X[0],
+            symmetric_pairs=[(0, 1)],
+            verify_determinism=False,
+        )
         assert isinstance(result, float)
         assert result >= 0.0
 
@@ -1195,7 +1346,7 @@ class TestSymmetryBatch:
             attributions_list=attrs_list,
         )
         assert result["n_evaluated"] == 3
-        assert result["mean"] < 1e-10  # All perfectly symmetric for pair (0,1)
+        assert result["mean"] < 1e-10  # Equal attribution within every pair.
 
     def test_batch_explainer_based(self, feature_names, sample_data):
         """Batch with explainer."""
@@ -1245,6 +1396,7 @@ class TestSymmetryBatch:
 # HELPER FUNCTION TESTS
 # =============================================================================
 
+
 class TestSafeModelOutput:
     """Tests for the _safe_model_output helper."""
 
@@ -1269,12 +1421,16 @@ class TestSafeModelOutput:
 # EDGE CASE TESTS (Cross-cutting)
 # =============================================================================
 
+
 class TestEdgeCases:
     """Edge cases that apply across multiple metrics."""
 
     def test_completeness_single_feature(self):
         """Completeness with single feature."""
-        model_fn = lambda x: float(x[0]) * 2.0
+
+        def model_fn(x):
+            return float(x[0]) * 2.0
+
         x = np.array([3.0])
         attrs = np.array([6.0])  # 2.0 * 3.0 - 2.0 * 0.0
         result = compute_completeness(attrs, model_fn, x)
@@ -1284,65 +1440,76 @@ class TestEdgeCases:
         """Completeness with many features."""
         n = 100
         weights = np.random.RandomState(42).randn(n)
-        model_fn = lambda x: float(np.dot(weights, x))
+
+        def model_fn(x):
+            return float(np.dot(weights, x))
+
         x = np.random.RandomState(43).randn(n)
         attrs = weights * x  # Perfect for linear model from zero baseline
         result = compute_completeness(attrs, model_fn, x)
         assert result < 1e-10
 
     def test_non_sensitivity_all_zero_attrs(self, linear_model_fn, single_instance):
-        """All-zero attributions: non-sensitivity should be 0."""
+        """All-zero attributions falsely zero the two sensitive features."""
         attrs = np.zeros(4)
         result = compute_non_sensitivity(
-            attrs, linear_model_fn, single_instance,
+            attrs,
+            linear_model_fn,
+            single_instance,
             non_sensitive_features=np.array([False, False, True, True]),
         )
-        assert result == 0.0
+        assert result == 2.0
 
     def test_symmetry_identical_features(self):
         """Identical attribution values everywhere → all pairs score 0."""
         attrs = np.array([0.25, 0.25, 0.25, 0.25])
         result = compute_symmetry(
-            attrs, symmetric_pairs=[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
+            attrs,
+            symmetric_pairs=[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
         )
         assert result < 1e-10
 
     def test_input_invariance_zero_shift(self, single_instance):
-        """Zero shift should always give score = 0."""
-        explain_fn = lambda x: np.asarray(x) ** 2
-        result = compute_input_invariance(
-            explain_fn, single_instance, shift=0.0,
-        )
-        assert result < 1e-10
+        """A zero shift is a vacuous test and is rejected."""
+
+        def explain_fn(x):
+            return np.asarray(x) ** 2
+
+        with pytest.raises(ValueError, match="at least one non-zero"):
+            compute_input_invariance(explain_fn, single_instance, shift=0.0)
 
     def test_completeness_with_2d_input_flattened(self, linear_model_fn):
-        """2D instance should be flattened correctly."""
+        """A 2D instance is ambiguous and is rejected."""
         x = np.array([[1.0, 2.0, 3.0, 4.0]])  # Shape (1, 4)
         attrs = np.array([0.5, 2.0, 0.0, 0.0])  # weights * x from zero baseline
-        result = compute_completeness(attrs, linear_model_fn, x)
-        assert isinstance(result, float)
+        with pytest.raises(ValueError, match="instance must be 1D"):
+            compute_completeness(attrs, linear_model_fn, x)
 
     def test_non_sensitivity_with_perturbation_scale(self, linear_model_fn, single_instance):
         """Different perturbation scales should not break detection."""
         for scale in [0.01, 0.1, 1.0, 10.0]:
             mask = _detect_non_sensitive_features(
-                linear_model_fn, single_instance,
-                perturbation_scale=scale, n_perturbations=20, seed=42,
+                linear_model_fn,
+                single_instance,
+                perturbation_scale=scale,
+                n_perturbations=20,
+                seed=42,
             )
             # Features 2,3 should still be detected as non-sensitive
-            assert mask[2] == True
-            assert mask[3] == True
+            assert mask[2]
+            assert mask[3]
 
     def test_symmetry_self_pair(self):
-        """Pair (i, i) should always score 0."""
+        """A self-pair is vacuous and is rejected."""
         attrs = np.array([0.5, 0.3, 0.1, 0.8])
-        result = compute_symmetry(attrs, symmetric_pairs=[(0, 0)])
-        assert result < 1e-10
+        with pytest.raises(ValueError, match="two distinct"):
+            compute_symmetry(attrs, symmetric_pairs=[(0, 0)])
 
 
 # =============================================================================
 # INTEGRATION TESTS WITH REAL MODELS
 # =============================================================================
+
 
 class TestIntegration:
     """Integration tests with real sklearn models."""
@@ -1350,11 +1517,15 @@ class TestIntegration:
     def test_completeness_with_real_model(self, trained_model_and_explainer):
         """End-to-end completeness test."""
         adapter, explainer, X = trained_model_and_explainer
-        model_fn = lambda x: float(
-            adapter.predict(x.reshape(1, -1))[0, 1]
-        )
+
+        def model_fn(x):
+            return float(adapter.predict(x.reshape(1, -1))[0, 1])
+
         result = compute_completeness_score(
-            explainer, model_fn, X[0],
+            explainer,
+            model_fn,
+            X[0],
+            verify_determinism=False,
         )
         assert isinstance(result, float)
         assert result >= 0.0
@@ -1362,11 +1533,16 @@ class TestIntegration:
     def test_non_sensitivity_with_real_model(self, trained_model_and_explainer):
         """End-to-end non-sensitivity test."""
         adapter, explainer, X = trained_model_and_explainer
-        model_fn = lambda x: float(
-            adapter.predict(x.reshape(1, -1))[0, 1]
-        )
+
+        def model_fn(x):
+            return float(adapter.predict(x.reshape(1, -1))[0, 1])
+
         result = compute_non_sensitivity_score(
-            explainer, model_fn, X[0], seed=42,
+            explainer,
+            model_fn,
+            X[0],
+            non_sensitive_features=np.zeros(X.shape[1], dtype=bool),
+            verify_determinism=False,
         )
         assert isinstance(result, float)
         assert result >= 0.0
@@ -1375,7 +1551,10 @@ class TestIntegration:
         """End-to-end symmetry test."""
         adapter, explainer, X = trained_model_and_explainer
         result = compute_symmetry_score(
-            explainer, X[0], symmetric_pairs=[(0, 1)],
+            explainer,
+            X[0],
+            symmetric_pairs=[(0, 1)],
+            verify_determinism=False,
         )
         assert isinstance(result, float)
         assert result >= 0.0
@@ -1390,20 +1569,23 @@ class TestIntegration:
             attrs = exp.explanation_data.get("feature_attributions", {})
             return np.array([attrs.get(fn, 0.0) for fn in feature_names])
 
-        result = compute_input_invariance(explain_fn, X[0], seed=42)
+        with pytest.warns(RuntimeWarning, match="uncompensated"):
+            result = compute_input_invariance(explain_fn, X[0], seed=42, verify_determinism=False)
         assert isinstance(result, float)
         assert result >= 0.0
 
     def test_batch_completeness_real_model(self, trained_model_and_explainer):
         """Batch completeness with real model."""
         adapter, explainer, X = trained_model_and_explainer
-        model_fn = lambda x: float(
-            adapter.predict(x.reshape(1, -1))[0, 1]
-        )
+
+        def model_fn(x):
+            return float(adapter.predict(x.reshape(1, -1))[0, 1])
+
         result = compute_batch_completeness(
             explainer=explainer,
             model_fn=model_fn,
             X=X[:5],
+            verify_determinism=False,
         )
         assert result["n_evaluated"] == 5
         assert all(s >= 0.0 for s in result["scores"])
@@ -1415,5 +1597,6 @@ class TestIntegration:
             symmetric_pairs=[(0, 1)],
             explainer=explainer,
             X=X[:5],
+            verify_determinism=False,
         )
         assert result["n_evaluated"] == 5

@@ -1,83 +1,254 @@
-# src/explainiverse/explainers/gradient/deeplift.py
-"""
-DeepLIFT - Deep Learning Important FeaTures.
+"""Verified DeepLIFT Rescale and DeepLiftShap explainers.
 
-DeepLIFT explains the difference in output from some reference output
-in terms of the difference of the input from some reference input.
-Unlike standard gradients which show the effect of infinitesimal changes,
-DeepLIFT considers the actual change in activations from a reference.
+This module delegates the modified backward rules to Captum.  It intentionally
+does not provide a gradient-at-midpoint or low-step Integrated Gradients
+fallback: those computations are not DeepLIFT.
 
-Key Properties:
-- Summation-to-delta: Sum of attributions equals output - reference_output
-- Handles saturation: Works correctly even when gradients are zero
-- Fast: Requires only one forward and one backward pass (vs. many for IG)
-
-Rules:
-- Rescale Rule: Simple proportional attribution (default)
-- RevealCancel Rule: Separates positive/negative contributions (advanced)
+The currently verified input contract is a single, flat feature tensor handled
+by :class:`~explainiverse.adapters.PyTorchAdapter`.  Models must expose their
+nonlinearities as supported ``torch.nn`` modules so Captum can attach the hooks
+required by the Rescale rule.  Unsupported or untraceable graphs fail clearly.
 
 Reference:
-    Shrikumar, A., Greenside, P., & Kundaje, A. (2017). Learning Important
-    Features Through Propagating Activation Differences. ICML 2017.
+    Shrikumar, Greenside, and Kundaje (2017), "Learning Important Features
+    Through Propagating Activation Differences", ICML 2017.
     https://arxiv.org/abs/1704.02685
-
-Example:
-    from explainiverse.explainers.gradient import DeepLIFTExplainer
-    from explainiverse.adapters import PyTorchAdapter
-    
-    adapter = PyTorchAdapter(model, task="classification")
-    
-    explainer = DeepLIFTExplainer(
-        model=adapter,
-        feature_names=feature_names
-    )
-    
-    explanation = explainer.explain(instance)
 """
 
+from __future__ import annotations
+
+import operator
+from numbers import Integral
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
+
 import numpy as np
-from typing import List, Optional, Union, Callable, Tuple
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
-
-# Check if PyTorch is available
-try:
+if TYPE_CHECKING:
     import torch
     import torch.nn as nn
+
     TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
-    nn = None
+else:
+    try:
+        import torch
+        import torch.nn as nn
+
+        TORCH_AVAILABLE = True
+    except ImportError:  # pragma: no cover - exercised in installations without torch
+        torch = None
+        nn = None
+        TORCH_AVAILABLE = False
+
+CAPTUM_VERSION: Optional[str]
+try:
+    import captum
+    from captum.attr import DeepLift as CaptumDeepLift
+    from captum.attr import DeepLiftShap as CaptumDeepLiftShap
+    from captum.attr import IntegratedGradients as CaptumIntegratedGradients
+
+    CAPTUM_AVAILABLE = True
+    CAPTUM_VERSION = captum.__version__
+except ImportError:  # pragma: no cover - exercised in installations without captum
+    CaptumDeepLift = None
+    CaptumDeepLiftShap = None
+    CaptumIntegratedGradients = None
+    CAPTUM_AVAILABLE = False
+    CAPTUM_VERSION = None
+
+
+def _require_backends() -> None:
+    if not TORCH_AVAILABLE:
+        raise ImportError("DeepLIFT requires PyTorch. Install the torch optional dependency.")
+    if not CAPTUM_AVAILABLE:
+        raise ImportError(
+            "DeepLIFT and DeepSHAP require Captum's canonical modified-backward "
+            "implementation. Install it with `pip install captum`; no gradient "
+            "approximation fallback is used."
+        )
+
+
+_SUPPORTED_NONLINEAR_TYPES: Tuple[type, ...]
+_SUPPORTED_LINEAR_TYPES: Tuple[type, ...]
+if TORCH_AVAILABLE:
+    _SUPPORTED_NONLINEAR_TYPES = (
+        nn.ReLU,
+        nn.ELU,
+        nn.LeakyReLU,
+        nn.Sigmoid,
+        nn.Tanh,
+        nn.Softplus,
+        nn.Softmax,
+        nn.MaxPool1d,
+        nn.MaxPool2d,
+        nn.MaxPool3d,
+    )
+    _SUPPORTED_LINEAR_TYPES = (
+        nn.Linear,
+        nn.Conv1d,
+        nn.Conv2d,
+        nn.Conv3d,
+        nn.ConvTranspose1d,
+        nn.ConvTranspose2d,
+        nn.ConvTranspose3d,
+        nn.BatchNorm1d,
+        nn.BatchNorm2d,
+        nn.BatchNorm3d,
+        nn.Identity,
+        nn.Flatten,
+        nn.Unflatten,
+        nn.Dropout,
+        nn.Dropout1d,
+        nn.Dropout2d,
+        nn.Dropout3d,
+        nn.AlphaDropout,
+        nn.AvgPool1d,
+        nn.AvgPool2d,
+        nn.AvgPool3d,
+        nn.AdaptiveAvgPool1d,
+        nn.AdaptiveAvgPool2d,
+        nn.AdaptiveAvgPool3d,
+        nn.ConstantPad1d,
+        nn.ConstantPad2d,
+        nn.ConstantPad3d,
+        nn.ZeroPad1d,
+        nn.ZeroPad2d,
+        nn.ZeroPad3d,
+    )
+else:  # pragma: no cover
+    _SUPPORTED_NONLINEAR_TYPES = ()
+    _SUPPORTED_LINEAR_TYPES = ()
+
+
+def _validate_supported_model(model: "nn.Module") -> None:
+    """Reject graphs for which Captum would silently use ordinary gradients.
+
+    Captum implements DeepLIFT by attaching hooks to supported nonlinear
+    modules.  Functional activations and unsupported module types would evade
+    those hooks, yielding gradient-times-input while still being labelled
+    DeepLIFT.  FX tracing lets us reject that case before attribution.
+    """
+
+    try:
+        traced = torch.fx.symbolic_trace(model)
+    except Exception as exc:
+        raise NotImplementedError(
+            "DeepLIFT currently requires a torch.fx-traceable, feed-forward "
+            "module graph. Dynamic control flow and untraceable models are not "
+            "silently approximated."
+        ) from exc
+
+    allowed_modules = _SUPPORTED_LINEAR_TYPES + _SUPPORTED_NONLINEAR_TYPES
+    nonlinear_call_counts: dict[str, int] = {}
+
+    for node in traced.graph.nodes:
+        if node.op == "call_module":
+            module = traced.get_submodule(str(node.target))
+            if not isinstance(module, allowed_modules):
+                raise NotImplementedError(
+                    "DeepLIFT does not have a verified Rescale rule for module "
+                    f"{node.target!r} ({type(module).__name__}). Use only the "
+                    "documented supported modules or choose another explainer."
+                )
+            if isinstance(module, _SUPPORTED_NONLINEAR_TYPES):
+                module_name = str(node.target)
+                nonlinear_call_counts[module_name] = nonlinear_call_counts.get(module_name, 0) + 1
+        elif node.op == "call_method":
+            if node.target not in {
+                "view",
+                "reshape",
+                "flatten",
+                "squeeze",
+                "unsqueeze",
+                "contiguous",
+            }:
+                raise NotImplementedError(
+                    "DeepLIFT requires nonlinear operations to be explicit "
+                    f"supported nn.Modules; method call {node.target!r} is not "
+                    "in the verified graph subset."
+                )
+        elif node.op == "call_function":
+            # Indexing is a linear routing operation. Arithmetic between graph
+            # values can introduce products / interactions for which this
+            # wrapper has no independently verified propagation contract.
+            if node.target is not operator.getitem:
+                name = getattr(node.target, "__name__", repr(node.target))
+                raise NotImplementedError(
+                    "DeepLIFT requires nonlinear operations to be explicit "
+                    f"supported nn.Modules; function call {name!r} is not in "
+                    "the verified graph subset."
+                )
+
+    reused = [name for name, count in nonlinear_call_counts.items() if count > 1]
+    if reused:
+        raise NotImplementedError(
+            "Captum DeepLIFT cannot safely reuse one nonlinear module more than "
+            f"once in a forward graph. Reused modules: {reused}. Instantiate a "
+            "separate activation module at each use site."
+        )
+
+
+if TYPE_CHECKING:
+
+    class _TorchModuleBase(nn.Module):
+        """Static base for the optional runtime torch module."""
+
+else:
+    _TorchModuleBase = nn.Module if TORCH_AVAILABLE else object
+
+
+class _AdapterScoreModel(_TorchModuleBase):
+    """Torch module mirroring the adapter's differentiable score contract.
+
+    Activations are module instances rather than functional calls so Captum can
+    apply its Rescale rule through sigmoid and softmax output transformations.
+    """
+
+    def __init__(self, adapter):
+        super().__init__()
+        self.wrapped_model = adapter.model
+        self.task = adapter.task
+        self.output_activation = adapter.output_activation
+        self.gradient_output = adapter.gradient_output
+        self.sigmoid = nn.Sigmoid()
+        self.softmax = nn.Softmax(dim=-1)
+
+    @staticmethod
+    def _as_matrix(output: "torch.Tensor") -> "torch.Tensor":
+        return output.unsqueeze(-1) if output.dim() == 1 else output
+
+    def forward(self, inputs: "torch.Tensor") -> "torch.Tensor":
+        raw = self._as_matrix(self.wrapped_model(inputs))
+
+        # A one-output classifier has no independent raw class-0 score.  Match
+        # PyTorchAdapter by explaining complementary probabilities.
+        if self.task == "classification" and raw.shape[1] == 1:
+            if self.output_activation in {"softmax", "sigmoid"}:
+                positive = self.sigmoid(raw)
+            else:
+                positive = raw
+            return torch.cat((1.0 - positive, positive), dim=1)
+
+        if self.gradient_output == "prediction":
+            if self.output_activation == "softmax":
+                return self.softmax(raw)
+            if self.output_activation == "sigmoid":
+                return self.sigmoid(raw)
+
+        return raw
 
 
 class DeepLIFTExplainer(BaseExplainer):
+    """DeepLIFT Rescale for verified PyTorchAdapter model graphs.
+
+    ``multiply_by_inputs=True`` returns contributions and supports the
+    summation-to-delta check.  ``False`` returns DeepLIFT multipliers.
     """
-    DeepLIFT explainer for neural networks.
-    
-    Computes attributions by propagating the difference between the 
-    network's output and a reference output back to the inputs, using
-    the difference between input activations and reference activations.
-    
-    DeepLIFT is faster than Integrated Gradients (single forward/backward
-    pass) while providing similar quality attributions for most networks.
-    
-    Attributes:
-        model: Model adapter with gradient computation capability
-        feature_names: List of feature names
-        class_names: List of class names (for classification)
-        baseline: Reference input for comparison
-        multiply_by_inputs: If True, multiply attributions by (input - baseline)
-        eps: Small constant to avoid division by zero
-    
-    Example:
-        >>> explainer = DeepLIFTExplainer(adapter, feature_names)
-        >>> explanation = explainer.explain(instance)
-        >>> print(explanation.get_attributions())
-    """
-    
+
     def __init__(
         self,
         model,
@@ -85,101 +256,115 @@ class DeepLIFTExplainer(BaseExplainer):
         class_names: Optional[List[str]] = None,
         baseline: Optional[Union[np.ndarray, str, Callable]] = None,
         multiply_by_inputs: bool = True,
-        eps: float = 1e-10
+        eps: float = 1e-10,
+        random_state: Optional[int] = None,
     ):
-        """
-        Initialize the DeepLIFT explainer.
-        
-        Args:
-            model: A model adapter with predict_with_gradients() method.
-                   Use PyTorchAdapter for PyTorch models.
-            feature_names: List of input feature names.
-            class_names: List of class names (for classification tasks).
-            baseline: Reference input for comparison:
-                - None: Use zeros (default)
-                - "random": Sample from uniform distribution
-                - "mean": Placeholder for dataset mean (set via set_baseline)
-                - np.ndarray: Specific baseline values
-                - Callable: Function that takes instance and returns baseline
-            multiply_by_inputs: If True (default), compute
-                (input - baseline) * multipliers. If False, return raw
-                multipliers (useful for debugging).
-            eps: Small constant to prevent division by zero in 
-                multiplier computation. Default: 1e-10
-        """
-        super().__init__(model)
-        
-        # Validate model has required methods
-        if not hasattr(model, 'predict_with_gradients'):
+        _require_backends()
+
+        from explainiverse.adapters.pytorch_adapter import PyTorchAdapter
+
+        if not isinstance(model, PyTorchAdapter):
             raise TypeError(
-                "Model adapter must have predict_with_gradients() method. "
-                "Use PyTorchAdapter for PyTorch models."
+                "DeepLIFT requires a PyTorchAdapter so the explained score "
+                "space and class mapping are explicit."
             )
-        
-        self.feature_names = list(feature_names)
-        self.class_names = list(class_names) if class_names else None
-        self.baseline = baseline
-        self.multiply_by_inputs = multiply_by_inputs
-        self.eps = eps
-        
-        # For advanced usage: store reference for layer-wise computation
-        self._reference_activations = None
-    
+        validated_features = validate_name_sequence(feature_names, name="feature_names")
+        validated_classes = validate_name_sequence(
+            class_names,
+            name="class_names",
+            allow_none=True,
+        )
+        if not np.isfinite(eps) or eps <= 0:
+            raise ValueError("eps must be a positive finite number")
+        if random_state is not None:
+            if isinstance(random_state, bool) or not isinstance(random_state, Integral):
+                raise TypeError("random_state must be an integer or None")
+            if int(random_state) < 0:
+                raise ValueError("random_state must be non-negative")
+
+        super().__init__(model)
+        _validate_supported_model(model.model)
+
+        assert validated_features is not None
+        self.feature_names: List[str] = validated_features
+        self.class_names: Optional[List[str]] = validated_classes
+        self.baseline: Optional[Union[np.ndarray, str, Callable]] = baseline
+        self.multiply_by_inputs: bool = bool(multiply_by_inputs)
+        self.eps: float = float(eps)
+        self.random_state: Optional[int] = int(random_state) if random_state is not None else None
+        # ``_AdapterScoreModel`` registers the caller's model as a child module.
+        # Calling ``.to()`` or ``.eval()`` on the wrapper would therefore mutate
+        # that shared model during explainer construction.  The adapter already
+        # owns the model's device placement; attribution enters a temporary eval
+        # context instead and restores every caller-visible state afterwards.
+        self._score_model: _AdapterScoreModel = _AdapterScoreModel(model)
+
+    def _as_feature_vector(self, value, name: str) -> np.ndarray:
+        raw = as_real_array(value, name=name)
+        if raw.ndim != 1:
+            raise ValueError(
+                f"{name} must be a one-dimensional flat feature vector; " f"got shape {raw.shape}"
+            )
+        if raw.size != len(self.feature_names):
+            raise ValueError(
+                f"{name} contains {raw.size} values, but "
+                f"{len(self.feature_names)} feature_names were provided. "
+                "DeepLIFT currently supports flat feature vectors only."
+            )
+        try:
+            array = as_real_array(
+                raw,
+                name=name,
+                dtype=np.float32,
+            ).copy()
+        except ValueError as error:
+            raise TypeError(f"{name} must contain real numeric values") from error
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"{name} must contain only finite values")
+        return array
+
+    def _new_rng(self) -> np.random.Generator:
+        """Create a per-operation generator without touching NumPy global state."""
+        return np.random.default_rng(self.random_state)
+
     def _get_baseline(self, instance: np.ndarray) -> np.ndarray:
-        """
-        Get the baseline/reference input for a given instance.
-        
-        Args:
-            instance: The input instance
-            
-        Returns:
-            Baseline array with same shape as instance
-        """
         if self.baseline is None:
-            # Default: zero baseline
-            return np.zeros_like(instance)
+            baseline = np.zeros_like(instance)
         elif isinstance(self.baseline, str):
             if self.baseline == "random":
-                # Random baseline from uniform distribution
-                return np.random.uniform(
-                    low=instance.min(),
-                    high=instance.max(),
-                    size=instance.shape
-                ).astype(instance.dtype)
+                baseline = (
+                    self._new_rng()
+                    .uniform(
+                        low=float(instance.min()),
+                        high=float(instance.max()),
+                        size=instance.shape,
+                    )
+                    .astype(np.float32)
+                )
             elif self.baseline == "mean":
-                # This requires set_baseline to have been called with data
                 raise ValueError(
-                    "Baseline 'mean' requires calling set_baseline() with "
-                    "training data first."
+                    "Baseline 'mean' requires calling set_baseline(data, 'mean') first."
                 )
             else:
-                raise ValueError(f"Unknown baseline type: {self.baseline}")
+                raise ValueError(f"Unknown baseline type: {self.baseline!r}")
         elif callable(self.baseline):
-            return self.baseline(instance)
+            baseline = self.baseline(instance.copy())
         else:
-            baseline = np.array(self.baseline)
-            if baseline.shape != instance.shape:
-                baseline = baseline.reshape(instance.shape)
-            return baseline.astype(instance.dtype)
-    
+            baseline = self.baseline
+        return self._as_feature_vector(baseline, "baseline")
+
     def set_baseline(self, data: np.ndarray, method: str = "mean") -> "DeepLIFTExplainer":
-        """
-        Set the baseline from training data.
-        
-        Args:
-            data: Training data array of shape (n_samples, n_features)
-            method: Method to compute baseline:
-                - "mean": Use mean of training data
-                - "median": Use median of training data
-                - "zeros": Use zeros (same as default)
-                
-        Returns:
-            Self for method chaining
-        """
-        data = np.array(data)
+        data = as_real_array(
+            data,
+            name="data",
+            dtype=np.float32,
+            require_finite=True,
+        )
         if data.ndim == 1:
             data = data.reshape(1, -1)
-        
+        if data.ndim != 2 or data.shape[1] != len(self.feature_names):
+            raise ValueError("data must have shape (n_samples, len(feature_names))")
+
         if method == "mean":
             self.baseline = np.mean(data, axis=0).astype(np.float32)
         elif method == "median":
@@ -187,403 +372,351 @@ class DeepLIFTExplainer(BaseExplainer):
         elif method == "zeros":
             self.baseline = None
         else:
-            raise ValueError(f"Unknown method: {method}")
-        
+            raise ValueError(f"Unknown method: {method!r}")
         return self
-    
+
+    def _prepare(
+        self,
+        instance: np.ndarray,
+        baselines: np.ndarray,
+        target_class: Optional[int],
+    ) -> Tuple["torch.Tensor", "torch.Tensor", int, str]:
+        instance_tensor = torch.as_tensor(
+            instance.reshape(1, -1), dtype=torch.float32, device=self.model.device
+        )
+        instance_tensor.requires_grad_(True)
+        baseline_tensor = torch.as_tensor(
+            baselines.reshape(-1, len(self.feature_names)),
+            dtype=torch.float32,
+            device=self.model.device,
+        )
+
+        with preserve_adapter_model_eval(self.model), torch.no_grad():
+            raw = self.model.model(instance_tensor)
+            adapter_scores, output_space = self.model._gradient_score_output(raw)
+            wrapper_scores = self._score_model(instance_tensor)
+
+        if adapter_scores.shape != wrapper_scores.shape or not torch.allclose(
+            adapter_scores, wrapper_scores, atol=1e-7, rtol=1e-6
+        ):
+            raise RuntimeError(
+                "DeepLIFT's score wrapper no longer matches PyTorchAdapter's "
+                "gradient score contract; attribution was aborted."
+            )
+
+        n_outputs = int(wrapper_scores.shape[1])
+        if target_class is None:
+            if self.model.task == "classification":
+                target = int(wrapper_scores[0].argmax().item())
+            elif n_outputs == 1:
+                target = 0
+            else:
+                raise ValueError("target_class is required for multi-output regression")
+        elif isinstance(target_class, Integral) and not isinstance(target_class, bool):
+            target = int(target_class)
+        else:
+            raise TypeError("target_class must be an integer index or None")
+
+        if target < 0 or target >= n_outputs:
+            raise ValueError(f"target_class must be in [0, {n_outputs - 1}], got {target}")
+        if self.class_names is not None and len(self.class_names) != n_outputs:
+            raise ValueError(
+                f"class_names has length {len(self.class_names)}, but the "
+                f"explained score has {n_outputs} outputs"
+            )
+
+        return instance_tensor, baseline_tensor, target, output_space
+
+    @staticmethod
+    def _validate_method(method: str) -> None:
+        if method != "rescale":
+            if method == "rescale_exact":
+                raise ValueError(
+                    "method='rescale_exact' was removed because it was a "
+                    "low-step Integrated Gradients approximation, not DeepLIFT. "
+                    "Use method='rescale'."
+                )
+            raise ValueError("DeepLIFT supports only method='rescale'")
+
+    def _attribute_single(
+        self,
+        instance_tensor: "torch.Tensor",
+        baseline_tensor: "torch.Tensor",
+        target: int,
+        return_delta: bool = False,
+    ):
+        with preserve_adapter_model_eval(self.model):
+            backend = CaptumDeepLift(
+                self._score_model,
+                multiply_by_inputs=self.multiply_by_inputs,
+                eps=self.eps,
+            )
+            return backend.attribute(
+                instance_tensor,
+                baselines=baseline_tensor,
+                target=target,
+                return_convergence_delta=return_delta,
+            )
+
     def _compute_deeplift_rescale(
         self,
         instance: np.ndarray,
         baseline: np.ndarray,
-        target_class: Optional[int] = None
+        target_class: Optional[int] = None,
     ) -> np.ndarray:
-        """
-        Compute DeepLIFT attributions using the Rescale rule.
-        
-        The Rescale rule computes multipliers as:
-        m = (activation - reference_activation) / (input - reference_input)
-        
-        For layers where input equals reference (delta = 0), we use the
-        gradient as the multiplier (the limit as delta -> 0).
-        
-        This implementation uses the gradient formulation from Ancona et al.
-        which shows that DeepLIFT-Rescale can be computed efficiently using
-        modified gradients.
-        
-        Args:
-            instance: Input instance
-            baseline: Reference/baseline input
-            target_class: Target class for attribution
-            
-        Returns:
-            Array of attribution scores for each input feature
-        """
-        instance = instance.flatten().astype(np.float32)
-        baseline = baseline.flatten().astype(np.float32)
-        
-        # Compute delta (difference from reference)
-        delta = instance - baseline
-        
-        # For DeepLIFT with Rescale rule, we need to compute multipliers
-        # that satisfy: attribution = delta * multiplier
-        # where sum(attributions) = f(x) - f(x')
-        
-        # Method 1: Gradient at midpoint approximation
-        # DeepLIFT ≈ delta * gradient(baseline + 0.5 * delta)
-        # This is a good approximation for smooth functions
-        
-        midpoint = baseline + 0.5 * delta
-        _, gradients = self.model.predict_with_gradients(
-            midpoint.reshape(1, -1),
-            target_class=target_class
+        instance = self._as_feature_vector(instance, "instance")
+        baseline = self._as_feature_vector(baseline, "baseline")
+        input_tensor, baseline_tensor, target, _ = self._prepare(
+            instance, baseline.reshape(1, -1), target_class
         )
-        gradients = gradients.flatten()
-        
-        if self.multiply_by_inputs:
-            attributions = delta * gradients
-        else:
-            attributions = gradients
-        
-        return attributions
-    
-    def _compute_deeplift_exact(
-        self,
-        instance: np.ndarray,
-        baseline: np.ndarray,
-        target_class: Optional[int] = None
-    ) -> np.ndarray:
-        """
-        Compute DeepLIFT attributions using exact multiplier computation.
-        
-        This method computes the true DeepLIFT multipliers by evaluating
-        at multiple points along the path and averaging, providing more
-        accurate results at the cost of additional computation.
-        
-        For networks with ReLU activations, this is equivalent to:
-        1. Forward pass on input to get activations
-        2. Forward pass on baseline to get reference activations
-        3. Backward pass computing multipliers based on activation differences
-        
-        Args:
-            instance: Input instance
-            baseline: Reference/baseline input
-            target_class: Target class for attribution
-            
-        Returns:
-            Array of attribution scores for each input feature
-        """
-        instance = instance.flatten().astype(np.float32)
-        baseline = baseline.flatten().astype(np.float32)
-        
-        delta = instance - baseline
-        
-        # Use multiple evaluation points for more accurate multipliers
-        # This is essentially Integrated Gradients with few steps, but
-        # the key insight is that DeepLIFT's Rescale rule gives the same
-        # result as IG for piecewise linear functions (like ReLU networks)
-        
-        n_points = 10
-        alphas = np.linspace(0, 1, n_points)
-        
-        all_gradients = []
-        for alpha in alphas:
-            point = baseline + alpha * delta
-            _, grads = self.model.predict_with_gradients(
-                point.reshape(1, -1),
-                target_class=target_class
-            )
-            all_gradients.append(grads.flatten())
-        
-        # Average gradients (trapezoidal rule approximation)
-        avg_gradients = np.mean(all_gradients, axis=0)
-        
-        if self.multiply_by_inputs:
-            attributions = delta * avg_gradients
-        else:
-            attributions = avg_gradients
-        
-        return attributions
-    
+        values = self._attribute_single(input_tensor, baseline_tensor, target)
+        return values.detach().cpu().numpy().reshape(-1)
+
+    def _label_name(self, target: int) -> str:
+        if self.class_names is not None:
+            return self.class_names[target]
+        if self.model.task == "classification":
+            return f"class_{target}"
+        return "output" if target == 0 else f"output_{target}"
+
     def explain(
         self,
         instance: np.ndarray,
         target_class: Optional[int] = None,
         baseline: Optional[np.ndarray] = None,
         method: str = "rescale",
-        return_convergence_delta: bool = False
+        return_convergence_delta: bool = False,
     ) -> Explanation:
-        """
-        Generate DeepLIFT explanation for an instance.
-        
-        Args:
-            instance: 1D numpy array of input features.
-            target_class: For classification, which class to explain.
-                         If None, uses the predicted class.
-            baseline: Override the default baseline for this explanation.
-            method: Attribution method:
-                - "rescale": Fast rescale rule (default, recommended)
-                - "rescale_exact": More accurate but slower rescale
-            return_convergence_delta: If True, include the convergence delta
-                (difference between sum of attributions and prediction 
-                difference). Should be close to 0 for correct attributions.
-        
-        Returns:
-            Explanation object with feature attributions.
-        """
-        instance = np.array(instance).flatten().astype(np.float32)
-        
-        # Get baseline
-        if baseline is not None:
-            bl = np.array(baseline).flatten().astype(np.float32)
-        else:
-            bl = self._get_baseline(instance)
-        
-        # Determine target class if not specified
-        if target_class is None and self.class_names:
-            predictions = self.model.predict(instance.reshape(1, -1))
-            target_class = int(np.argmax(predictions))
-        
-        # Compute DeepLIFT attributions
-        if method == "rescale":
-            attributions_raw = self._compute_deeplift_rescale(
-                instance, bl, target_class
+        self._validate_method(method)
+        if return_convergence_delta and not self.multiply_by_inputs:
+            raise ValueError(
+                "Convergence delta is defined for contributions only; initialize "
+                "with multiply_by_inputs=True."
             )
-        elif method == "rescale_exact":
-            attributions_raw = self._compute_deeplift_exact(
-                instance, bl, target_class
-            )
-        else:
-            raise ValueError(f"Unknown method: {method}. Use 'rescale' or 'rescale_exact'.")
-        
-        # Build attributions dict
-        attributions = {
-            fname: float(attributions_raw[i])
-            for i, fname in enumerate(self.feature_names)
-        }
-        
-        # Determine class name
-        if self.class_names and target_class is not None:
-            label_name = self.class_names[target_class]
-        else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
-        
-        explanation_data = {
-            "feature_attributions": attributions,
-            "attributions_raw": attributions_raw.tolist(),
-            "baseline": bl.tolist(),
-            "method": method,
-            "multiply_by_inputs": self.multiply_by_inputs
-        }
-        
-        # Optionally compute convergence delta (summation-to-delta property)
+
+        instance_array = self._as_feature_vector(instance, "instance")
+        baseline_array = (
+            self._as_feature_vector(baseline, "baseline")
+            if baseline is not None
+            else self._get_baseline(instance_array)
+        )
+        input_tensor, baseline_tensor, target, output_space = self._prepare(
+            instance_array, baseline_array.reshape(1, -1), target_class
+        )
+
+        result = self._attribute_single(
+            input_tensor, baseline_tensor, target, return_convergence_delta
+        )
         if return_convergence_delta:
-            pred_input = self.model.predict(instance.reshape(1, -1))
-            pred_baseline = self.model.predict(bl.reshape(1, -1))
-            
-            if target_class is not None:
-                pred_diff = pred_input[0, target_class] - pred_baseline[0, target_class]
-            else:
-                pred_diff = pred_input[0, 0] - pred_baseline[0, 0]
-            
-            attribution_sum = np.sum(attributions_raw)
-            convergence_delta = abs(pred_diff - attribution_sum)
-            
-            explanation_data["convergence_delta"] = float(convergence_delta)
-            explanation_data["prediction_difference"] = float(pred_diff)
-            explanation_data["attribution_sum"] = float(attribution_sum)
-        
+            attribution_tensor, captum_delta = result
+        else:
+            attribution_tensor = result
+            captum_delta = None
+        values = attribution_tensor.detach().cpu().numpy().reshape(-1)
+
+        explanation_data = {
+            "feature_attributions": {
+                name: float(values[i]) for i, name in enumerate(self.feature_names)
+            },
+            "attributions_raw": values.tolist(),
+            "baseline": baseline_array.tolist(),
+            "method": "rescale",
+            "backend": "captum.DeepLift",
+            "backend_version": CAPTUM_VERSION,
+            "output_space": output_space,
+            "target_index": target,
+            "multiply_by_inputs": self.multiply_by_inputs,
+        }
+
+        if return_convergence_delta:
+            with preserve_adapter_model_eval(self.model), torch.no_grad():
+                actual = float(self._score_model(input_tensor)[0, target].item())
+                reference = float(self._score_model(baseline_tensor)[0, target].item())
+            prediction_difference = actual - reference
+            attribution_sum = float(values.sum())
+            explanation_data.update(
+                {
+                    "convergence_delta": abs(prediction_difference - attribution_sum),
+                    "captum_convergence_delta": float(
+                        captum_delta.detach().abs().max().cpu().item()
+                    ),
+                    "prediction_difference": prediction_difference,
+                    "attribution_sum": attribution_sum,
+                }
+            )
+
         return Explanation(
             explainer_name="DeepLIFT",
-            target_class=label_name,
+            target_class=self._label_name(target),
             explanation_data=explanation_data,
             feature_names=self.feature_names,
         )
-    
+
     def explain_batch(
         self,
         X: np.ndarray,
         target_class: Optional[int] = None,
-        method: str = "rescale"
+        method: str = "rescale",
     ) -> List[Explanation]:
-        """
-        Generate explanations for multiple instances.
-        
-        Args:
-            X: 2D numpy array of instances (n_samples, n_features).
-            target_class: Target class for all instances. If None,
-                         uses predicted class for each instance.
-            method: Attribution method ("rescale" or "rescale_exact").
-        
-        Returns:
-            List of Explanation objects.
-        """
-        X = np.array(X)
+        self._validate_method(method)
+        X = as_real_array(X, name="X", dtype=np.float32, require_finite=True)
         if X.ndim == 1:
             X = X.reshape(1, -1)
-        
-        return [
-            self.explain(X[i], target_class=target_class, method=method)
-            for i in range(X.shape[0])
-        ]
-    
+        if X.ndim != 2 or X.shape[1] != len(self.feature_names):
+            raise ValueError("X must have shape (n_samples, len(feature_names))")
+        return [self.explain(row, target_class=target_class, method=method) for row in X]
+
+    def _attribute_multiple(
+        self,
+        instance: np.ndarray,
+        baselines: np.ndarray,
+        target_class: Optional[int],
+    ) -> Tuple[np.ndarray, np.ndarray, int, str]:
+        input_tensor, baseline_tensor, target, output_space = self._prepare(
+            instance, baselines, target_class
+        )
+
+        individual = []
+        for baseline_row in baseline_tensor:
+            attribution = self._attribute_single(input_tensor, baseline_row.unsqueeze(0), target)
+            individual.append(attribution.detach().cpu().numpy().reshape(-1))
+        individual_values = np.vstack(individual)
+
+        if len(baseline_tensor) == 1:
+            averaged = individual_values[0]
+        else:
+            if self.eps != 1e-10:
+                raise ValueError(
+                    "Captum DeepLiftShap does not expose a configurable epsilon; "
+                    "multiple-baseline attribution requires eps=1e-10."
+                )
+            with preserve_adapter_model_eval(self.model):
+                backend = CaptumDeepLiftShap(
+                    self._score_model,
+                    multiply_by_inputs=self.multiply_by_inputs,
+                )
+                averaged_tensor = backend.attribute(
+                    input_tensor, baselines=baseline_tensor, target=target
+                )
+            averaged = averaged_tensor.detach().cpu().numpy().reshape(-1)
+
+            # DeepLiftShap is defined as the expectation of DeepLIFT over the
+            # baseline distribution. Abort if a backend change violates it.
+            if not np.allclose(averaged, individual_values.mean(axis=0), atol=1e-6, rtol=1e-5):
+                raise RuntimeError(
+                    "Captum DeepLiftShap disagreed with the mean of its DeepLIFT "
+                    "baseline contributions; attribution was aborted."
+                )
+
+        return averaged, individual_values, target, output_space
+
     def explain_with_multiple_baselines(
         self,
         instance: np.ndarray,
         baselines: np.ndarray,
         target_class: Optional[int] = None,
-        method: str = "rescale"
+        method: str = "rescale",
     ) -> Explanation:
-        """
-        Compute DeepLIFT with multiple reference baselines and average.
-        
-        Using multiple baselines can provide more robust attributions,
-        especially when the choice of single baseline is uncertain.
-        This is similar to DeepSHAP (DeepLIFT + SHAP) approach.
-        
-        Args:
-            instance: Input instance to explain.
-            baselines: Array of baseline instances (n_baselines, n_features).
-            target_class: Target class for attribution.
-            method: Attribution method.
-        
-        Returns:
-            Explanation with averaged attributions across all baselines.
-        """
-        instance = np.array(instance).flatten().astype(np.float32)
-        baselines = np.array(baselines)
-        
-        if baselines.ndim == 1:
-            baselines = baselines.reshape(1, -1)
-        
-        # Compute attributions for each baseline
-        all_attributions = []
-        for bl in baselines:
-            if method == "rescale":
-                attr = self._compute_deeplift_rescale(
-                    instance, bl.flatten(), target_class
-                )
-            else:
-                attr = self._compute_deeplift_exact(
-                    instance, bl.flatten(), target_class
-                )
-            all_attributions.append(attr)
-        
-        # Average attributions
-        avg_attributions = np.mean(all_attributions, axis=0)
-        std_attributions = np.std(all_attributions, axis=0)
-        
-        attributions = {
-            fname: float(avg_attributions[i])
-            for i, fname in enumerate(self.feature_names)
-        }
-        
-        if self.class_names and target_class is not None:
-            label_name = self.class_names[target_class]
-        else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
-        
+        self._validate_method(method)
+        instance_array = self._as_feature_vector(instance, "instance")
+        baseline_array = as_real_array(
+            baselines,
+            name="baselines",
+            dtype=np.float32,
+            require_finite=True,
+        )
+        if baseline_array.ndim == 1:
+            baseline_array = baseline_array.reshape(1, -1)
+        if baseline_array.ndim != 2 or baseline_array.shape[1] != len(self.feature_names):
+            raise ValueError("baselines must have shape (n_baselines, len(feature_names))")
+        if len(baseline_array) == 0:
+            raise ValueError("baselines must contain at least one finite row")
+
+        averaged, individual, target, output_space = self._attribute_multiple(
+            instance_array, baseline_array, target_class
+        )
         return Explanation(
             explainer_name="DeepLIFT_MultiBaseline",
-            target_class=label_name,
+            target_class=self._label_name(target),
             feature_names=self.feature_names,
             explanation_data={
-                "feature_attributions": attributions,
-                "attributions_raw": avg_attributions.tolist(),
-                "attributions_std": std_attributions.tolist(),
-                "n_baselines": len(baselines),
-                "method": method
-            }
+                "feature_attributions": {
+                    name: float(averaged[i]) for i, name in enumerate(self.feature_names)
+                },
+                "attributions_raw": averaged.tolist(),
+                "attributions_std": individual.std(axis=0).tolist(),
+                "n_baselines": len(baseline_array),
+                "method": "rescale",
+                "backend": (
+                    "captum.DeepLiftShap" if len(baseline_array) > 1 else "captum.DeepLift"
+                ),
+                "backend_version": CAPTUM_VERSION,
+                "output_space": output_space,
+                "target_index": target,
+            },
         )
-    
+
     def compare_with_integrated_gradients(
         self,
         instance: np.ndarray,
         target_class: Optional[int] = None,
         baseline: Optional[np.ndarray] = None,
-        ig_steps: int = 50
+        ig_steps: int = 50,
     ) -> dict:
-        """
-        Compare DeepLIFT attributions with Integrated Gradients.
-        
-        Useful for validating that DeepLIFT provides similar results
-        to IG (they should be very similar for ReLU networks).
-        
-        Args:
-            instance: Input instance.
-            target_class: Target class for attribution.
-            baseline: Baseline for comparison.
-            ig_steps: Number of steps for Integrated Gradients.
-        
-        Returns:
-            Dictionary with both attributions and comparison metrics.
-        """
-        instance = np.array(instance).flatten().astype(np.float32)
-        
-        if baseline is not None:
-            bl = np.array(baseline).flatten().astype(np.float32)
-        else:
-            bl = self._get_baseline(instance)
-        
-        # Determine target class
-        if target_class is None and self.class_names:
-            predictions = self.model.predict(instance.reshape(1, -1))
-            target_class = int(np.argmax(predictions))
-        
-        # DeepLIFT attributions (fast)
-        dl_attr = self._compute_deeplift_rescale(instance, bl, target_class)
-        
-        # Integrated Gradients (more computation)
-        delta = instance - bl
-        alphas = np.linspace(0, 1, ig_steps)
-        
-        all_gradients = []
-        for alpha in alphas:
-            point = bl + alpha * delta
-            _, grads = self.model.predict_with_gradients(
-                point.reshape(1, -1),
-                target_class=target_class
+        """Compare against Captum IG in the identical score / target space."""
+        if ig_steps < 2:
+            raise ValueError("ig_steps must be at least 2")
+        instance_array = self._as_feature_vector(instance, "instance")
+        baseline_array = (
+            self._as_feature_vector(baseline, "baseline")
+            if baseline is not None
+            else self._get_baseline(instance_array)
+        )
+        input_tensor, baseline_tensor, target, output_space = self._prepare(
+            instance_array, baseline_array.reshape(1, -1), target_class
+        )
+        dl_tensor = self._attribute_single(input_tensor, baseline_tensor, target)
+        with preserve_adapter_model_eval(self.model):
+            ig_tensor = CaptumIntegratedGradients(
+                self._score_model, multiply_by_inputs=self.multiply_by_inputs
+            ).attribute(
+                input_tensor,
+                baselines=baseline_tensor,
+                target=target,
+                n_steps=ig_steps,
+                method="gausslegendre",
             )
-            all_gradients.append(grads.flatten())
-        
-        avg_gradients = np.mean(all_gradients, axis=0)
-        ig_attr = delta * avg_gradients
-        
-        # Compute comparison metrics
-        correlation = np.corrcoef(dl_attr, ig_attr)[0, 1]
-        mse = np.mean((dl_attr - ig_attr) ** 2)
-        max_diff = np.max(np.abs(dl_attr - ig_attr))
-        
+        dl_values = dl_tensor.detach().cpu().numpy().reshape(-1)
+        ig_values = ig_tensor.detach().cpu().numpy().reshape(-1)
+        correlation_defined = not (
+            float(np.ptp(dl_values)) == 0.0 or float(np.ptp(ig_values)) == 0.0
+        )
+        if correlation_defined:
+            correlation = float(np.corrcoef(dl_values, ig_values)[0, 1])
+        else:
+            correlation = None
         return {
-            "deeplift_attributions": dl_attr.tolist(),
-            "integrated_gradients_attributions": ig_attr.tolist(),
-            "correlation": float(correlation),
-            "mse": float(mse),
-            "max_difference": float(max_diff),
-            "ig_steps": ig_steps
+            "deeplift_attributions": dl_values.tolist(),
+            "integrated_gradients_attributions": ig_values.tolist(),
+            "correlation": correlation,
+            "correlation_defined": correlation_defined,
+            "correlation_undefined_reason": (
+                None
+                if correlation_defined
+                else "Pearson correlation is undefined when either attribution vector is constant"
+            ),
+            "mse": float(np.mean((dl_values - ig_values) ** 2)),
+            "max_difference": float(np.max(np.abs(dl_values - ig_values))),
+            "ig_steps": ig_steps,
+            "output_space": output_space,
+            "target_index": target,
+            "backends": ["captum.DeepLift", "captum.IntegratedGradients"],
         }
 
 
 class DeepLIFTShapExplainer(DeepLIFTExplainer):
-    """
-    DeepSHAP explainer - DeepLIFT combined with Shapley values.
-    
-    This is essentially DeepLIFT averaged over a distribution of baselines
-    (usually samples from the training data), which approximates SHAP values.
-    
-    DeepSHAP inherits all benefits of DeepLIFT (speed, handling saturation)
-    while providing the game-theoretic guarantees of Shapley values.
-    
-    Reference:
-        Lundberg, S. M., & Lee, S. I. (2017). A Unified Approach to
-        Interpreting Model Predictions. NeurIPS 2017.
-        https://arxiv.org/abs/1705.07874
-    
-    Example:
-        >>> explainer = DeepLIFTShapExplainer(adapter, feature_names)
-        >>> explainer.set_background(X_train[:100])  # Set background samples
-        >>> explanation = explainer.explain(instance)
-    """
-    
+    """DeepLiftShap: expected DeepLIFT contributions over backgrounds."""
+
     def __init__(
         self,
         model,
@@ -591,158 +724,130 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
         class_names: Optional[List[str]] = None,
         background_data: Optional[np.ndarray] = None,
         n_background_samples: int = 100,
-        eps: float = 1e-10
+        eps: float = 1e-10,
+        random_state: Optional[int] = None,
     ):
-        """
-        Initialize DeepSHAP explainer.
-        
-        Args:
-            model: Model adapter with gradient computation capability.
-            feature_names: List of input feature names.
-            class_names: List of class names (for classification).
-            background_data: Background dataset for computing expectations.
-                            If None, must call set_background() before explain().
-            n_background_samples: Number of background samples to use.
-                                 More samples = more accurate but slower.
-            eps: Small constant for numerical stability.
-        """
+        if not isinstance(n_background_samples, Integral) or isinstance(n_background_samples, bool):
+            raise TypeError("n_background_samples must be an integer")
+        if n_background_samples < 1:
+            raise ValueError("n_background_samples must be at least 1")
+        if eps != 1e-10:
+            raise ValueError(
+                "Captum DeepLiftShap does not expose a configurable epsilon; "
+                "eps must remain 1e-10."
+            )
         super().__init__(
             model=model,
             feature_names=feature_names,
             class_names=class_names,
             baseline=None,
             multiply_by_inputs=True,
-            eps=eps
+            eps=eps,
+            random_state=random_state,
         )
-        
-        self.n_background_samples = n_background_samples
-        self._background_data = None
-        
+        self.n_background_samples: int = int(n_background_samples)
+        self._background_data: Optional[np.ndarray] = None
         if background_data is not None:
             self.set_background(background_data)
-    
+
     def set_background(self, data: np.ndarray) -> "DeepLIFTShapExplainer":
-        """
-        Set the background dataset for DeepSHAP.
-        
-        The background dataset is used to compute the expected output
-        and expected attributions, which are the baseline for Shapley
-        value computation.
-        
-        Args:
-            data: Background data of shape (n_samples, n_features).
-                  Typically a subset of the training data.
-        
-        Returns:
-            Self for method chaining.
-        """
-        data = np.array(data).astype(np.float32)
+        data = as_real_array(
+            data,
+            name="background data",
+            dtype=np.float32,
+            require_finite=True,
+        )
         if data.ndim == 1:
             data = data.reshape(1, -1)
-        
-        # Subsample if necessary
+        if data.ndim != 2 or data.shape[1] != len(self.feature_names):
+            raise ValueError("background data must have shape " "(n_samples, len(feature_names))")
+        if len(data) == 0:
+            raise ValueError("background data must contain at least one finite row")
         if len(data) > self.n_background_samples:
-            indices = np.random.choice(
-                len(data), 
-                size=self.n_background_samples, 
-                replace=False
+            indices = self._new_rng().choice(
+                len(data), size=self.n_background_samples, replace=False
             )
             data = data[indices]
-        
-        self._background_data = data
+        self._background_data = data.copy()
         return self
-    
+
     def explain(
         self,
         instance: np.ndarray,
         target_class: Optional[int] = None,
+        baseline: Optional[Union[np.ndarray, str]] = None,
         method: str = "rescale",
-        return_convergence_delta: bool = False
+        return_convergence_delta: bool = False,
     ) -> Explanation:
-        """
-        Generate DeepSHAP explanation by averaging DeepLIFT over backgrounds.
-        
-        Args:
-            instance: Input instance to explain.
-            target_class: Target class for attribution.
-            method: DeepLIFT method ("rescale" or "rescale_exact").
-            return_convergence_delta: Include convergence delta in output.
-        
-        Returns:
-            Explanation with SHAP-style attributions.
-        """
-        if self._background_data is None:
+        # Before DeepLIFTShap exposed the parent-compatible baseline slot, its
+        # third and fourth positional arguments were ``method`` and
+        # ``return_convergence_delta``. Preserve those calls while presenting
+        # the honest override signature to new callers and type checkers.
+        if isinstance(baseline, str):
+            legacy_method = baseline
+            baseline = None
+            if isinstance(method, bool):
+                if return_convergence_delta:
+                    raise TypeError(
+                        "return_convergence_delta was supplied in both legacy and current slots"
+                    )
+                return_convergence_delta = method
+                method = legacy_method
+            elif method == "rescale":
+                method = legacy_method
+            else:
+                raise TypeError("method was supplied in both legacy and current slots")
+        if baseline is not None:
             raise ValueError(
-                "Background data not set. Call set_background() first."
+                "DeepSHAP uses the background distribution set by set_background(); "
+                "a per-call baseline is not supported"
             )
-        
-        instance = np.array(instance).flatten().astype(np.float32)
-        
-        # Determine target class
-        if target_class is None and self.class_names:
-            predictions = self.model.predict(instance.reshape(1, -1))
-            target_class = int(np.argmax(predictions))
-        
-        # Compute DeepLIFT attributions for each background sample
-        all_attributions = []
-        for baseline in self._background_data:
-            if method == "rescale":
-                attr = self._compute_deeplift_rescale(
-                    instance, baseline.flatten(), target_class
-                )
-            else:
-                attr = self._compute_deeplift_exact(
-                    instance, baseline.flatten(), target_class
-                )
-            all_attributions.append(attr)
-        
-        # Average to get SHAP values
-        shap_values = np.mean(all_attributions, axis=0)
-        std_values = np.std(all_attributions, axis=0)
-        
-        # Build attributions dict
-        attributions = {
-            fname: float(shap_values[i])
-            for i, fname in enumerate(self.feature_names)
-        }
-        
-        # Determine class name
-        if self.class_names and target_class is not None:
-            label_name = self.class_names[target_class]
-        else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
-        
+        self._validate_method(method)
+        if self._background_data is None:
+            raise ValueError("Background data not set. Call set_background() first.")
+
+        instance_array = self._as_feature_vector(instance, "instance")
+        values, individual, target, output_space = self._attribute_multiple(
+            instance_array, self._background_data, target_class
+        )
         explanation_data = {
-            "feature_attributions": attributions,
-            "attributions_raw": shap_values.tolist(),
-            "attributions_std": std_values.tolist(),
+            "feature_attributions": {
+                name: float(values[i]) for i, name in enumerate(self.feature_names)
+            },
+            "attributions_raw": values.tolist(),
+            "attributions_std": individual.std(axis=0).tolist(),
             "n_background_samples": len(self._background_data),
-            "method": method
+            "method": "rescale",
+            "backend": (
+                "captum.DeepLiftShap" if len(self._background_data) > 1 else "captum.DeepLift"
+            ),
+            "backend_version": CAPTUM_VERSION,
+            "output_space": output_space,
+            "target_index": target,
         }
-        
-        # Compute expected values for context
+
         if return_convergence_delta:
-            pred_input = self.model.predict(instance.reshape(1, -1))
-            pred_background = self.model.predict(self._background_data)
-            
-            if target_class is not None:
-                expected_output = np.mean(pred_background[:, target_class])
-                actual_output = pred_input[0, target_class]
-            else:
-                expected_output = np.mean(pred_background[:, 0])
-                actual_output = pred_input[0, 0]
-            
-            pred_diff = actual_output - expected_output
-            attribution_sum = np.sum(shap_values)
-            convergence_delta = abs(pred_diff - attribution_sum)
-            
-            explanation_data["expected_output"] = float(expected_output)
-            explanation_data["actual_output"] = float(actual_output)
-            explanation_data["convergence_delta"] = float(convergence_delta)
-        
+            input_tensor, baseline_tensor, _, _ = self._prepare(
+                instance_array, self._background_data, target
+            )
+            with preserve_adapter_model_eval(self.model), torch.no_grad():
+                actual = float(self._score_model(input_tensor)[0, target].item())
+                expected = float(self._score_model(baseline_tensor)[:, target].mean().item())
+            difference = actual - expected
+            attribution_sum = float(values.sum())
+            explanation_data.update(
+                {
+                    "expected_output": expected,
+                    "actual_output": actual,
+                    "prediction_difference": difference,
+                    "attribution_sum": attribution_sum,
+                    "convergence_delta": abs(difference - attribution_sum),
+                }
+            )
+
         return Explanation(
             explainer_name="DeepSHAP",
-            target_class=label_name,
+            target_class=self._label_name(target),
             explanation_data=explanation_data,
             feature_names=self.feature_names,
         )

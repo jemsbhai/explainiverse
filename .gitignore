@@ -11,6 +11,10 @@ dist/
 build/
 out/
 coverage/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # IDE & System
 .vscode/

@@ -2,31 +2,30 @@
 """
 Tests for TreeSHAP explainer wrapper.
 
-Thorough tests covering value correctness, key matching, class selection,
-batch consistency, and edge cases.
+Legacy integration tests for output shape, target selection, batching, and
+selected estimator families. Dedicated accuracy tests define the audited scope.
 
 Reference:
     Lundberg et al., 2018 — "Consistent Individualized Feature Attribution
     for Tree Ensembles." arXiv:1802.03888.
 """
 
-import pytest
 import numpy as np
+import pytest
 from sklearn.datasets import load_iris, make_classification, make_regression
-from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import (
-    RandomForestClassifier, RandomForestRegressor,
     GradientBoostingClassifier,
+    RandomForestClassifier,
+    RandomForestRegressor,
 )
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
 
 from explainiverse.core.explanation import Explanation
-
 
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────
+
 
 @pytest.fixture
 def iris_rf_setup():
@@ -46,8 +45,7 @@ def iris_rf_setup():
 def binary_rf_setup():
     """Binary classification with RandomForestClassifier."""
     X, y = make_classification(
-        n_samples=150, n_features=6, n_classes=2,
-        n_informative=4, random_state=42
+        n_samples=150, n_features=6, n_classes=2, n_informative=4, random_state=42
     )
     feature_names = [f"feature_{i}" for i in range(6)]
     class_names = ["negative", "positive"]
@@ -61,9 +59,7 @@ def binary_rf_setup():
 @pytest.fixture
 def regression_rf_setup():
     """Regression with RandomForestRegressor."""
-    X, y = make_regression(
-        n_samples=100, n_features=5, noise=0.3, random_state=42
-    )
+    X, y = make_regression(n_samples=100, n_features=5, noise=0.3, random_state=42)
     feature_names = [f"reg_f{i}" for i in range(5)]
 
     model = RandomForestRegressor(n_estimators=50, random_state=42)
@@ -76,6 +72,7 @@ def regression_rf_setup():
 # Core Functionality Tests
 # ──────────────────────────────────────────────
 
+
 class TestTreeShapBasic:
     """Basic TreeSHAP functionality."""
 
@@ -84,8 +81,9 @@ class TestTreeShapBasic:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
         assert isinstance(explanation, Explanation)
@@ -96,23 +94,26 @@ class TestTreeShapBasic:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         # Test across all three Iris classes
         for i in [0, 50, 100]:
             explanation = explainer.explain(X[i])
             keys = set(explanation.explanation_data["feature_attributions"].keys())
-            assert keys == set(feature_names), \
-                f"Instance {i}: keys {keys} != feature names {set(feature_names)}"
+            assert keys == set(
+                feature_names
+            ), f"Instance {i}: keys {keys} != feature names {set(feature_names)}"
 
     def test_attribution_count_matches_features(self, iris_rf_setup):
         """Number of attributions equals number of features."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
         assert len(explanation.explanation_data["feature_attributions"]) == len(feature_names)
@@ -122,8 +123,9 @@ class TestTreeShapBasic:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
         for k, v in explanation.explanation_data["feature_attributions"].items():
@@ -134,8 +136,9 @@ class TestTreeShapBasic:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
         assert "base_value" in explanation.explanation_data
@@ -146,42 +149,48 @@ class TestTreeShapBasic:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
         raw = explanation.explanation_data["shap_values_raw"]
         assert isinstance(raw, list)
-        assert len(raw) == len(feature_names), \
-            f"shap_values_raw has {len(raw)} entries, expected {len(feature_names)}"
+        assert len(raw) == len(
+            feature_names
+        ), f"shap_values_raw has {len(raw)} entries, expected {len(feature_names)}"
 
     def test_shap_values_raw_matches_attributions(self, iris_rf_setup):
         """shap_values_raw values must match feature_attributions values."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
         raw = explanation.explanation_data["shap_values_raw"]
         attributions = explanation.explanation_data["feature_attributions"]
 
         for i, fname in enumerate(feature_names):
-            assert abs(raw[i] - attributions[fname]) < 1e-10, \
-                f"raw[{i}]={raw[i]} != attributions['{fname}']={attributions[fname]}"
+            assert (
+                abs(raw[i] - attributions[fname]) < 1e-10
+            ), f"raw[{i}]={raw[i]} != attributions['{fname}']={attributions[fname]}"
 
     def test_feature_names_stored_on_explanation(self, iris_rf_setup):
         """Explanation must have feature_names attribute for evaluation metrics."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
-        assert hasattr(explanation, "feature_names"), \
-            "Explanation missing feature_names — evaluation metrics will fail"
+        assert hasattr(
+            explanation, "feature_names"
+        ), "Explanation missing feature_names — evaluation metrics will fail"
         assert explanation.feature_names == feature_names
 
     def test_deterministic(self, iris_rf_setup):
@@ -189,8 +198,9 @@ class TestTreeShapBasic:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         v1 = list(explainer.explain(X[0]).explanation_data["feature_attributions"].values())
         v2 = list(explainer.explain(X[0]).explanation_data["feature_attributions"].values())
@@ -204,13 +214,17 @@ class TestTreeShapBasic:
         model = LogisticRegression(max_iter=200).fit(iris.data, iris.target)
 
         with pytest.raises(ValueError, match="tree-based model"):
-            TreeShapExplainer(model=model, feature_names=list(iris.feature_names),
-                              class_names=iris.target_names.tolist())
+            TreeShapExplainer(
+                model=model,
+                feature_names=list(iris.feature_names),
+                class_names=iris.target_names.tolist(),
+            )
 
 
 # ──────────────────────────────────────────────
 # Target Class Selection Tests
 # ──────────────────────────────────────────────
+
 
 class TestTreeShapClassSelection:
     """Tests verifying correct target class selection."""
@@ -220,48 +234,84 @@ class TestTreeShapClassSelection:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         for i in [0, 50, 100]:
             explanation = explainer.explain(X[i])
-            predicted_class = int(model.predict(X[i:i+1])[0])
+            predicted_class = int(model.predict(X[i : i + 1])[0])
             expected_label = class_names[predicted_class]
-            assert explanation.target_class == expected_label, \
-                f"Instance {i}: got '{explanation.target_class}', expected '{expected_label}'"
+            assert (
+                explanation.target_class == expected_label
+            ), f"Instance {i}: got '{explanation.target_class}', expected '{expected_label}'"
 
     def test_explicit_target_class(self, iris_rf_setup):
         """Explicit target_class parameter is respected."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         for tc in [0, 1, 2]:
             explanation = explainer.explain(X[0], target_class=tc)
             assert explanation.target_class == class_names[tc]
 
-    def test_different_classes_give_different_values(self, iris_rf_setup):
-        """Different target classes should produce different SHAP values."""
+    def test_each_class_matches_direct_shap_output_and_additivity(self, iris_rf_setup):
+        """Every target selects its exact raw SHAP output and model column."""
+        import shap
+
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
-        vals_0 = list(explainer.explain(X[0], target_class=0)
-                       .explanation_data["feature_attributions"].values())
-        vals_1 = list(explainer.explain(X[0], target_class=1)
-                       .explanation_data["feature_attributions"].values())
+        direct_explainer = shap.TreeExplainer(model)
+        direct_values = direct_explainer.shap_values(X[0:1])
+        direct_array = np.asarray(direct_values)
+        direct_bases = np.asarray(direct_explainer.expected_value).reshape(-1)
+        probabilities = model.predict_proba(X[0:1])[0]
 
-        assert not np.allclose(vals_0, vals_1, atol=1e-10), \
-            "SHAP values identical for different classes — class selection broken"
+        for target in range(len(class_names)):
+            if isinstance(direct_values, list):
+                assert len(direct_values) == len(class_names)
+                expected_values = np.asarray(direct_values[target])[0]
+            elif direct_array.ndim == 3:
+                assert direct_array.shape == (1, len(feature_names), len(class_names))
+                expected_values = direct_array[0, :, target]
+            else:
+                pytest.fail(
+                    "Multiclass TreeExplainer returned an unsupported raw SHAP "
+                    f"format: shape={direct_array.shape}"
+                )
+
+            assert direct_bases.size == len(class_names)
+            explanation = explainer.explain(X[0], target_class=target)
+            data = explanation.explanation_data
+
+            assert explanation.target_class == class_names[target]
+            assert data["class_index"] == target
+            np.testing.assert_allclose(
+                data["shap_values_raw"], expected_values, rtol=0.0, atol=1e-10
+            )
+            assert data["base_value"] == pytest.approx(direct_bases[target], rel=0.0, abs=1e-10)
+            assert data["explained_value"] == pytest.approx(
+                probabilities[target], rel=0.0, abs=1e-8
+            )
+            assert data["model_reference_value"] == pytest.approx(
+                probabilities[target], rel=0.0, abs=1e-12
+            )
+            assert data["additivity_residual"] == pytest.approx(0.0, abs=1e-8)
 
 
 # ──────────────────────────────────────────────
 # Value Correctness Tests
 # ──────────────────────────────────────────────
+
 
 class TestTreeShapValueCorrectness:
     """Tests verifying SHAP values are numerically correct."""
@@ -269,15 +319,17 @@ class TestTreeShapValueCorrectness:
     def test_values_match_direct_shap_library(self, iris_rf_setup):
         """Wrapper attributions must match direct SHAP library access."""
         import shap
+
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         # Pick instance where predicted class is not 0
         for i in range(len(X)):
-            pred = int(model.predict(X[i:i+1])[0])
+            pred = int(model.predict(X[i : i + 1])[0])
             if pred != 0:
                 break
 
@@ -285,7 +337,7 @@ class TestTreeShapValueCorrectness:
 
         # Get values directly from SHAP
         direct_explainer = shap.TreeExplainer(model)
-        raw_sv = direct_explainer.shap_values(X[i:i+1])
+        raw_sv = direct_explainer.shap_values(X[i : i + 1])
 
         if isinstance(raw_sv, list):
             expected_vals = raw_sv[pred][0]
@@ -298,16 +350,18 @@ class TestTreeShapValueCorrectness:
 
         for j, fname in enumerate(feature_names):
             wrapper_val = explanation.explanation_data["feature_attributions"][fname]
-            assert abs(wrapper_val - float(expected_vals[j])) < 1e-10, \
-                f"Feature '{fname}': wrapper={wrapper_val}, expected={float(expected_vals[j])}"
+            assert (
+                abs(wrapper_val - float(expected_vals[j])) < 1e-10
+            ), f"Feature '{fname}': wrapper={wrapper_val}, expected={float(expected_vals[j])}"
 
     def test_additivity(self, iris_rf_setup):
         """SHAP values + base_value should approximately equal prediction."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
         pred_class = int(model.predict(X[0:1])[0])
@@ -318,17 +372,19 @@ class TestTreeShapValueCorrectness:
         # For tree models, base_value + sum(shap_values) ≈ model output for that class
         model_output = model.predict_proba(X[0:1])[0][pred_class]
 
-        assert abs((base_val + shap_sum) - model_output) < 0.05, \
-            f"Additivity check failed: base({base_val:.4f}) + shap_sum({shap_sum:.4f}) " \
+        assert abs((base_val + shap_sum) - model_output) < 0.05, (
+            f"Additivity check failed: base({base_val:.4f}) + shap_sum({shap_sum:.4f}) "
             f"= {base_val + shap_sum:.4f} != model_output({model_output:.4f})"
+        )
 
     def test_values_are_finite(self, iris_rf_setup):
         """All SHAP values must be finite."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         for i in [0, 50, 100]:
             explanation = explainer.explain(X[i])
@@ -340,6 +396,7 @@ class TestTreeShapValueCorrectness:
 # Batch Tests
 # ──────────────────────────────────────────────
 
+
 class TestTreeShapBatch:
     """Tests for explain_batch correctness."""
 
@@ -348,8 +405,9 @@ class TestTreeShapBatch:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanations = explainer.explain_batch(X[:5])
         assert len(explanations) == 5
@@ -359,45 +417,54 @@ class TestTreeShapBatch:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanations = explainer.explain_batch(X[:5])
         for i, exp in enumerate(explanations):
             keys = set(exp.explanation_data["feature_attributions"].keys())
-            assert keys == set(feature_names), \
-                f"Batch instance {i}: keys {keys} != feature names"
+            assert keys == set(feature_names), f"Batch instance {i}: keys {keys} != feature names"
 
     def test_batch_shap_values_raw_length(self, iris_rf_setup):
         """Each batch explanation must have correct shap_values_raw length."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanations = explainer.explain_batch(X[:5])
         for i, exp in enumerate(explanations):
             raw = exp.explanation_data["shap_values_raw"]
-            assert len(raw) == len(feature_names), \
-                f"Batch instance {i}: raw length {len(raw)} != {len(feature_names)}"
+            assert len(raw) == len(
+                feature_names
+            ), f"Batch instance {i}: raw length {len(raw)} != {len(feature_names)}"
 
     def test_batch_matches_individual(self, iris_rf_setup):
         """Batch results must match individual explain() results."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         batch_explanations = explainer.explain_batch(X[:3], target_class=0)
 
         for i in range(3):
             individual = explainer.explain(X[i], target_class=0)
-            batch_vals = list(batch_explanations[i].explanation_data["feature_attributions"].values())
+            batch_vals = list(
+                batch_explanations[i].explanation_data["feature_attributions"].values()
+            )
             indiv_vals = list(individual.explanation_data["feature_attributions"].values())
-            np.testing.assert_array_almost_equal(batch_vals, indiv_vals, decimal=10,
-                err_msg=f"Batch instance {i} differs from individual explain()")
+            np.testing.assert_array_almost_equal(
+                batch_vals,
+                indiv_vals,
+                decimal=10,
+                err_msg=f"Batch instance {i} differs from individual explain()",
+            )
 
     def test_batch_target_class_not_hardcoded(self, iris_rf_setup):
         """Batch explain must use predicted class when target_class=None,
@@ -406,40 +473,43 @@ class TestTreeShapBatch:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         # Find an instance where the predicted class is NOT 0
         for i in range(len(X)):
-            pred = int(model.predict(X[i:i+1])[0])
+            pred = int(model.predict(X[i : i + 1])[0])
             if pred != 0:
                 break
 
         # explain_batch with target_class=None should use predicted class
-        explanations = explainer.explain_batch(X[i:i+1])
+        explanations = explainer.explain_batch(X[i : i + 1])
         expected_label = class_names[pred]
-        assert explanations[0].target_class == expected_label, \
-            f"Batch used '{explanations[0].target_class}' instead of " \
+        assert explanations[0].target_class == expected_label, (
+            f"Batch used '{explanations[0].target_class}' instead of "
             f"predicted '{expected_label}' — hardcoded class 0 bug"
+        )
 
     def test_batch_feature_names_stored(self, iris_rf_setup):
         """Each batch explanation must have feature_names attribute."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanations = explainer.explain_batch(X[:3])
         for i, exp in enumerate(explanations):
-            assert hasattr(exp, "feature_names"), \
-                f"Batch instance {i}: missing feature_names"
+            assert hasattr(exp, "feature_names"), f"Batch instance {i}: missing feature_names"
             assert exp.feature_names == feature_names
 
 
 # ──────────────────────────────────────────────
 # Binary Classification Tests
 # ──────────────────────────────────────────────
+
 
 class TestTreeShapBinary:
     """TreeSHAP with binary classifiers."""
@@ -449,34 +519,40 @@ class TestTreeShapBinary:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = binary_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain(X[0])
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
         assert len(explanation.explanation_data["shap_values_raw"]) == len(feature_names)
 
     def test_binary_gradient_boosting(self):
         """TreeSHAP works with GradientBoostingClassifier."""
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
-        X, y = make_classification(n_samples=150, n_features=5,
-                                    n_classes=2, random_state=42)
+        X, y = make_classification(n_samples=150, n_features=5, n_classes=2, random_state=42)
         feature_names = [f"f{i}" for i in range(5)]
         model = GradientBoostingClassifier(n_estimators=30, random_state=42)
         model.fit(X, y)
 
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=["neg", "pos"])
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=["neg", "pos"]
+        )
         explanation = explainer.explain(X[0])
 
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
         assert len(explanation.explanation_data["shap_values_raw"]) == len(feature_names)
 
 
 # ──────────────────────────────────────────────
 # Regression Tests
 # ──────────────────────────────────────────────
+
 
 class TestTreeShapRegression:
     """TreeSHAP with regression models."""
@@ -486,11 +562,14 @@ class TestTreeShapRegression:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, model = regression_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=["output"], task="regression")
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=["output"], task="regression"
+        )
 
         explanation = explainer.explain(X[0])
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
         assert len(explanation.explanation_data["shap_values_raw"]) == len(feature_names)
 
         for val in explanation.explanation_data["feature_attributions"].values():
@@ -501,28 +580,33 @@ class TestTreeShapRegression:
 # Adapter Tests
 # ──────────────────────────────────────────────
 
+
 class TestTreeShapAdapter:
     """TreeSHAP with model adapters."""
 
     def test_accepts_sklearn_adapter(self, iris_rf_setup):
         """TreeSHAP extracts raw model from SklearnAdapter."""
-        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
         from explainiverse.adapters.sklearn_adapter import SklearnAdapter
+        from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
         adapter = SklearnAdapter(model, class_names=class_names)
 
-        explainer = TreeShapExplainer(model=adapter, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=adapter, feature_names=feature_names, class_names=class_names
+        )
         explanation = explainer.explain(X[0])
 
         assert isinstance(explanation, Explanation)
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
 
 
 # ──────────────────────────────────────────────
 # XGBoost Tests
 # ──────────────────────────────────────────────
+
 
 class TestTreeShapXGBoost:
     """TreeSHAP with XGBoost models."""
@@ -530,6 +614,7 @@ class TestTreeShapXGBoost:
     def test_xgboost_multiclass(self):
         """TreeSHAP works with XGBoost multiclass."""
         from xgboost import XGBClassifier
+
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         iris = load_iris()
@@ -537,15 +622,17 @@ class TestTreeShapXGBoost:
         feature_names = list(iris.feature_names)
         class_names = iris.target_names.tolist()
 
-        model = XGBClassifier(n_estimators=30, random_state=42,
-                              eval_metric='mlogloss')
+        model = XGBClassifier(n_estimators=30, random_state=42, eval_metric="mlogloss")
         model.fit(X, y)
 
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
         explanation = explainer.explain(X[0])
 
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
         assert len(explanation.explanation_data["shap_values_raw"]) == len(feature_names)
         assert explanation.target_class in class_names
 
@@ -553,6 +640,7 @@ class TestTreeShapXGBoost:
 # ──────────────────────────────────────────────
 # Interaction Tests
 # ──────────────────────────────────────────────
+
 
 class TestTreeShapInteractions:
     """TreeSHAP interaction value tests."""
@@ -562,8 +650,9 @@ class TestTreeShapInteractions:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain_interactions(X[0])
         matrix = explanation.explanation_data["interaction_matrix"]
@@ -576,8 +665,9 @@ class TestTreeShapInteractions:
         from explainiverse.explainers.attribution.treeshap_wrapper import TreeShapExplainer
 
         X, y, feature_names, class_names, model = iris_rf_setup
-        explainer = TreeShapExplainer(model=model, feature_names=feature_names,
-                                      class_names=class_names)
+        explainer = TreeShapExplainer(
+            model=model, feature_names=feature_names, class_names=class_names
+        )
 
         explanation = explainer.explain_interactions(X[0])
         main_effects = explanation.explanation_data["feature_attributions"]

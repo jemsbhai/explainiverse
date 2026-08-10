@@ -1,0 +1,12 @@
+# Lowest supported direct runtime dependencies for the Python 3.10 contract.
+# XGBoost publishes the 1.7 line beginning at 1.7.1 rather than 1.7.0.
+numpy==1.24.0
+lime==0.2.0.1
+scikit-learn==1.6.0
+shap==0.46.0
+pandas==1.5.0
+scipy==1.10.0
+xgboost==1.7.1
+torch==2.0.0
+captum==0.8.0
+scikit-image==0.20.0

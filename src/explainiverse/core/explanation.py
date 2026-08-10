@@ -1,18 +1,19 @@
 # src/explainiverse/core/explanation.py
-"""
-Unified container for explanation results.
+"""Validated container for explanation results."""
 
-The Explanation class provides a standardized format for all explainer outputs,
-enabling consistent handling across different explanation methods.
-"""
+from __future__ import annotations
 
-from typing import Dict, List, Optional, Any
+import copy
+import math
+from collections.abc import Mapping, Sequence
+from numbers import Real
+from typing import Any, Optional
 
 
 class Explanation:
     """
     Unified container for explanation results.
-    
+
     Attributes:
         explainer_name: Name of the explainer that generated this explanation
         target_class: The class/output being explained
@@ -20,7 +21,7 @@ class Explanation:
             (e.g., feature_attributions, heatmaps, rules)
         feature_names: Optional list of feature names for index resolution
         metadata: Optional additional metadata about the explanation
-    
+
     Example:
         >>> explanation = Explanation(
         ...     explainer_name="LIME",
@@ -35,20 +36,20 @@ class Explanation:
     def __init__(
         self,
         explainer_name: str,
-        target_class: str,
-        explanation_data: Dict[str, Any],
-        feature_names: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ):
+        target_class: Any,
+        explanation_data: Mapping[str, Any],
+        feature_names: Optional[Sequence[str]] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         """
         Initialize an Explanation object.
-        
+
         Args:
             explainer_name: Name of the explainer (e.g., "LIME", "SHAP")
             target_class: The target class or output being explained
             explanation_data: Dictionary containing the explanation details.
                 Common keys include:
-                - "feature_attributions": Dict[str, float] mapping feature names to importance
+                - "feature_attributions": Dict[str, float] mapping names to attribution values
                 - "attributions_raw": List[float] of raw attribution values
                 - "heatmap": np.ndarray for image explanations
                 - "rules": List of rule strings for rule-based explanations
@@ -56,13 +57,29 @@ class Explanation:
                 index-based lookup in evaluation metrics.
             metadata: Optional additional metadata (e.g., computation time, parameters)
         """
+        if not isinstance(explainer_name, str) or not explainer_name.strip():
+            raise ValueError("explainer_name must be a non-empty string")
+        if not isinstance(explanation_data, Mapping):
+            raise TypeError("explanation_data must be a mapping")
+        if feature_names is not None:
+            if isinstance(feature_names, (str, bytes)) or not isinstance(feature_names, Sequence):
+                raise TypeError("feature_names must be a sequence of strings or None")
+            if any(not isinstance(name, str) or not name for name in feature_names):
+                raise ValueError("feature_names must contain non-empty strings")
+            if len(feature_names) != len(set(feature_names)):
+                raise ValueError("feature_names must be unique")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise TypeError("metadata must be a mapping or None")
+
         self.explainer_name = explainer_name
         self.target_class = target_class
-        self.explanation_data = explanation_data
-        self.feature_names = list(feature_names) if feature_names is not None else None
-        self.metadata = metadata or {}
+        self.explanation_data = copy.deepcopy(dict(explanation_data))
+        self.feature_names = (
+            copy.deepcopy(list(feature_names)) if feature_names is not None else None
+        )
+        self.metadata = copy.deepcopy(dict(metadata)) if metadata is not None else {}
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         n_features = len(self.feature_names) if self.feature_names else "N/A"
         return (
             f"Explanation(explainer='{self.explainer_name}', "
@@ -71,53 +88,75 @@ class Explanation:
             f"n_features={n_features})"
         )
 
-    def get_attributions(self) -> Optional[Dict[str, float]]:
+    def get_attributions(self) -> Optional[dict[str, Any]]:
         """
         Get feature attributions if available.
-        
+
         Returns:
             Dictionary mapping feature names to attribution values,
             or None if not available.
         """
-        return self.explanation_data.get("feature_attributions")
-    
-    def get_top_features(self, k: int = 5, absolute: bool = True) -> List[tuple]:
+        attributions = self.explanation_data.get("feature_attributions")
+        if attributions is None:
+            return None
+        if not isinstance(attributions, Mapping):
+            raise TypeError("feature_attributions must be a mapping when present")
+        return dict(attributions)
+
+    def get_top_features(self, k: int = 5, absolute: bool = True) -> list[tuple[str, float]]:
         """
-        Get the top-k most important features.
-        
+        Get the features with the largest attribution values.
+
         Args:
             k: Number of top features to return
             absolute: If True, rank by absolute value of attribution
-            
+
         Returns:
-            List of (feature_name, attribution_value) tuples sorted by importance
+            List of ``(feature_name, attribution_value)`` tuples sorted by the
+            selected attribution ordering.
         """
+        if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+            raise ValueError("k must be a positive integer")
+        if not isinstance(absolute, bool):
+            raise TypeError("absolute must be a boolean")
+
         attributions = self.get_attributions()
-        if not attributions:
+        if attributions is None or not attributions:
             return []
-        
+
+        validated: list[tuple[str, float]] = []
+        for feature_name, value in attributions.items():
+            if not isinstance(feature_name, str) or not feature_name:
+                raise ValueError("attribution keys must be non-empty feature names")
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError("attribution values must be real numeric scalars")
+            numeric_value = float(value)
+            if not math.isfinite(numeric_value):
+                raise ValueError("attribution values must be finite")
+            validated.append((feature_name, numeric_value))
+
         if absolute:
             sorted_items = sorted(
-                attributions.items(),
-                key=lambda x: abs(x[1]),
-                reverse=True
+                validated,
+                key=lambda item: abs(item[1]),
+                reverse=True,
             )
         else:
             sorted_items = sorted(
-                attributions.items(),
-                key=lambda x: x[1],
-                reverse=True
+                validated,
+                key=lambda item: item[1],
+                reverse=True,
             )
-        
+
         return sorted_items[:k]
-    
+
     def get_feature_index(self, feature_name: str) -> Optional[int]:
         """
         Get the index of a feature by name.
-        
+
         Args:
             feature_name: Name of the feature
-            
+
         Returns:
             Index of the feature, or None if not found or feature_names not set
         """
@@ -128,52 +167,70 @@ class Explanation:
         except ValueError:
             return None
 
-    def plot(self, plot_type: str = 'bar', **kwargs):
+    def plot(self, plot_type: str = "bar", **kwargs: Any) -> None:
         """
         Visualize the explanation.
-        
+
         Args:
             plot_type: Type of plot ('bar', 'waterfall', 'heatmap')
             **kwargs: Additional arguments passed to the plotting function
-            
-        Note:
-            This is a placeholder for future visualization integration.
+
+        Raises:
+            NotImplementedError: Always. Explainiverse does not currently provide a
+                plotting backend for generic explanation payloads.
         """
-        print(
-            f"[plot: {plot_type}] Plotting explanation for {self.target_class} "
-            f"from {self.explainer_name}."
+        del plot_type, kwargs
+        raise NotImplementedError(
+            "Explanation.plot() has no implemented plotting backend; inspect "
+            "explanation_data or use a payload-specific plotting library"
         )
-        
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """
-        Convert explanation to a dictionary for serialization.
-        
+        Return a detached dictionary representation.
+
+        Payload values retain their original Python/NumPy types. The returned
+        mapping is therefore not guaranteed to be directly JSON serializable.
+
         Returns:
-            Dictionary representation of the explanation
+            Defensive-copy dictionary representation of the explanation
         """
-        return {
-            "explainer_name": self.explainer_name,
-            "target_class": self.target_class,
-            "explanation_data": self.explanation_data,
-            "feature_names": self.feature_names,
-            "metadata": self.metadata
-        }
-    
+        return copy.deepcopy(
+            {
+                "explainer_name": self.explainer_name,
+                "target_class": self.target_class,
+                "explanation_data": self.explanation_data,
+                "feature_names": self.feature_names,
+                "metadata": self.metadata,
+            }
+        )
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Explanation":
+    def from_dict(cls, data: Mapping[str, Any]) -> "Explanation":
         """
         Create an Explanation from a dictionary.
-        
+
         Args:
             data: Dictionary with explanation data
-            
+
         Returns:
             Explanation instance
         """
+        if not isinstance(data, Mapping):
+            raise TypeError("data must be a mapping")
+        missing = {
+            "explainer_name",
+            "target_class",
+            "explanation_data",
+        }.difference(data)
+        if missing:
+            missing_text = ", ".join(sorted(missing))
+            raise ValueError(f"data is missing required field(s): {missing_text}")
+
         return cls(
             explainer_name=data["explainer_name"],
             target_class=data["target_class"],
             explanation_data=data["explanation_data"],
             feature_names=data.get("feature_names"),
-            metadata=data.get("metadata", {})
+            metadata=data.get("metadata", {}),
         )

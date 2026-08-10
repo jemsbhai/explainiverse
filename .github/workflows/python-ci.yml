@@ -1,0 +1,228 @@
+name: Python CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Compatibility-latest (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.12"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install all package extras, tests, and tutorial runner dependencies
+        run: >-
+          python -m pip install
+          --editable ".[all]"
+          "pytest>=8,<9"
+          "pytest-cov>=4.1,<8"
+          "quantus>=0.6,<0.7"
+          "grad-cam>=1.5.5,<2"
+          "nbformat>=5.10,<6"
+          "nbclient>=0.10,<1"
+          "ipykernel>=6.29,<8"
+
+      - name: Require every accuracy-reference dependency
+        run: >-
+          python -c
+          "import captum, lime, quantus, shap, skimage, torch, xgboost;
+          import pytorch_grad_cam;
+          print('all accuracy-reference dependencies imported')"
+
+      - name: Run all-extras tests
+        run: python -m pytest --strict-config --strict-markers
+
+      - name: Validate installed dependency graph
+        run: python -m pip check
+
+  minimum-direct-dependencies:
+    name: Minimum direct dependencies (Python 3.10)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/python310-min-direct.txt
+
+      - name: Install the minimum supported direct dependency set
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            --constraint .github/constraints/python310-min-direct.txt \
+            --editable ".[all]" "pytest>=8,<9" "pytest-cov>=4.1,<8"
+
+      - name: Validate the minimum dependency graph
+        run: python -m pip check
+
+      - name: Exercise minimum-version public and optional contracts
+        run: >-
+          python -m pytest --strict-config --strict-markers
+          tests/test_public_api_accuracy.py
+          tests/test_base_contracts_accuracy.py
+          tests/test_explainer_registry.py
+          tests/test_pytorch_adapter.py
+          tests/test_lime_accuracy.py
+          tests/test_kernelshap_accuracy.py
+          tests/test_treeshap_accuracy.py
+          tests/test_localisation.py
+          tests/reference/test_ref_ig.py
+          tests/reference/test_ref_saliency.py
+          -k "not xgboost_31_vector_intercept"
+
+  base-install:
+    name: Base install without optional dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install only the base distribution
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --editable .
+
+      - name: Validate optional-dependency fallbacks and package discovery
+        run: |
+          python -m pip check
+          python scripts/verify_installed_package.py
+
+  quality-and-package:
+    name: Full extras, quality, and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      POETRY_VERSION: "2.3.2"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: poetry.lock
+
+      - name: Install Poetry
+        run: pipx install "poetry==$POETRY_VERSION"
+
+      - name: Install all extras and development tools
+        run: poetry sync --all-extras --with dev,tutorial --no-interaction
+
+      - name: Require every accuracy-reference dependency
+        run: >-
+          poetry run python -c
+          "import captum, lime, quantus, shap, skimage, torch, xgboost;
+          import pytorch_grad_cam;
+          print('all accuracy-reference dependencies imported')"
+
+      - name: Execute deterministic offline tutorials
+        run: poetry run python scripts/execute_tutorials.py
+
+      - name: Run branch-aware coverage gate
+        run: >-
+          poetry run pytest --strict-config --strict-markers
+          --cov=explainiverse --cov-branch --cov-report=term-missing
+          --cov-report=xml --cov-fail-under=81
+
+      - name: Enforce changed-line coverage on pull requests
+        if: github.event_name == 'pull_request'
+        run: >-
+          poetry run diff-cover coverage.xml
+          --compare-branch "origin/${{ github.base_ref }}"
+          --fail-under=80
+
+      - name: Check Black formatting
+        run: poetry run black --check src tests scripts
+
+      - name: Check import ordering
+        run: poetry run isort --check-only src tests scripts
+
+      - name: Run mypy
+        run: poetry run mypy src scripts
+
+      - name: Validate Poetry metadata and lock file
+        run: poetry check --lock
+
+      - name: Validate installed dependency graph
+        run: poetry run python -m pip check
+
+      - name: Build source and wheel distributions
+        run: poetry build
+
+      - name: Validate distribution metadata
+        run: poetry run twine check dist/*
+
+      - name: Smoke-test the built wheel with all runtime extras
+        run: |
+          python -m venv "$RUNNER_TEMP/explainiverse-wheel-smoke"
+          "$RUNNER_TEMP/explainiverse-wheel-smoke/bin/python" -m pip install --upgrade pip
+          wheel_path=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          "$RUNNER_TEMP/explainiverse-wheel-smoke/bin/python" -m pip install "${wheel_path}[all]"
+          "$RUNNER_TEMP/explainiverse-wheel-smoke/bin/python" scripts/verify_installed_package.py
+
+      - name: Smoke-test the built source distribution as a consumer
+        run: |
+          python -m venv "$RUNNER_TEMP/explainiverse-sdist-smoke"
+          "$RUNNER_TEMP/explainiverse-sdist-smoke/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/explainiverse-sdist-smoke/bin/python" -m pip install dist/*.tar.gz
+          "$RUNNER_TEMP/explainiverse-sdist-smoke/bin/python" scripts/verify_installed_package.py
