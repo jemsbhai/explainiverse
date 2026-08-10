@@ -2,13 +2,12 @@
 """
 Example-based explanation methods.
 
-These methods explain models by identifying representative examples
-from the training data, rather than computing feature attributions.
+The exported ProtoDash implementation selects examples and non-negative
+weights by its documented kernel objective. This module does not assert that
+the selected examples are representative to a person or for a downstream use.
 
 Methods:
-- ProtoDash: Select prototypical examples with importance weights
-- (Future) Influence Functions: Identify training examples that most affect predictions
-- (Future) MMD-Critic: Find prototypes and criticisms
+- ProtoDash: Select examples with kernel-objective weights
 """
 
 from explainiverse.explainers.example_based.protodash import ProtoDashExplainer

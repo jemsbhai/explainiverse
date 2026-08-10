@@ -1,15 +1,19 @@
 # src/explainiverse/evaluation/complexity.py
 """
-Complexity evaluation metrics for explanations (Phase 4).
+Attribution concentration and support-size diagnostics.
 
 Implements:
 - Sparseness (Chalasani et al., 2020) — Gini Index of absolute attributions
 - Complexity (Bhatt et al., 2020) — Shannon entropy of fractional contributions
-- Effective Complexity (Nguyen & Martínez, 2020) — threshold-based feature count
+- Attribution Threshold Count — number of attribution magnitudes above a threshold
 
-These metrics evaluate how concise and interpretable an explanation is.
-Sparser, lower-entropy, and fewer-feature explanations are generally
-considered more human-interpretable.
+The historical ``compute_effective_complexity`` name is retained as a
+compatibility alias for Attribution Threshold Count. It is not Nguyen &
+Martínez's Effective Complexity, which requires measuring model performance
+while conditioning on successively larger top-feature sets.
+
+These metrics summarize attribution concentration, inequality, or thresholded
+support size. They do not by themselves establish human interpretability.
 
 References:
     Chalasani, P., Chen, J., Chowdhury, A. R., Wu, X., & Jha, S. (2020).
@@ -21,20 +25,27 @@ References:
     https://arxiv.org/abs/2005.00631
 
     Nguyen, A. P., & Martínez, M. R. (2020). On Quantitative Aspects
-    of Model Interpretability. arXiv:2007.07584.
+    of Model Interpretability. arXiv:2007.07584. This source is cited to
+    distinguish its model-conditional Effective Complexity from the simpler
+    attribution threshold count retained here for compatibility.
 """
+import warnings
+from typing import Dict, Optional
+
 import numpy as np
-from typing import Union, Dict, Optional
 
-from explainiverse.core.explanation import Explanation
 from explainiverse.core.explainer import BaseExplainer
-
+from explainiverse.core.explanation import Explanation
 
 # =============================================================================
 # Internal Helpers
 # =============================================================================
 
-def _extract_attribution_vector(explanation: Explanation) -> np.ndarray:
+
+def _extract_attribution_vector(
+    explanation: Explanation,
+    expected_n_features: Optional[int] = None,
+) -> np.ndarray:
     """
     Extract attribution values as a numpy array from an Explanation.
 
@@ -54,13 +65,32 @@ def _extract_attribution_vector(explanation: Explanation) -> np.ndarray:
     if not attributions:
         raise ValueError("No feature attributions found in explanation.")
 
-    feature_names = getattr(explanation, 'feature_names', None)
+    feature_names = getattr(explanation, "feature_names", None)
     if feature_names:
-        values = [attributions.get(fn, 0.0) for fn in feature_names]
+        if len(feature_names) != len(set(feature_names)):
+            raise ValueError("Explanation feature_names must be unique.")
+        missing = [name for name in feature_names if name not in attributions]
+        unexpected = [name for name in attributions if name not in feature_names]
+        if missing or unexpected:
+            raise ValueError(
+                "feature_attributions must match feature_names exactly; "
+                f"missing={missing}, unexpected={unexpected}."
+            )
+        values = [attributions[name] for name in feature_names]
     else:
         values = list(attributions.values())
 
-    return np.array(values, dtype=np.float64)
+    result = np.asarray(values, dtype=np.float64)
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError("Feature attributions must be a non-empty one-dimensional vector.")
+    if expected_n_features is not None and result.size != expected_n_features:
+        raise ValueError(
+            f"Explanation returned {result.size} attributions for an input with "
+            f"{expected_n_features} features."
+        )
+    if not np.all(np.isfinite(result)):
+        raise ValueError("Feature attributions must contain only finite values.")
+    return result
 
 
 def _get_explanation_vector(
@@ -82,9 +112,48 @@ def _get_explanation_vector(
         1D numpy array of attributions
     """
     exp = explainer.explain(instance)
-    if not getattr(exp, 'feature_names', None):
-        exp.feature_names = [f"feature_{i}" for i in range(n_features)]
-    return _extract_attribution_vector(exp)
+    return _extract_attribution_vector(exp, expected_n_features=n_features)
+
+
+def _validate_instance(instance: np.ndarray) -> np.ndarray:
+    """Validate a single tabular attribution-metric input."""
+    result = np.asarray(instance, dtype=np.float64)
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError("instance must be a non-empty one-dimensional feature vector.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError("instance must contain only finite values.")
+    return result
+
+
+def _validate_batch(X: np.ndarray, max_instances: Optional[int]) -> tuple[np.ndarray, int]:
+    """Validate batch shape and return the number of rows to evaluate."""
+    result = np.asarray(X)
+    if result.ndim != 2 or result.shape[0] == 0 or result.shape[1] == 0:
+        raise ValueError("X must be a non-empty two-dimensional feature matrix.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError("X must contain only finite values.")
+    if max_instances is not None:
+        if (
+            not isinstance(max_instances, (int, np.integer))
+            or isinstance(max_instances, (bool, np.bool_))
+            or max_instances < 1
+        ):
+            raise ValueError("max_instances must be a positive integer or None.")
+        return result, min(result.shape[0], int(max_instances))
+    return result, result.shape[0]
+
+
+def _summarise_scores(scores: list[float]) -> Dict[str, object]:
+    """Return the shared deterministic batch summary."""
+    values = np.asarray(scores, dtype=np.float64)
+    return {
+        "mean": float(np.mean(values)),
+        "std": float(np.std(values)),
+        "max": float(np.max(values)),
+        "min": float(np.min(values)),
+        "scores": scores,
+        "n_evaluated": len(scores),
+    }
 
 
 def _compute_gini_index(values: np.ndarray) -> float:
@@ -115,7 +184,7 @@ def _compute_gini_index(values: np.ndarray) -> float:
         return 0.0
 
     total = np.sum(values)
-    if total < 1e-300:
+    if total == 0.0:
         return 0.0
 
     sorted_vals = np.sort(values)
@@ -128,7 +197,7 @@ def _compute_gini_index(values: np.ndarray) -> float:
 
 def _compute_entropy(values: np.ndarray) -> float:
     """
-    Compute the Shannon entropy (base 2) of a 1D probability distribution.
+    Compute natural-log Shannon entropy of a 1D probability distribution.
 
     This is a reusable utility for computing entropy of attribution
     distributions. Used internally by compute_complexity() and available
@@ -139,13 +208,16 @@ def _compute_entropy(values: np.ndarray) -> float:
                 sum to 1 (i.e., treated as unnormalized probabilities).
 
     Returns:
-        Shannon entropy in bits. Range: [0, log2(n)] where n is the
+        Shannon entropy in nats. Range: [0, ln(n)] where n is the
         number of non-zero elements. Returns 0.0 if sum is zero or
         only one non-zero element exists.
     """
     total = np.sum(values)
-    if total < 1e-300:
-        return 0.0
+    if total == 0.0:
+        raise ValueError(
+            "Complexity is undefined for an all-zero attribution vector because "
+            "the fractional contribution distribution cannot be formed."
+        )
 
     # Normalize to probability distribution
     p = values / total
@@ -156,13 +228,14 @@ def _compute_entropy(values: np.ndarray) -> float:
     if len(p_nonzero) <= 1:
         return 0.0
 
-    entropy = -np.sum(p_nonzero * np.log2(p_nonzero))
+    entropy = -np.sum(p_nonzero * np.log(p_nonzero))
     return float(entropy)
 
 
 # =============================================================================
 # Sparseness (Chalasani et al., 2020)
 # =============================================================================
+
 
 def compute_sparseness(
     explainer: BaseExplainer,
@@ -171,15 +244,14 @@ def compute_sparseness(
     """
     Compute Sparseness of an explanation using the Gini Index.
 
-    Sparseness measures what fraction of features carry meaningful
-    attribution weight. It uses the Gini index of the absolute
-    attribution values:
+    Sparseness measures concentration across feature-attribution magnitudes.
+    It uses the Gini index of the absolute attribution values:
 
         Sparseness(E, x) = Gini(|E(x)|)
 
-    A higher score indicates a sparser (more concentrated) explanation,
-    which is generally considered more interpretable. A score of 0
-    means all features have equal attribution (least sparse).
+    A higher score indicates a sparser (more concentrated) attribution vector.
+    A score of 0 means all features have equal attribution magnitude. No human-
+    interpretability conclusion follows from this statistic alone.
 
     Properties:
         - Range: [0, 1] (0 = uniform, approaches 1 = maximally sparse)
@@ -205,7 +277,7 @@ def compute_sparseness(
         (2020). Concise Explanations of Neural Networks using Adversarial
         Training. ICML.
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
     n_features = len(instance)
 
     attr = _get_explanation_vector(explainer, instance, n_features)
@@ -217,7 +289,7 @@ def compute_sparseness(
 def compute_batch_sparseness(
     explainer: BaseExplainer,
     X: np.ndarray,
-    max_instances: int = None,
+    max_instances: Optional[int] = None,
 ) -> Dict[str, object]:
     """
     Compute Sparseness over a batch of instances.
@@ -245,40 +317,21 @@ def compute_batch_sparseness(
         Chalasani et al. (2020). Concise Explanations of Neural Networks
         using Adversarial Training. ICML.
     """
-    X = np.asarray(X)
-    n = len(X)
-    if max_instances is not None:
-        n = min(n, max_instances)
+    X, n = _validate_batch(X, max_instances)
 
     scores = []
     for i in range(n):
-        try:
-            score = compute_sparseness(explainer, X[i])
-            scores.append(score)
-        except Exception:
-            continue
+        scores.append(compute_sparseness(explainer, X[i]))
 
-    if not scores:
-        return {
-            "mean": float("nan"), "std": 0.0, "max": float("nan"),
-            "min": float("nan"), "scores": [], "n_evaluated": 0,
-        }
-
-    return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
-        "max": float(np.max(scores)),
-        "min": float(np.min(scores)),
-        "scores": scores,
-        "n_evaluated": len(scores),
-    }
+    return _summarise_scores(scores)
 
 
 # =============================================================================
-# Effective Complexity (Nguyen & Martínez, 2020)
+# Attribution Threshold Count (historically mislabeled Effective Complexity)
 # =============================================================================
 
-def compute_effective_complexity(
+
+def compute_attribution_threshold_count(
     explainer: BaseExplainer,
     instance: np.ndarray,
     threshold: float = 1e-5,
@@ -286,16 +339,16 @@ def compute_effective_complexity(
     normalize: bool = False,
 ) -> float:
     """
-    Compute Effective Complexity of an explanation.
+    Count attribution magnitudes above a configured threshold.
 
-    Effective Complexity counts the number of features whose absolute
+    Attribution Threshold Count counts the number of features whose absolute
     attribution exceeds a relevance threshold ε:
 
         EC(E, x, ε) = |{ i : |a_i| > ε }|
 
     Fewer features above the threshold means a simpler, more focused
     explanation. This metric complements Sparseness (Gini) and
-    Complexity (entropy) by providing a direct, interpretable count
+    Complexity (entropy) by providing a direct thresholded count
     of "active" features.
 
     Supports two threshold modes:
@@ -321,7 +374,7 @@ def compute_effective_complexity(
             Default: False (return raw count).
 
     Returns:
-        Effective Complexity score (float).
+        Attribution Threshold Count score (float).
         Unnormalized: integer-valued float in [0, n].
         Normalized: float in [0, 1].
         Returns 0.0 for all-zero attributions.
@@ -330,29 +383,34 @@ def compute_effective_complexity(
         ValueError: If threshold_type is not "absolute" or "relative".
 
     Example:
-        >>> from explainiverse.evaluation import compute_effective_complexity
+        >>> from explainiverse.evaluation import compute_attribution_threshold_count
         >>> # Absolute threshold
-        >>> ec = compute_effective_complexity(explainer, instance, threshold=0.01)
+        >>> count = compute_attribution_threshold_count(explainer, instance, threshold=0.01)
         >>> # Relative threshold (1% of max attribution)
-        >>> ec = compute_effective_complexity(
+        >>> count = compute_attribution_threshold_count(
         ...     explainer, instance, threshold=0.01, threshold_type="relative"
         ... )
         >>> # Normalized to [0, 1]
-        >>> ec_norm = compute_effective_complexity(
+        >>> count_norm = compute_attribution_threshold_count(
         ...     explainer, instance, normalize=True
         ... )
 
-    Reference:
-        Nguyen, A. P., & Martínez, M. R. (2020). On Quantitative Aspects
-        of Model Interpretability. arXiv:2007.07584.
+    Note:
+        This threshold statistic is not Effective Complexity as defined by
+        Nguyen & Martínez (2020), which depends on conditional model-loss
+        evaluations for successively larger top-feature sets.
     """
     if threshold_type not in ("absolute", "relative"):
         raise ValueError(
-            f"threshold_type must be 'absolute' or 'relative', "
-            f"got '{threshold_type}'"
+            f"threshold_type must be 'absolute' or 'relative', " f"got '{threshold_type}'"
         )
 
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    if not np.isfinite(threshold) or threshold < 0:
+        raise ValueError("threshold must be a finite non-negative number.")
+    if not isinstance(normalize, (bool, np.bool_)):
+        raise TypeError("normalize must be boolean.")
+
+    instance = _validate_instance(instance)
     n_features = len(instance)
 
     attr = _get_explanation_vector(explainer, instance, n_features)
@@ -361,8 +419,8 @@ def compute_effective_complexity(
     # Compute effective threshold
     if threshold_type == "relative":
         max_attr = np.max(abs_attr)
-        if max_attr < 1e-300:
-            # All attributions are effectively zero
+        if max_attr == 0.0:
+            # All attributions are exactly zero.
             return 0.0
         effective_threshold = threshold * max_attr
     else:
@@ -376,16 +434,45 @@ def compute_effective_complexity(
     return float(count)
 
 
-def compute_batch_effective_complexity(
+def compute_effective_complexity(
+    explainer: BaseExplainer,
+    instance: np.ndarray,
+    threshold: float = 1e-5,
+    threshold_type: str = "absolute",
+    normalize: bool = False,
+) -> float:
+    """Compatibility alias for :func:`compute_attribution_threshold_count`.
+
+    This historical name does not implement Nguyen & Martínez's
+    model-conditional Effective Complexity. Call the accurately named function
+    for new code.
+    """
+    warnings.warn(
+        "compute_effective_complexity computes Attribution Threshold Count, not "
+        "Nguyen & Martínez's model-conditional Effective Complexity; use "
+        "compute_attribution_threshold_count for this statistic.",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return compute_attribution_threshold_count(
+        explainer,
+        instance,
+        threshold=threshold,
+        threshold_type=threshold_type,
+        normalize=normalize,
+    )
+
+
+def compute_batch_attribution_threshold_count(
     explainer: BaseExplainer,
     X: np.ndarray,
     threshold: float = 1e-5,
     threshold_type: str = "absolute",
     normalize: bool = False,
-    max_instances: int = None,
+    max_instances: Optional[int] = None,
 ) -> Dict[str, object]:
     """
-    Compute Effective Complexity over a batch of instances.
+    Compute Attribution Threshold Count over a batch of instances.
 
     Args:
         explainer: Explainer instance.
@@ -397,61 +484,70 @@ def compute_batch_effective_complexity(
 
     Returns:
         Dictionary with:
-            - "mean": Mean Effective Complexity across instances
+            - "mean": Mean threshold count across instances
             - "std": Standard deviation
-            - "max": Maximum Effective Complexity
-            - "min": Minimum Effective Complexity
+            - "max": Maximum threshold count
+            - "min": Minimum threshold count
             - "scores": List of per-instance scores
             - "n_evaluated": Number of instances evaluated
 
     Example:
-        >>> from explainiverse.evaluation import compute_batch_effective_complexity
-        >>> result = compute_batch_effective_complexity(
+        >>> from explainiverse.evaluation import compute_batch_attribution_threshold_count
+        >>> result = compute_batch_attribution_threshold_count(
         ...     explainer, X_test, threshold=0.01, threshold_type="relative"
         ... )
-        >>> print(f"Mean EC: {result['mean']:.2f} features")
+        >>> print(f"Mean threshold count: {result['mean']:.2f} features")
 
-    Reference:
-        Nguyen & Martínez (2020). On Quantitative Aspects of Model
-        Interpretability. arXiv:2007.07584.
+    Note:
+        This is not Nguyen & Martínez's model-conditional Effective Complexity.
     """
-    X = np.asarray(X)
-    n = len(X)
-    if max_instances is not None:
-        n = min(n, max_instances)
+    X, n = _validate_batch(X, max_instances)
 
     scores = []
     for i in range(n):
-        try:
-            score = compute_effective_complexity(
-                explainer, X[i],
+        scores.append(
+            compute_attribution_threshold_count(
+                explainer,
+                X[i],
                 threshold=threshold,
                 threshold_type=threshold_type,
                 normalize=normalize,
             )
-            scores.append(score)
-        except Exception:
-            continue
+        )
 
-    if not scores:
-        return {
-            "mean": float("nan"), "std": 0.0, "max": float("nan"),
-            "min": float("nan"), "scores": [], "n_evaluated": 0,
-        }
+    return _summarise_scores(scores)
 
-    return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
-        "max": float(np.max(scores)),
-        "min": float(np.min(scores)),
-        "scores": scores,
-        "n_evaluated": len(scores),
-    }
+
+def compute_batch_effective_complexity(
+    explainer: BaseExplainer,
+    X: np.ndarray,
+    threshold: float = 1e-5,
+    threshold_type: str = "absolute",
+    normalize: bool = False,
+    max_instances: Optional[int] = None,
+) -> Dict[str, object]:
+    """Compatibility alias for batch Attribution Threshold Count."""
+    warnings.warn(
+        "compute_batch_effective_complexity computes Attribution Threshold Count, "
+        "not Nguyen & Martínez's model-conditional Effective Complexity; use "
+        "compute_batch_attribution_threshold_count for this statistic.",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return compute_batch_attribution_threshold_count(
+        explainer,
+        X,
+        threshold=threshold,
+        threshold_type=threshold_type,
+        normalize=normalize,
+        max_instances=max_instances,
+    )
 
 
 # =============================================================================
 # Complexity (Bhatt et al., 2020)
 # =============================================================================
+
 
 def compute_complexity(
     explainer: BaseExplainer,
@@ -463,39 +559,39 @@ def compute_complexity(
     Complexity measures the entropy of the fractional contribution
     distribution over features:
 
-        p_i = |a_i| / \u03a3|a_j|
-        Complexity(E, x) = H(p) = -\u03a3 p_i \u00b7 log\u2082(p_i)
+        p_i = |a_i| / sum_j |a_j|
+        Complexity(E, x) = H(p) = -sum_i p_i * ln(p_i)
 
-    A lower score indicates a simpler (more concentrated) explanation.
-    A higher score means attribution is spread across many features,
-    making the explanation harder for humans to interpret.
+    A lower score means attribution magnitude is more concentrated; a higher
+    score means it is more dispersed. The statistic does not determine human
+    interpretability.
 
     Properties:
-        - Range: [0, log\u2082(n)] where n is the number of features
-        - H = 0 when all weight is on one feature (simplest)
-        - H = log\u2082(n) when weight is uniform (most complex)
+        - Range: [0, ln(n)] where n is the number of features
+        - H = 0 when all magnitude is on one feature
+        - H = ln(n) when magnitude is uniform
         - Scale-invariant: independent of attribution magnitude
-        - Lower is better (simpler explanation)
 
     Args:
         explainer: Explainer instance with .explain() method.
         instance: Input instance (1D array of shape (n_features,)).
 
     Returns:
-        Complexity score (float) in [0, log\u2082(n)]. Lower = simpler.
-        Returns 0.0 for all-zero or single-feature attributions.
+        Complexity score (float) in [0, ln(n)] nats. Lower is more concentrated.
+        All-zero attributions raise because no fractional-contribution
+        probability distribution exists.
 
     Example:
         >>> from explainiverse.evaluation import compute_complexity
         >>> score = compute_complexity(explainer, instance)
-        >>> print(f"Complexity (entropy): {score:.4f} bits")
+        >>> print(f"Complexity (entropy): {score:.4f} nats")
 
     Reference:
         Bhatt, U., Weller, A., & Moura, J. M. F. (2020). Evaluating and
         Aggregating Feature-based Model Explanations. IJCAI.
         https://arxiv.org/abs/2005.00631
     """
-    instance = np.asarray(instance, dtype=np.float64).flatten()
+    instance = _validate_instance(instance)
     n_features = len(instance)
 
     attr = _get_explanation_vector(explainer, instance, n_features)
@@ -507,7 +603,7 @@ def compute_complexity(
 def compute_batch_complexity(
     explainer: BaseExplainer,
     X: np.ndarray,
-    max_instances: int = None,
+    max_instances: Optional[int] = None,
 ) -> Dict[str, object]:
     """
     Compute Complexity over a batch of instances.
@@ -529,36 +625,16 @@ def compute_batch_complexity(
     Example:
         >>> from explainiverse.evaluation import compute_batch_complexity
         >>> result = compute_batch_complexity(explainer, X_test)
-        >>> print(f"Mean Complexity: {result['mean']:.4f} bits")
+        >>> print(f"Mean Complexity: {result['mean']:.4f} nats")
 
     Reference:
         Bhatt et al. (2020). Evaluating and Aggregating Feature-based
         Model Explanations. IJCAI.
     """
-    X = np.asarray(X)
-    n = len(X)
-    if max_instances is not None:
-        n = min(n, max_instances)
+    X, n = _validate_batch(X, max_instances)
 
     scores = []
     for i in range(n):
-        try:
-            score = compute_complexity(explainer, X[i])
-            scores.append(score)
-        except Exception:
-            continue
+        scores.append(compute_complexity(explainer, X[i]))
 
-    if not scores:
-        return {
-            "mean": float("nan"), "std": 0.0, "max": float("nan"),
-            "min": float("nan"), "scores": [], "n_evaluated": 0,
-        }
-
-    return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
-        "max": float(np.max(scores)),
-        "min": float(np.min(scores)),
-        "scores": scores,
-        "n_evaluated": len(scores),
-    }
+    return _summarise_scores(scores)

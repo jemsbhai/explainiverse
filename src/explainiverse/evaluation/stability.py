@@ -1,185 +1,129 @@
-# src/explainiverse/evaluation/stability.py
-"""
-Stability evaluation metrics for explanations.
+"""Verified stability entry points and compatibility wrappers.
 
-Implements:
-- RIS (Relative Input Stability) - sensitivity to input perturbations
-- ROS (Relative Output Stability) - consistency with similar predictions
-- Lipschitz Estimate - local smoothness of explanations
+Historically this module exposed two unrelated heuristics as ``RIS`` and
+``ROS``. The written-paper/Quantus Relative Input/Output Stability contracts
+are implemented in ``evaluation.robustness`` and require model-conditioned
+perturbations. The wrappers below delegate to those implementations and reject
+the old insufficient call contracts instead of silently returning mislabeled
+scores.
 """
+
+from typing import Callable, Dict, Optional, Union
+
 import numpy as np
-from typing import Union, Callable, List, Dict, Optional, Tuple
-from explainiverse.core.explanation import Explanation
+
 from explainiverse.core.explainer import BaseExplainer
-from explainiverse.evaluation._utils import get_prediction_value
-
-
-def _extract_attribution_vector(explanation: Explanation) -> np.ndarray:
-    """
-    Extract attribution values as a numpy array from an Explanation.
-    
-    Args:
-        explanation: Explanation object with feature_attributions
-        
-    Returns:
-        1D numpy array of attribution values
-    """
-    attributions = explanation.explanation_data.get("feature_attributions", {})
-    if not attributions:
-        raise ValueError("No feature attributions found in explanation.")
-    
-    # Get values in consistent order
-    feature_names = getattr(explanation, 'feature_names', None)
-    if feature_names:
-        values = [attributions.get(fn, 0.0) for fn in feature_names]
-    else:
-        values = list(attributions.values())
-    
-    return np.array(values, dtype=float)
-
-
-def _normalize_vector(v: np.ndarray, epsilon: float = 1e-10) -> np.ndarray:
-    """Normalize a vector to unit length."""
-    norm = np.linalg.norm(v)
-    if norm < epsilon:
-        return v
-    return v / norm
+from explainiverse.evaluation.robustness import (
+    _generate_perturbations_l2,
+    _generate_perturbations_linf,
+    _get_explanation_vector,
+    _get_explanation_vector_and_target,
+    _validate_batch,
+    _validate_instance,
+    _validate_norm_order,
+    _validate_sampling_parameters,
+    compute_relative_input_stability,
+    compute_relative_output_stability,
+)
 
 
 def compute_ris(
     explainer: BaseExplainer,
     instance: np.ndarray,
-    n_perturbations: int = 10,
-    noise_scale: float = 0.01,
-    seed: int = None,
+    n_perturbations: int = 50,
+    noise_scale: float = 0.05,
+    seed: Optional[int] = None,
+    *,
+    model=None,
+    norm_ord: Union[int, float] = 2,
+    epsilon_min: float = 1e-7,
+    feature_types: Optional[np.ndarray] = None,
+    discrete_flip_prob: float = 0.03,
+    target_class: Optional[int] = None,
 ) -> float:
+    """Compute the paper/Quantus Relative Input Stability Equation 2 contract.
+
+    ``model`` is required for the same-predicted-class constraint. It may be
+    omitted only when ``explainer.model`` is available. The former routine in
+    this module computed a mean absolute local-Lipschitz ratio and was not RIS.
     """
-    Compute Relative Input Stability (RIS).
-    
-    Measures how stable explanations are to small perturbations in the input.
-    Lower RIS indicates more stable explanations.
-    
-    RIS = mean(||E(x) - E(x')|| / ||x - x'||) for perturbed inputs x'
-    
-    Args:
-        explainer: Explainer instance with .explain() method
-        instance: Original input instance (1D array)
-        n_perturbations: Number of perturbed samples to generate
-        noise_scale: Standard deviation of Gaussian noise (relative to feature range)
-        seed: Random seed for reproducibility
-        
-    Returns:
-        RIS score (lower = more stable)
-    """
-    if seed is not None:
-        np.random.seed(seed)
-    
-    instance = np.asarray(instance).flatten()
-    n_features = len(instance)
-    
-    # Get original explanation
-    original_exp = explainer.explain(instance)
-    original_exp.feature_names = getattr(original_exp, 'feature_names', None) or \
-                                  [f"feature_{i}" for i in range(n_features)]
-    original_attr = _extract_attribution_vector(original_exp)
-    
-    ratios = []
-    
-    for _ in range(n_perturbations):
-        # Generate perturbed input
-        noise = np.random.normal(0, noise_scale, n_features)
-        perturbed = instance + noise * np.abs(instance + 1e-10)  # Scale noise by feature magnitude
-        
-        # Get perturbed explanation
-        try:
-            perturbed_exp = explainer.explain(perturbed)
-            perturbed_exp.feature_names = original_exp.feature_names
-            perturbed_attr = _extract_attribution_vector(perturbed_exp)
-        except Exception:
-            continue
-        
-        # Compute ratio of changes
-        attr_diff = np.linalg.norm(original_attr - perturbed_attr)
-        input_diff = np.linalg.norm(instance - perturbed)
-        
-        if input_diff > 1e-10:
-            ratios.append(attr_diff / input_diff)
-    
-    if not ratios:
-        return float('inf')
-    
-    return float(np.mean(ratios))
+    resolved_model = model if model is not None else getattr(explainer, "model", None)
+    if resolved_model is None:
+        raise ValueError(
+            "Equation 2 RIS requires model=... (or explainer.model) to enforce "
+            "the same-predicted-class constraint."
+        )
+    result = compute_relative_input_stability(
+        explainer,
+        resolved_model,
+        instance,
+        n_perturbations=n_perturbations,
+        noise_scale=noise_scale,
+        norm_ord=norm_ord,
+        epsilon_min=epsilon_min,
+        aggregation="max",
+        feature_types=feature_types,
+        discrete_flip_prob=discrete_flip_prob,
+        seed=seed,
+        target_class=target_class,
+    )
+    if isinstance(result, dict):
+        raise RuntimeError("RIS unexpectedly returned detail data")
+    return float(result)
 
 
 def compute_ros(
     explainer: BaseExplainer,
     model,
     instance: np.ndarray,
-    reference_instances: np.ndarray,
+    reference_instances: Optional[np.ndarray] = None,
     n_neighbors: int = 5,
     prediction_threshold: float = 0.05,
+    *,
+    logit_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    n_perturbations: int = 50,
+    noise_scale: float = 0.05,
+    norm_ord: Union[int, float] = 2,
+    epsilon_min: float = 1e-7,
+    feature_types: Optional[np.ndarray] = None,
+    discrete_flip_prob: float = 0.03,
+    seed: Optional[int] = None,
+    target_class: Optional[int] = None,
 ) -> float:
+    """Compute the paper/Quantus Relative Output Stability Equation 5 contract.
+
+    A callable returning pre-softmax logits is required. The old
+    ``reference_instances``/cosine-neighbour routine measured a different,
+    noncanonical similarity heuristic and is deliberately unavailable.
     """
-    Compute Relative Output Stability (ROS).
-    
-    Measures how similar explanations are for instances with similar predictions.
-    Higher ROS indicates more consistent explanations.
-    
-    Args:
-        explainer: Explainer instance with .explain() method
-        model: Model adapter with predict/predict_proba method
-        instance: Query instance
-        reference_instances: Pool of reference instances to find neighbors
-        n_neighbors: Number of neighbors to compare
-        prediction_threshold: Maximum prediction difference to consider "similar"
-        
-    Returns:
-        ROS score (higher = more consistent for similar predictions)
-    """
-    instance = np.asarray(instance).flatten()
-    n_features = len(instance)
-    
-    # Get prediction for query instance
-    query_pred = get_prediction_value(model, instance)
-    
-    # Find instances with similar predictions
-    similar_instances = []
-    for ref in reference_instances:
-        ref = np.asarray(ref).flatten()
-        ref_pred = get_prediction_value(model, ref)
-        if abs(query_pred - ref_pred) <= prediction_threshold:
-            similar_instances.append(ref)
-    
-    if len(similar_instances) < 2:
-        return 1.0  # Perfect stability if no similar instances
-    
-    # Limit to n_neighbors
-    similar_instances = similar_instances[:n_neighbors]
-    
-    # Get explanation for query
-    query_exp = explainer.explain(instance)
-    query_exp.feature_names = getattr(query_exp, 'feature_names', None) or \
-                               [f"feature_{i}" for i in range(n_features)]
-    query_attr = _normalize_vector(_extract_attribution_vector(query_exp))
-    
-    # Get explanations for similar instances and compute similarity
-    similarities = []
-    for ref in similar_instances:
-        try:
-            ref_exp = explainer.explain(ref)
-            ref_exp.feature_names = query_exp.feature_names
-            ref_attr = _normalize_vector(_extract_attribution_vector(ref_exp))
-            
-            # Cosine similarity
-            similarity = np.dot(query_attr, ref_attr)
-            similarities.append(similarity)
-        except Exception:
-            continue
-    
-    if not similarities:
-        return 1.0
-    
-    return float(np.mean(similarities))
+    if reference_instances is not None or n_neighbors != 5 or prediction_threshold != 0.05:
+        raise ValueError(
+            "reference_instances, n_neighbors, and prediction_threshold belong "
+            "to the retired cosine-neighbour heuristic, not Equation 5 ROS."
+        )
+    if logit_fn is None:
+        raise ValueError(
+            "Equation 5 ROS requires logit_fn=... returning pre-softmax logits; "
+            "probabilities are not interchangeable with Equation 5 logits."
+        )
+    result = compute_relative_output_stability(
+        explainer,
+        model,
+        instance,
+        logit_fn=logit_fn,
+        n_perturbations=n_perturbations,
+        noise_scale=noise_scale,
+        norm_ord=norm_ord,
+        epsilon_min=epsilon_min,
+        aggregation="max",
+        feature_types=feature_types,
+        discrete_flip_prob=discrete_flip_prob,
+        seed=seed,
+        target_class=target_class,
+    )
+    if isinstance(result, dict):
+        raise RuntimeError("ROS unexpectedly returned detail data")
+    return float(result)
 
 
 def compute_lipschitz_estimate(
@@ -187,193 +131,248 @@ def compute_lipschitz_estimate(
     instance: np.ndarray,
     n_samples: int = 20,
     radius: float = 0.1,
-    seed: int = None,
+    seed: Optional[int] = None,
+    *,
+    norm_ord: Union[int, float] = 2,
+    perturb_norm: str = "l2",
+    target_class: Optional[int] = None,
 ) -> float:
+    """Estimate the anchor-point local Lipschitz constant.
+
+    This is the Monte Carlo approximation to Alvarez-Melis & Jaakkola (2018,
+    Equation 1): ``max ||E(x)-E(x')|| / ||x-x'||`` for neighbours of the
+    fixed anchor ``x``. The former implementation compared arbitrary pairs of
+    neighbours and therefore did not estimate the stated pointwise quantity.
     """
-    Estimate local Lipschitz constant of the explanation function.
-    
-    The Lipschitz constant bounds how fast explanations can change:
-    ||E(x) - E(y)|| <= L * ||x - y||
-    
-    Lower L indicates smoother, more stable explanations.
-    
-    Args:
-        explainer: Explainer instance
-        instance: Center point for local estimate
-        n_samples: Number of sample pairs to evaluate
-        radius: Radius of ball around instance to sample from
-        seed: Random seed
-        
-    Returns:
-        Estimated local Lipschitz constant (lower = smoother)
-    """
-    if seed is not None:
-        np.random.seed(seed)
-    
-    instance = np.asarray(instance).flatten()
-    n_features = len(instance)
-    
-    max_ratio = 0.0
-    
-    for _ in range(n_samples):
-        # Generate two random points in a ball around instance
-        direction1 = np.random.randn(n_features)
-        direction1 = direction1 / np.linalg.norm(direction1)
-        r1 = np.random.uniform(0, radius)
-        point1 = instance + r1 * direction1
-        
-        direction2 = np.random.randn(n_features)
-        direction2 = direction2 / np.linalg.norm(direction2)
-        r2 = np.random.uniform(0, radius)
-        point2 = instance + r2 * direction2
-        
-        try:
-            exp1 = explainer.explain(point1)
-            exp1.feature_names = [f"feature_{i}" for i in range(n_features)]
-            attr1 = _extract_attribution_vector(exp1)
-            
-            exp2 = explainer.explain(point2)
-            exp2.feature_names = exp1.feature_names
-            attr2 = _extract_attribution_vector(exp2)
-        except Exception:
+    instance = _validate_instance(instance)
+    _validate_sampling_parameters(n_samples=n_samples, radius=radius)
+    _validate_norm_order(norm_ord)
+    if radius == 0:
+        raise ValueError(
+            "The local Lipschitz ratio is undefined at radius=0 because every "
+            "sampled denominator is zero."
+        )
+    if perturb_norm not in {"l2", "linf"}:
+        raise ValueError("perturb_norm must be 'l2' or 'linf'.")
+
+    rng = np.random.default_rng(seed)
+    generator = _generate_perturbations_l2 if perturb_norm == "l2" else _generate_perturbations_linf
+    neighbours = generator(instance, radius, n_samples, rng)
+    original, explained_target = _get_explanation_vector_and_target(
+        explainer,
+        instance,
+        instance.size,
+        target_class=target_class,
+    )
+
+    ratios = []
+    for neighbour in neighbours:
+        denominator = np.linalg.norm(instance - neighbour, ord=norm_ord)
+        if denominator == 0:
             continue
-        
-        attr_diff = np.linalg.norm(attr1 - attr2)
-        input_diff = np.linalg.norm(point1 - point2)
-        
-        if input_diff > 1e-10:
-            ratio = attr_diff / input_diff
-            max_ratio = max(max_ratio, ratio)
-    
-    return float(max_ratio)
+        perturbed = _get_explanation_vector(
+            explainer,
+            neighbour,
+            instance.size,
+            target_class=target_class,
+            expected_target=explained_target,
+        )
+        numerator = np.linalg.norm(original - perturbed, ord=norm_ord)
+        ratios.append(float(numerator / denominator))
+    if not ratios:
+        raise ValueError("No nonzero perturbation denominator was sampled.")
+    return float(np.max(ratios))
 
 
 def compute_stability_metrics(
     explainer: BaseExplainer,
     model,
     instance: np.ndarray,
-    background_data: np.ndarray,
-    n_perturbations: int = 10,
-    noise_scale: float = 0.01,
+    background_data: Optional[np.ndarray] = None,
+    n_perturbations: int = 50,
+    noise_scale: float = 0.05,
     n_neighbors: int = 5,
-    seed: int = None,
-) -> Dict[str, float]:
+    seed: Optional[int] = None,
+    *,
+    logit_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    target_class: Optional[int] = None,
+) -> Dict[str, Optional[float]]:
+    """Compute verified RIS, local Lipschitz, and optionally ROS contracts.
+
+    ``background_data`` and ``n_neighbors`` are retired compatibility
+    parameters. Passing a background pool would request the noncanonical
+    cosine-neighbour heuristic and is rejected.
     """
-    Compute comprehensive stability metrics for a single instance.
-    
-    Args:
-        explainer: Explainer instance
-        model: Model adapter
-        instance: Query instance
-        background_data: Reference data for ROS computation
-        n_perturbations: Number of perturbations for RIS
-        noise_scale: Noise scale for RIS
-        n_neighbors: Number of neighbors for ROS
-        seed: Random seed
-        
-    Returns:
-        Dictionary with RIS, ROS, and Lipschitz estimate
-    """
-    return {
-        "ris": compute_ris(explainer, instance, n_perturbations, noise_scale, seed),
-        "ros": compute_ros(explainer, model, instance, background_data, n_neighbors),
-        "lipschitz": compute_lipschitz_estimate(explainer, instance, seed=seed),
+    if background_data is not None or n_neighbors != 5:
+        raise ValueError(
+            "background_data/n_neighbors belong to the retired noncanonical "
+            "ROS heuristic. Supply logit_fn for Equation 5 ROS."
+        )
+    _validate_sampling_parameters(
+        n_samples=n_perturbations,
+        noise_scale=noise_scale,
+    )
+    if noise_scale == 0:
+        raise ValueError(
+            "noise_scale=0 makes the included local Lipschitz denominator "
+            "undefined; use a positive neighbourhood scale."
+        )
+    result: Dict[str, Optional[float]] = {
+        "ris": compute_ris(
+            explainer,
+            instance,
+            n_perturbations=n_perturbations,
+            noise_scale=noise_scale,
+            seed=seed,
+            model=model,
+            target_class=target_class,
+        ),
+        "lipschitz": compute_lipschitz_estimate(
+            explainer,
+            instance,
+            n_samples=n_perturbations,
+            radius=noise_scale,
+            seed=seed,
+            target_class=target_class,
+        ),
+        "ros": None,
     }
+    if logit_fn is not None:
+        result["ros"] = compute_ros(
+            explainer,
+            model,
+            instance,
+            logit_fn=logit_fn,
+            n_perturbations=n_perturbations,
+            noise_scale=noise_scale,
+            seed=seed,
+            target_class=target_class,
+        )
+    return result
 
 
 def compute_batch_stability(
     explainer: BaseExplainer,
     model,
     X: np.ndarray,
-    n_perturbations: int = 10,
-    noise_scale: float = 0.01,
-    max_samples: int = None,
-    seed: int = None,
-) -> Dict[str, float]:
-    """
-    Compute average stability metrics over a batch of instances.
-    
-    Args:
-        explainer: Explainer instance
-        model: Model adapter
-        X: Input data (2D array)
-        n_perturbations: Number of perturbations per instance
-        noise_scale: Noise scale for perturbations
-        max_samples: Maximum number of samples to evaluate
-        seed: Random seed
-        
-    Returns:
-        Dictionary with mean and std of stability metrics
-    """
-    n_samples = len(X)
-    if max_samples:
-        n_samples = min(n_samples, max_samples)
-    
+    n_perturbations: int = 50,
+    noise_scale: float = 0.05,
+    max_samples: Optional[int] = None,
+    seed: Optional[int] = None,
+    *,
+    logit_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    target_class: Optional[int] = None,
+) -> dict:
+    """Compute verified stability summaries over a strict 2D batch."""
+    X = _validate_batch(X)
+    _validate_sampling_parameters(
+        n_samples=n_perturbations,
+        noise_scale=noise_scale,
+    )
+    if noise_scale == 0:
+        raise ValueError(
+            "noise_scale=0 makes the included local Lipschitz denominator "
+            "undefined; use a positive neighbourhood scale."
+        )
+    n = len(X)
+    if max_samples is not None:
+        if isinstance(max_samples, bool) or not isinstance(max_samples, (int, np.integer)):
+            raise TypeError("max_samples must be an integer or None.")
+        if max_samples <= 0:
+            raise ValueError("max_samples must be greater than zero.")
+        n = min(n, max_samples)
+
     ris_scores = []
+    lip_scores = []
     ros_scores = []
-    
-    for i in range(n_samples):
-        instance = X[i]
-        
-        try:
-            ris = compute_ris(explainer, instance, n_perturbations, noise_scale, seed)
-            if not np.isinf(ris):
-                ris_scores.append(ris)
-            
-            ros = compute_ros(explainer, model, instance, X, n_neighbors=5)
-            ros_scores.append(ros)
-        except Exception:
-            continue
-    
-    results = {"n_samples": len(ris_scores)}
-    
-    if ris_scores:
-        results["mean_ris"] = np.mean(ris_scores)
-        results["std_ris"] = np.std(ris_scores)
-    else:
-        results["mean_ris"] = float('inf')
-        results["std_ris"] = 0.0
-    
-    if ros_scores:
-        results["mean_ros"] = np.mean(ros_scores)
-        results["std_ros"] = np.std(ros_scores)
-    else:
-        results["mean_ros"] = 0.0
-        results["std_ros"] = 0.0
-    
-    return results
+    for index in range(n):
+        item_seed = seed + index if seed is not None else None
+        ris_scores.append(
+            compute_ris(
+                explainer,
+                X[index],
+                n_perturbations=n_perturbations,
+                noise_scale=noise_scale,
+                seed=item_seed,
+                model=model,
+                target_class=target_class,
+            )
+        )
+        lip_scores.append(
+            compute_lipschitz_estimate(
+                explainer,
+                X[index],
+                n_samples=n_perturbations,
+                radius=noise_scale,
+                seed=item_seed,
+                target_class=target_class,
+            )
+        )
+        if logit_fn is not None:
+            ros_scores.append(
+                compute_ros(
+                    explainer,
+                    model,
+                    X[index],
+                    logit_fn=logit_fn,
+                    n_perturbations=n_perturbations,
+                    noise_scale=noise_scale,
+                    seed=item_seed,
+                    target_class=target_class,
+                )
+            )
+
+    def summarise_defined(scores):
+        """Summarise finite per-row scores; no valid rows is explicitly undefined."""
+        values = np.asarray(scores, dtype=float)
+        defined = values[np.isfinite(values)]
+        if defined.size == 0:
+            return float("nan"), float("nan"), 0
+        return float(np.mean(defined)), float(np.std(defined)), int(defined.size)
+
+    mean_ris, std_ris, n_valid_ris = summarise_defined(ris_scores)
+    mean_lipschitz, std_lipschitz, n_valid_lipschitz = summarise_defined(lip_scores)
+    mean_ros, std_ros, n_valid_ros = summarise_defined(ros_scores)
+
+    result = {
+        "n_samples": n,
+        "mean_ris": mean_ris,
+        "std_ris": std_ris,
+        "n_valid_ris": n_valid_ris,
+        "mean_lipschitz": mean_lipschitz,
+        "std_lipschitz": std_lipschitz,
+        "n_valid_lipschitz": n_valid_lipschitz,
+        "mean_ros": mean_ros,
+        "std_ros": std_ros,
+        "n_valid_ros": n_valid_ros,
+    }
+    return result
 
 
 def compare_explainer_stability(
     explainers: Dict[str, BaseExplainer],
     model,
     X: np.ndarray,
-    n_perturbations: int = 5,
-    noise_scale: float = 0.01,
-    max_samples: int = 20,
-    seed: int = None,
+    n_perturbations: int = 50,
+    noise_scale: float = 0.05,
+    max_samples: Optional[int] = 20,
+    seed: Optional[int] = None,
+    *,
+    logit_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    target_class: Optional[int] = None,
 ) -> Dict[str, Dict[str, float]]:
-    """
-    Compare stability metrics across multiple explainers.
-    
-    Args:
-        explainers: Dict mapping explainer names to explainer instances
-        model: Model adapter
-        X: Input data
-        n_perturbations: Number of perturbations per instance
-        noise_scale: Noise scale
-        max_samples: Max samples to evaluate per explainer
-        seed: Random seed
-        
-    Returns:
-        Dict mapping explainer names to their stability metrics
-    """
-    results = {}
-    
-    for name, explainer in explainers.items():
-        metrics = compute_batch_stability(
-            explainer, model, X, n_perturbations, noise_scale, max_samples, seed
+    """Compare verified stability summaries across explainers."""
+    return {
+        name: compute_batch_stability(
+            explainer,
+            model,
+            X,
+            n_perturbations=n_perturbations,
+            noise_scale=noise_scale,
+            max_samples=max_samples,
+            seed=seed,
+            logit_fn=logit_fn,
+            target_class=target_class,
         )
-        results[name] = metrics
-    
-    return results
+        for name, explainer in explainers.items()
+    }

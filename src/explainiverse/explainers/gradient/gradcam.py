@@ -1,437 +1,523 @@
-# src/explainiverse/explainers/gradient/gradcam.py
-"""
-GradCAM and GradCAM++ - Visual Explanations for CNNs.
+"""Gradient-weighted class activation mapping for spatial CNN layers.
 
-GradCAM produces visual explanations by highlighting important regions
-in an image that contribute to the model's prediction. It uses gradients
-flowing into the final convolutional layer to produce a coarse localization map.
+This module implements Grad-CAM as defined by Selvaraju et al. (ICCV 2017):
+the gradient of one scalar target is globally averaged over each activation
+channel, the channels are combined with those weights, and a final ReLU keeps
+positive evidence.
 
-GradCAM++ improves upon GradCAM by using a weighted combination of positive
-partial derivatives, providing better localization for multiple instances
-of the same class.
+The former ``method="gradcam++"`` option is intentionally unavailable.  The
+old implementation substituted powers of first derivatives for the second and
+third derivatives in the Grad-CAM++ definition without establishing the
+piecewise-linear-tail assumptions required by the paper's closed form.  Calling
+that path a general Grad-CAM++ implementation was therefore not justified.
 
-References:
-    GradCAM: Selvaraju et al., 2017 - "Grad-CAM: Visual Explanations from
-    Deep Networks via Gradient-based Localization"
+Reference:
+    Selvaraju et al., "Grad-CAM: Visual Explanations from Deep Networks via
+    Gradient-Based Localization", ICCV 2017.
     https://arxiv.org/abs/1610.02391
-    
-    GradCAM++: Chattopadhay et al., 2018 - "Grad-CAM++: Generalized Gradient-based
-    Visual Explanations for Deep Convolutional Networks"
-    https://arxiv.org/abs/1710.11063
-
-Example:
-    from explainiverse.explainers.gradient import GradCAMExplainer
-    from explainiverse.adapters import PyTorchAdapter
-    
-    # For a CNN model
-    adapter = PyTorchAdapter(cnn_model, task="classification")
-    
-    explainer = GradCAMExplainer(
-        model=adapter,
-        target_layer="layer4",  # Last conv layer
-        class_names=class_names
-    )
-    
-    explanation = explainer.explain(image)
-    heatmap = explanation.explanation_data["heatmap"]
 """
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from numbers import Integral
+from typing import Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
-from typing import List, Optional, Tuple, Union
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
+
+Target = Optional[Union[int, np.integer]]
+
+
+def _model_has_unflatten(adapter) -> bool:
+    """Return whether the wrapped torch model contains an ``Unflatten``."""
+    try:
+        import torch.nn as nn
+
+        return any(isinstance(module, nn.Unflatten) for module in adapter.model.modules())
+    except (AttributeError, ImportError):
+        return False
+
+
+def _unflatten_spatial_size(adapter) -> Optional[Tuple[int, int]]:
+    """Return the last two dimensions of the first ``Unflatten`` layer."""
+    try:
+        import torch.nn as nn
+
+        for module in adapter.model.modules():
+            if isinstance(module, nn.Unflatten):
+                dimensions = tuple(
+                    int(value[1]) if isinstance(value, tuple) else int(value)
+                    for value in module.unflattened_size
+                )
+                if len(dimensions) >= 2 and dimensions[-2] > 0 and dimensions[-1] > 0:
+                    return dimensions[-2], dimensions[-1]
+    except (AttributeError, ImportError, TypeError, ValueError):
+        pass
+    return None
+
+
+def _validate_input_layout(input_layout: str) -> str:
+    if not isinstance(input_layout, str):
+        raise TypeError("input_layout must be 'auto', 'chw', or 'hwc'")
+    normalized = input_layout.strip().lower()
+    if normalized not in {"auto", "chw", "hwc"}:
+        raise ValueError("input_layout must be 'auto', 'chw', or 'hwc'")
+    return normalized
+
+
+def _prepare_single_input(
+    adapter, image: np.ndarray, input_layout: str = "auto"
+) -> Tuple[np.ndarray, Tuple[int, int]]:
+    """Normalize one CHW/HWC image (or an explicit flat-unflatten input)."""
+    input_layout = _validate_input_layout(input_layout)
+    prepared = as_real_array(image, name="image", dtype=np.float32, require_finite=True)
+
+    if prepared.size == 0:
+        raise ValueError("image must not be empty")
+
+    if prepared.ndim == 3:
+        if input_layout == "chw":
+            prepared = prepared[np.newaxis, ...]
+        elif input_layout == "hwc":
+            prepared = np.transpose(prepared, (2, 0, 1))[np.newaxis, ...]
+        else:
+            first_is_channel = prepared.shape[0] in (1, 3, 4)
+            last_is_channel = prepared.shape[-1] in (1, 3, 4)
+            if first_is_channel and last_is_channel:
+                raise ValueError(
+                    "Ambiguous 3D image layout: both the first and last axes "
+                    "could be channels. Set input_layout='chw' or 'hwc'."
+                )
+            if first_is_channel:
+                prepared = prepared[np.newaxis, ...]
+            elif last_is_channel:
+                prepared = np.transpose(prepared, (2, 0, 1))[np.newaxis, ...]
+            else:
+                raise ValueError(
+                    "A 3D image in input_layout='auto' must have 1, 3, or 4 "
+                    "channels on exactly one edge; set input_layout explicitly "
+                    "for other channel counts"
+                )
+    elif prepared.ndim == 4:
+        if input_layout == "hwc":
+            raise ValueError(
+                "A four-dimensional input to explain() must use (1, C, H, W); "
+                "input_layout='hwc' applies only to one three-dimensional image"
+            )
+        if prepared.shape[0] != 1:
+            raise ValueError(
+                "explain() accepts exactly one image; use explain_batch() for "
+                f"a batch of size {prepared.shape[0]}"
+            )
+    elif prepared.ndim in (1, 2) and _model_has_unflatten(adapter):
+        if input_layout != "auto":
+            raise ValueError("input_layout must be 'auto' for flat Unflatten inputs")
+        if prepared.ndim == 1:
+            prepared = prepared[np.newaxis, ...]
+        elif prepared.shape[0] != 1:
+            raise ValueError(
+                "explain() accepts exactly one flat input; use explain_batch() "
+                f"for a batch of size {prepared.shape[0]}"
+            )
+    else:
+        raise ValueError(
+            "Expected one CHW/HWC image, a (1, C, H, W) tensor, or a flat "
+            "input for a model with an Unflatten layer; "
+            f"got shape {prepared.shape}"
+        )
+
+    if prepared.ndim == 4:
+        if any(dimension <= 0 for dimension in prepared.shape[1:]):
+            raise ValueError(f"image dimensions must be positive; got {prepared.shape}")
+        input_size = int(prepared.shape[-2]), int(prepared.shape[-1])
+    else:
+        resolved_size = _unflatten_spatial_size(adapter)
+        if resolved_size is None:
+            raise ValueError(
+                "The model's Unflatten layer does not expose a two-dimensional "
+                "spatial output size"
+            )
+        input_size = resolved_size
+
+    return np.ascontiguousarray(prepared), input_size
+
+
+def _validate_target(target_class: Target) -> Optional[int]:
+    if target_class is None:
+        return None
+    if isinstance(target_class, bool) or not isinstance(target_class, Integral):
+        raise TypeError("target_class must be an integer output index or None")
+    target = int(target_class)
+    if target < 0:
+        raise ValueError("target_class must be non-negative")
+    return target
+
+
+def _resolve_target(adapter, image: np.ndarray, target_class: Target) -> int:
+    """Resolve one fixed target from the original, unperturbed input."""
+    explicit = _validate_target(target_class)
+    predictions = as_real_array(
+        adapter.predict(image),
+        name="model predictions",
+        require_finite=True,
+    )
+    if predictions.ndim != 2 or predictions.shape[0] != 1 or predictions.shape[1] < 1:
+        raise ValueError(
+            "CAM expected model.predict() to return shape (1, n_outputs); "
+            f"got {predictions.shape}"
+        )
+    n_outputs = int(predictions.shape[1])
+    if explicit is not None:
+        if explicit >= n_outputs:
+            raise ValueError(f"target_class must be in [0, {n_outputs - 1}], got {explicit}")
+        return explicit
+
+    if getattr(adapter, "task", None) == "regression":
+        if n_outputs != 1:
+            raise ValueError(
+                "An explicit target_class output index is required for " "multi-output regression"
+            )
+        return 0
+    return int(np.argmax(predictions[0]))
+
+
+def _validate_spatial_pair(
+    activations: np.ndarray, gradients: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Validate one spatial activation tensor and its matching gradients."""
+    activations = as_real_array(
+        activations,
+        name="target-layer activations",
+        require_finite=True,
+    )
+    gradients = as_real_array(
+        gradients,
+        name="target-layer gradients",
+        require_finite=True,
+    )
+    if activations.ndim != 4:
+        raise ValueError(
+            "The target layer must return a spatial tensor with shape "
+            f"(1, channels, height, width); got {activations.shape}"
+        )
+    if activations.shape[0] != 1:
+        raise ValueError(
+            "A single-image CAM requires one target-layer activation batch; "
+            f"got {activations.shape[0]}"
+        )
+    if activations.shape != gradients.shape:
+        raise ValueError(
+            "target-layer activations and gradients must have identical shapes; "
+            f"got {activations.shape} and {gradients.shape}"
+        )
+    if any(dimension <= 0 for dimension in activations.shape[1:]):
+        raise ValueError(f"target-layer dimensions must be positive; got {activations.shape}")
+    return activations, gradients
+
+
+def _validate_spatial_activations(activations: np.ndarray) -> np.ndarray:
+    activations = as_real_array(
+        activations,
+        name="target-layer activations",
+        require_finite=True,
+    )
+    if activations.ndim != 4 or activations.shape[0] != 1:
+        raise ValueError(
+            "The target layer must return shape (1, channels, height, width); "
+            f"got {activations.shape}"
+        )
+    if any(dimension <= 0 for dimension in activations.shape[1:]):
+        raise ValueError(f"target-layer dimensions must be positive; got {activations.shape}")
+    return activations
+
+
+def _normalize_cam(cam: np.ndarray) -> np.ndarray:
+    """Min-max normalize one two-dimensional CAM using the common display rule."""
+    cam = as_real_array(cam, name="CAM", dtype=np.float64, require_finite=True)
+    if cam.ndim != 2 or cam.size == 0:
+        raise ValueError(f"CAM must be a non-empty 2D array; got shape {cam.shape}")
+    minimum = float(np.min(cam))
+    maximum = float(np.max(cam))
+    span = maximum - minimum
+    if span <= np.finfo(np.float64).eps:
+        return np.zeros(cam.shape, dtype=np.float64)
+    return (cam - minimum) / span
+
+
+def _cam_normalization_metadata(cam: np.ndarray) -> dict:
+    """Describe the exact map consumed by display min-max normalization."""
+    values = as_real_array(cam, name="CAM", dtype=np.float64, require_finite=True)
+    if values.ndim != 2 or values.size == 0:
+        raise ValueError("CAM normalization metadata requires one finite non-empty 2D map")
+    minimum = float(np.min(values))
+    maximum = float(np.max(values))
+    degenerate = bool(maximum - minimum <= np.finfo(np.float64).eps)
+    return {
+        "normalization_input_min": minimum,
+        "normalization_input_max": maximum,
+        "normalization_degenerate": degenerate,
+        "constant_map_value": minimum if degenerate else None,
+    }
+
+
+def _resize_2d(heatmap: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
+    """Resize a 2D map with half-pixel bilinear interpolation.
+
+    The coordinate rule matches ``torch.nn.functional.interpolate`` with
+    ``align_corners=False``.  Resizing is post-processing and is not part of
+    the mathematical Grad-CAM definition.
+    """
+    source = as_real_array(
+        heatmap,
+        name="heatmap",
+        dtype=np.float64,
+        require_finite=True,
+    )
+    if source.ndim != 2 or source.size == 0:
+        raise ValueError(f"heatmap must be a non-empty 2D array; got {source.shape}")
+    if len(target_size) != 2:
+        raise ValueError("target_size must contain (height, width)")
+    target_h, target_w = (int(target_size[0]), int(target_size[1]))
+    if target_h <= 0 or target_w <= 0:
+        raise ValueError("target_size dimensions must be positive")
+    if source.shape == (target_h, target_w):
+        return source.copy()
+
+    height, width = source.shape
+    y = (np.arange(target_h, dtype=np.float64) + 0.5) * height / target_h - 0.5
+    x = (np.arange(target_w, dtype=np.float64) + 0.5) * width / target_w - 0.5
+    y = np.clip(y, 0.0, height - 1.0)
+    x = np.clip(x, 0.0, width - 1.0)
+    y0 = np.floor(y).astype(np.intp)
+    x0 = np.floor(x).astype(np.intp)
+    y1 = np.minimum(y0 + 1, height - 1)
+    x1 = np.minimum(x0 + 1, width - 1)
+    y_fraction = y - y0
+    x_fraction = x - x0
+
+    top = (
+        source[y0[:, None], x0[None, :]] * (1.0 - x_fraction[None, :])
+        + source[y0[:, None], x1[None, :]] * x_fraction[None, :]
+    )
+    bottom = (
+        source[y1[:, None], x0[None, :]] * (1.0 - x_fraction[None, :])
+        + source[y1[:, None], x1[None, :]] * x_fraction[None, :]
+    )
+    return top * (1.0 - y_fraction[:, None]) + bottom * y_fraction[:, None]
+
+
+@contextmanager
+def _preserve_adapter_model_state(adapter, *, preserve_gradients: bool) -> Iterator[None]:
+    """Run deterministic CAM forwards without leaking training/gradient state."""
+    with preserve_adapter_model_eval(adapter, preserve_gradients=preserve_gradients):
+        yield
+
+
+def _targets_for_batch(
+    target_class: Optional[Union[int, np.integer, Sequence[int], np.ndarray]],
+    batch_size: int,
+) -> List[Target]:
+    if target_class is None:
+        return [None] * batch_size
+    if isinstance(target_class, Integral) and not isinstance(target_class, bool):
+        target = _validate_target(int(target_class))
+        return [target] * batch_size
+
+    targets = np.asarray(target_class)
+    if targets.ndim != 1 or targets.shape[0] != batch_size:
+        raise ValueError(f"Expected one target per image ({batch_size}), got shape {targets.shape}")
+    if not np.issubdtype(targets.dtype, np.integer) or targets.dtype == np.bool_:
+        raise TypeError("batch targets must contain integer output indices")
+    return [_validate_target(int(value)) for value in targets]
 
 
 class GradCAMExplainer(BaseExplainer):
-    """
-    GradCAM and GradCAM++ explainer for CNNs.
-    
-    Produces visual heatmaps showing which regions of an input image
-    are most important for the model's prediction.
-    
-    Attributes:
-        model: PyTorchAdapter wrapping a CNN model
-        target_layer: Name of the convolutional layer to use
-        class_names: List of class names
-        method: "gradcam" or "gradcam++"
-    """
-    
+    """Grad-CAM for one spatial target layer and one fixed scalar target."""
+
     def __init__(
         self,
         model,
         target_layer: str,
         class_names: Optional[List[str]] = None,
-        method: str = "gradcam"
+        method: str = "gradcam",
+        input_layout: str = "auto",
     ):
-        """
-        Initialize the GradCAM explainer.
-        
-        Args:
-            model: A PyTorchAdapter wrapping a CNN model.
-            target_layer: Name of the target convolutional layer.
-                         Usually the last conv layer before the classifier.
-                         Use adapter.list_layers() to see available layers.
-            class_names: List of class names for classification.
-            method: "gradcam" for standard GradCAM, "gradcam++" for improved version.
-        """
         super().__init__(model)
-        
-        # Validate model has layer access
-        if not hasattr(model, 'get_layer_gradients'):
+        if not callable(getattr(model, "get_layer_gradients", None)):
             raise TypeError(
-                "Model adapter must have get_layer_gradients() method. "
-                "Use PyTorchAdapter for PyTorch models."
+                "model must provide get_layer_gradients(); use PyTorchAdapter " "for PyTorch CNNs"
             )
-        
+        if not isinstance(target_layer, str) or not target_layer.strip():
+            raise ValueError("target_layer must be a non-empty layer name")
+        if not isinstance(method, str):
+            raise TypeError("method must be 'gradcam'")
+        normalized_method = method.strip().lower().replace("-", "")
+        if normalized_method in {"gradcam++", "gradcamplusplus"}:
+            raise NotImplementedError(
+                "Grad-CAM++ is not exposed: the adapter supplies first "
+                "derivatives only, while the paper defines second- and "
+                "third-order derivatives (or a conditional closed form)."
+            )
+        if normalized_method != "gradcam":
+            raise ValueError(f"method must be 'gradcam', got {method!r}")
+
         self.target_layer = target_layer
-        self.class_names = list(class_names) if class_names else None
-        self.method = method.lower()
-        
-        if self.method not in ["gradcam", "gradcam++"]:
-            raise ValueError(f"Method must be 'gradcam' or 'gradcam++', got '{method}'")
-    
-    def _compute_gradcam(
-        self,
-        activations: np.ndarray,
-        gradients: np.ndarray
-    ) -> np.ndarray:
-        """
-        Compute standard GradCAM heatmap.
-        
-        GradCAM = ReLU(sum_k(alpha_k * A^k))
-        where alpha_k = global_avg_pool(gradients for channel k)
-        """
-        # Global average pooling of gradients to get weights
-        # activations shape: (batch, channels, height, width)
-        # gradients shape: (batch, channels, height, width)
-        
-        # For each channel, compute the average gradient (importance weight)
-        weights = np.mean(gradients, axis=(2, 3), keepdims=True)  # (batch, channels, 1, 1)
-        
-        # Weighted combination of activation maps
-        cam = np.sum(weights * activations, axis=1)  # (batch, height, width)
-        
-        # Apply ReLU (we only care about positive influence)
-        cam = np.maximum(cam, 0)
-        
-        return cam
-    
-    def _compute_gradcam_plusplus(
-        self,
-        activations: np.ndarray,
-        gradients: np.ndarray
-    ) -> np.ndarray:
-        """
-        Compute GradCAM++ heatmap.
-        
-        GradCAM++ uses higher-order derivatives to weight the gradients,
-        providing better localization especially for multiple instances.
-        """
-        # First derivative
-        grad_2 = gradients ** 2
-        grad_3 = gradients ** 3
-        
-        # Sum over spatial dimensions for denominator
-        sum_activations = np.sum(activations, axis=(2, 3), keepdims=True)
-        
-        # Avoid division by zero
-        eps = 1e-8
-        
-        # Alpha coefficients (pixel-wise weights)
-        alpha_num = grad_2
-        alpha_denom = 2 * grad_2 + sum_activations * grad_3 + eps
-        alpha = alpha_num / alpha_denom
-        
-        # Set alpha to 0 where gradients are 0
-        alpha = np.where(gradients != 0, alpha, 0)
-        
-        # Weights are sum of (alpha * ReLU(gradients))
-        weights = np.sum(alpha * np.maximum(gradients, 0), axis=(2, 3), keepdims=True)
-        
-        # Weighted combination
-        cam = np.sum(weights * activations, axis=1)
-        
-        # Apply ReLU
-        cam = np.maximum(cam, 0)
-        
-        return cam
-    
-    def _normalize_heatmap(self, heatmap: np.ndarray) -> np.ndarray:
-        """Normalize heatmap to [0, 1] range."""
-        heatmap = heatmap.squeeze()
-        
-        min_val = heatmap.min()
-        max_val = heatmap.max()
-        
-        if max_val - min_val > 1e-8:
-            heatmap = (heatmap - min_val) / (max_val - min_val)
-        else:
-            heatmap = np.zeros_like(heatmap)
-        
-        return heatmap
-    
-    def _resize_heatmap(
-        self,
-        heatmap: np.ndarray,
-        target_size: Tuple[int, int]
-    ) -> np.ndarray:
-        """
-        Resize heatmap to match input image size.
-        
-        Uses simple bilinear-like interpolation without requiring scipy/cv2.
-        """
-        h, w = heatmap.shape
-        target_h, target_w = target_size
-        
-        # Create coordinate grids
-        y_ratio = h / target_h
-        x_ratio = w / target_w
-        
-        y_coords = np.arange(target_h) * y_ratio
-        x_coords = np.arange(target_w) * x_ratio
-        
-        # Get integer indices and fractions
-        y_floor = np.floor(y_coords).astype(int)
-        x_floor = np.floor(x_coords).astype(int)
-        
-        y_ceil = np.minimum(y_floor + 1, h - 1)
-        x_ceil = np.minimum(x_floor + 1, w - 1)
-        
-        y_frac = y_coords - y_floor
-        x_frac = x_coords - x_floor
-        
-        # Bilinear interpolation
-        resized = np.zeros((target_h, target_w))
-        for i in range(target_h):
-            for j in range(target_w):
-                top_left = heatmap[y_floor[i], x_floor[j]]
-                top_right = heatmap[y_floor[i], x_ceil[j]]
-                bottom_left = heatmap[y_ceil[i], x_floor[j]]
-                bottom_right = heatmap[y_ceil[i], x_ceil[j]]
-                
-                top = top_left * (1 - x_frac[j]) + top_right * x_frac[j]
-                bottom = bottom_left * (1 - x_frac[j]) + bottom_right * x_frac[j]
-                
-                resized[i, j] = top * (1 - y_frac[i]) + bottom * y_frac[i]
-        
-        return resized
-    
-    def _model_has_unflatten(self) -> bool:
-        """
-        Check if the underlying model has an Unflatten layer.
-        Models with Unflatten expect flat input and handle reshaping internally.
-        """
-        try:
-            import torch.nn as nn
-            model = self.model.model
-            for module in model.modules():
-                if isinstance(module, nn.Unflatten):
-                    return True
-        except (AttributeError, ImportError):
-            pass
-        return False
-    
+        self.class_names = validate_name_sequence(
+            class_names,
+            name="class_names",
+            allow_none=True,
+        )
+        self.method = "gradcam"
+        self.input_layout = _validate_input_layout(input_layout)
+
+    @staticmethod
+    def _compute_gradcam(activations: np.ndarray, gradients: np.ndarray) -> np.ndarray:
+        """Apply Selvaraju et al. equations 1 and 2 before display scaling."""
+        activations, gradients = _validate_spatial_pair(activations, gradients)
+        weights = np.mean(gradients, axis=(2, 3), keepdims=True)
+        return np.maximum(np.sum(weights * activations, axis=1)[0], 0.0)
+
+    def _label_for_target(self, target: int) -> str:
+        if self.class_names is not None and target < len(self.class_names):
+            return str(self.class_names[target])
+        prefix = "output" if getattr(self.model, "task", None) == "regression" else "class"
+        return f"{prefix}_{target}"
+
     def explain(
         self,
-        image: np.ndarray,
-        target_class: Optional[int] = None,
-        resize_to_input: bool = True
+        instance: np.ndarray,
+        target_class: Target = None,
+        resize_to_input: bool = True,
+        **kwargs: object,
     ) -> Explanation:
-        """
-        Generate GradCAM explanation for an image.
-        
-        Args:
-            image: Input image as numpy array. Expected shapes:
-                   - (C, H, W) for single image
-                   - (1, C, H, W) for batched single image
-                   - (H, W, C) will be transposed automatically
-                   - (N,) or (1, N) flat input for models with Unflatten layers
-            target_class: Class to explain. If None, uses predicted class.
-            resize_to_input: If True, resize heatmap to match input size.
-        
-        Returns:
-            Explanation object with heatmap and metadata.
-        """
-        image = np.array(image, dtype=np.float32)
-        
-        # Handle different input shapes
-        if image.ndim == 3:
-            # Could be (C, H, W) or (H, W, C)
-            if image.shape[0] in [1, 3, 4]:  # Likely (C, H, W)
-                image = image[np.newaxis, ...]  # Add batch dim
-            else:  # Likely (H, W, C)
-                image = np.transpose(image, (2, 0, 1))[np.newaxis, ...]
-        elif image.ndim == 4:
-            pass  # Already (N, C, H, W)
-        elif image.ndim <= 2 and self._model_has_unflatten():
-            # Flat input for models with Unflatten layers that reshape internally
-            # Keep as 2D (batch, features) - the model handles spatial reshaping
-            if image.ndim == 1:
-                image = image[np.newaxis, ...]  # Add batch dim: (1, N)
-        else:
-            raise ValueError(
-                f"Expected 3D or 4D input (or flat input for models with Unflatten), "
-                f"got shape {image.shape}"
-            )
-        
-        # Determine input_size for heatmap resizing
-        if image.ndim == 4:
-            input_size = (image.shape[2], image.shape[3])  # (H, W)
-        else:
-            # For flat input, infer spatial size from the model's Unflatten layer
-            input_size = None
-            try:
-                import torch.nn as nn
-                for module in self.model.model.modules():
-                    if isinstance(module, nn.Unflatten):
-                        dims = module.unflattened_size
-                        if len(dims) >= 2:
-                            input_size = (dims[-2], dims[-1])  # (H, W)
-                        break
-            except (AttributeError, ImportError):
-                pass
-            if input_size is None:
-                # Fallback: try to infer from feature count
-                n_features = image.shape[-1]
-                side = int(np.sqrt(n_features))
-                if side * side == n_features:
-                    input_size = (side, side)
-                else:
-                    input_size = (1, n_features)  # Can't infer spatial dims
-        
-        # Get activations and gradients for target layer
-        activations, gradients = self.model.get_layer_gradients(
-            image,
-            layer_name=self.target_layer,
-            target_class=target_class
+        """Explain one image (or one flat input reshaped by the model)."""
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected GradCAM option(s): {unexpected}")
+        if not isinstance(resize_to_input, (bool, np.bool_)):
+            raise TypeError("resize_to_input must be a boolean")
+        prepared, input_size = _prepare_single_input(
+            self.model, instance, input_layout=self.input_layout
         )
-        
-        # Ensure 4D: (batch, channels, height, width)
-        if activations.ndim == 2:
-            # Fully connected layer output, reshape
-            side = int(np.sqrt(activations.shape[1]))
-            activations = activations.reshape(1, 1, side, side)
-            gradients = gradients.reshape(1, 1, side, side)
-        elif activations.ndim == 3:
-            activations = activations[np.newaxis, ...]
-            gradients = gradients[np.newaxis, ...]
-        
-        # Compute CAM based on method
-        if self.method == "gradcam":
+
+        with _preserve_adapter_model_state(self.model, preserve_gradients=True):
+            target = _resolve_target(self.model, prepared, target_class)
+            activations, gradients = self.model.get_layer_gradients(
+                prepared,
+                layer_name=self.target_layer,
+                target_class=target,
+            )
             cam = self._compute_gradcam(activations, gradients)
-        else:  # gradcam++
-            cam = self._compute_gradcam_plusplus(activations, gradients)
-        
-        # Normalize to [0, 1]
-        heatmap = self._normalize_heatmap(cam)
-        
-        # Optionally resize to input size
+            score_space = getattr(self.model, "last_gradient_output_space", None) or "unknown"
+
+        normalization_metadata = _cam_normalization_metadata(cam)
+        heatmap = _normalize_cam(cam)
         if resize_to_input and heatmap.shape != input_size:
-            heatmap = self._resize_heatmap(heatmap, input_size)
-        
-        # Determine target class info
-        if target_class is None:
-            predictions = self.model.predict(image)
-            target_class = int(np.argmax(predictions))
-        
-        if self.class_names and target_class < len(self.class_names):
-            label_name = self.class_names[target_class]
-        else:
-            label_name = f"class_{target_class}"
-        
+            heatmap = _resize_2d(heatmap, input_size)
+
         return Explanation(
-            explainer_name=f"GradCAM" if self.method == "gradcam" else "GradCAM++",
-            target_class=label_name,
+            explainer_name="GradCAM",
+            target_class=self._label_for_target(target),
             explanation_data={
                 "heatmap": heatmap.tolist(),
                 "heatmap_shape": list(heatmap.shape),
                 "target_layer": self.target_layer,
-                "method": self.method,
-                "input_shape": list(image.shape)
-            }
+                "target_index": target,
+                "method": "gradcam",
+                "input_shape": list(prepared.shape),
+                "input_layout": self.input_layout,
+            },
+            metadata={
+                "formula_verified": True,
+                "score_space": score_space,
+                "declared_raw_model_output_space": getattr(
+                    self.model, "raw_model_output_space", "unspecified"
+                ),
+                "paper_score_space_match": (
+                    score_space == "model"
+                    and getattr(self.model, "raw_model_output_space", None) == "logit"
+                ),
+                "postprocessing": "relu_minmax_bilinear_align_corners_false",
+                "reference": "Selvaraju et al. (ICCV 2017), equations 1-2",
+                **normalization_metadata,
+            },
         )
-    
+
     def explain_batch(
         self,
         images: np.ndarray,
-        target_class: Optional[int] = None
+        target_class: Optional[Union[int, np.integer, Sequence[int], np.ndarray]] = None,
     ) -> List[Explanation]:
-        """
-        Generate explanations for multiple images.
-        
-        Args:
-            images: Batch of images (N, C, H, W).
-            target_class: Target class for all images.
-        
-        Returns:
-            List of Explanation objects.
-        """
-        images = np.array(images)
-        
+        """Explain each input independently with scalar or per-row targets."""
+        batch = np.asarray(images)
+        if batch.ndim < 2 or batch.shape[0] == 0:
+            raise ValueError("images must be a non-empty batch")
+        targets = _targets_for_batch(target_class, int(batch.shape[0]))
         return [
-            self.explain(images[i], target_class=target_class)
-            for i in range(images.shape[0])
+            self.explain(batch[index], target_class=targets[index])
+            for index in range(batch.shape[0])
         ]
-    
+
     def get_overlay(
         self,
         image: np.ndarray,
         heatmap: np.ndarray,
         alpha: float = 0.5,
-        colormap: str = "jet"
+        colormap: str = "jet",
     ) -> np.ndarray:
-        """
-        Create an overlay of the heatmap on the original image.
-        
-        This is a simple implementation without matplotlib/cv2 dependencies.
-        For better visualizations, use the heatmap with your preferred
-        visualization library.
-        
-        Args:
-            image: Original image (H, W, 3) in [0, 255] or [0, 1] range.
-            heatmap: GradCAM heatmap (H, W) in [0, 1] range.
-            alpha: Transparency of the heatmap overlay.
-            colormap: Color scheme (currently only "jet" supported).
-        
-        Returns:
-            Overlaid image as numpy array (H, W, 3) in [0, 1] range.
-        """
-        image = np.array(image)
-        heatmap = np.array(heatmap)
-        
-        # Normalize image to [0, 1]
-        if image.max() > 1:
-            image = image / 255.0
-        
-        # Handle channel-first format
-        if image.ndim == 3 and image.shape[0] in [1, 3]:
-            image = np.transpose(image, (1, 2, 0))
-        
-        # Simple jet colormap approximation
-        def jet_colormap(x):
-            """Simple jet colormap: blue -> cyan -> green -> yellow -> red"""
-            r = np.clip(1.5 - np.abs(4 * x - 3), 0, 1)
-            g = np.clip(1.5 - np.abs(4 * x - 2), 0, 1)
-            b = np.clip(1.5 - np.abs(4 * x - 1), 0, 1)
-            return np.stack([r, g, b], axis=-1)
-        
-        # Apply colormap to heatmap
-        colored_heatmap = jet_colormap(heatmap)
-        
-        # Ensure same size
-        if colored_heatmap.shape[:2] != image.shape[:2]:
-            colored_heatmap = self._resize_heatmap(
-                colored_heatmap.mean(axis=-1),
-                image.shape[:2]
-            )
-            colored_heatmap = jet_colormap(colored_heatmap)
-        
-        # Blend
-        if image.ndim == 2:
-            image = np.stack([image] * 3, axis=-1)
-        
-        overlay = (1 - alpha) * image + alpha * colored_heatmap
-        overlay = np.clip(overlay, 0, 1)
-        
-        return overlay
+        """Blend a finite 2D heatmap over a grayscale or RGB image."""
+        if isinstance(alpha, bool) or not isinstance(alpha, (int, float, np.number)):
+            raise TypeError("alpha must be a number in [0, 1]")
+        alpha = float(alpha)
+        if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be in [0, 1]")
+        if colormap != "jet":
+            raise ValueError("only the 'jet' colormap is supported")
+
+        image_array = as_real_array(
+            image,
+            name="image",
+            dtype=np.float64,
+            require_finite=True,
+        )
+        heatmap_array = as_real_array(
+            heatmap,
+            name="heatmap",
+            dtype=np.float64,
+            require_finite=True,
+        )
+        if image_array.size == 0 or heatmap_array.size == 0:
+            raise ValueError("image and heatmap must not be empty")
+        if heatmap_array.ndim != 2:
+            raise ValueError("heatmap must have shape (height, width)")
+
+        if image_array.ndim == 3 and image_array.shape[0] in (1, 3):
+            image_array = np.transpose(image_array, (1, 2, 0))
+        if image_array.ndim == 2:
+            image_array = np.repeat(image_array[..., None], 3, axis=-1)
+        elif image_array.ndim == 3 and image_array.shape[-1] == 1:
+            image_array = np.repeat(image_array, 3, axis=-1)
+        elif image_array.ndim != 3 or image_array.shape[-1] != 3:
+            raise ValueError("image must be grayscale or RGB in CHW/HWC layout")
+
+        if np.min(image_array) < 0:
+            raise ValueError("overlay image values must be non-negative")
+        if np.max(image_array) > 1.0:
+            if np.max(image_array) > 255.0:
+                raise ValueError("overlay image values must be in [0, 1] or [0, 255]")
+            image_array = image_array / 255.0
+        if np.min(heatmap_array) < 0.0 or np.max(heatmap_array) > 1.0:
+            raise ValueError("heatmap values must be in [0, 1]")
+        if heatmap_array.shape != image_array.shape[:2]:
+            heatmap_array = _resize_2d(heatmap_array, image_array.shape[:2])
+
+        red = np.clip(1.5 - np.abs(4.0 * heatmap_array - 3.0), 0.0, 1.0)
+        green = np.clip(1.5 - np.abs(4.0 * heatmap_array - 2.0), 0.0, 1.0)
+        blue = np.clip(1.5 - np.abs(4.0 * heatmap_array - 1.0), 0.0, 1.0)
+        colored = np.stack((red, green, blue), axis=-1)
+        return np.clip((1.0 - alpha) * image_array + alpha * colored, 0.0, 1.0)

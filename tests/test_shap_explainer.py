@@ -7,20 +7,20 @@ Reference:
     Predictions." NeurIPS 2017.
 """
 
-import pytest
 import numpy as np
+import pytest
 from sklearn.datasets import load_iris, make_classification, make_regression
-from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from explainiverse.adapters.sklearn_adapter import SklearnAdapter
-from explainiverse.explainers.attribution.shap_wrapper import ShapExplainer
 from explainiverse.core.explanation import Explanation
-
+from explainiverse.explainers.attribution.shap_wrapper import ShapExplainer
 
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────
+
 
 @pytest.fixture
 def iris_setup():
@@ -35,10 +35,7 @@ def iris_setup():
     adapter = SklearnAdapter(model, class_names=class_names)
 
     explainer = ShapExplainer(
-        model=adapter,
-        background_data=X[:30],
-        feature_names=feature_names,
-        class_names=class_names
+        model=adapter, background_data=X[:30], feature_names=feature_names, class_names=class_names
     )
     return X, y, feature_names, class_names, adapter, explainer
 
@@ -47,8 +44,7 @@ def iris_setup():
 def binary_setup():
     """Binary classification setup."""
     X, y = make_classification(
-        n_samples=100, n_features=5, n_classes=2,
-        n_informative=3, random_state=42
+        n_samples=100, n_features=5, n_classes=2, n_informative=3, random_state=42
     )
     feature_names = [f"feature_{i}" for i in range(5)]
     class_names = ["class_0", "class_1"]
@@ -58,10 +54,7 @@ def binary_setup():
     adapter = SklearnAdapter(model, class_names=class_names)
 
     explainer = ShapExplainer(
-        model=adapter,
-        background_data=X[:20],
-        feature_names=feature_names,
-        class_names=class_names
+        model=adapter, background_data=X[:20], feature_names=feature_names, class_names=class_names
     )
     return X, y, feature_names, class_names, adapter, explainer
 
@@ -69,9 +62,7 @@ def binary_setup():
 @pytest.fixture
 def regression_setup():
     """Linear regression setup."""
-    X, y = make_regression(
-        n_samples=100, n_features=4, noise=0.3, random_state=99
-    )
+    X, y = make_regression(n_samples=100, n_features=4, noise=0.3, random_state=99)
     feature_names = [f"reg_f{i}" for i in range(4)]
 
     model = LinearRegression()
@@ -79,10 +70,7 @@ def regression_setup():
     adapter = SklearnAdapter(model, class_names=None)
 
     explainer = ShapExplainer(
-        model=adapter,
-        background_data=X[:30],
-        feature_names=feature_names,
-        class_names=["target"]
+        model=adapter, background_data=X[:30], feature_names=feature_names, class_names=["target"]
     )
     return X, y, feature_names, adapter, explainer
 
@@ -91,9 +79,13 @@ def regression_setup():
 def multiclass_5_setup():
     """5-class RandomForest setup."""
     X, y = make_classification(
-        n_samples=120, n_features=6, n_classes=5,
-        n_informative=4, n_redundant=0,
-        n_clusters_per_class=1, random_state=123
+        n_samples=120,
+        n_features=6,
+        n_classes=5,
+        n_informative=4,
+        n_redundant=0,
+        n_clusters_per_class=1,
+        random_state=123,
     )
     feature_names = [f"f{i}" for i in range(6)]
     class_names = [f"class_{i}" for i in range(5)]
@@ -103,10 +95,7 @@ def multiclass_5_setup():
     adapter = SklearnAdapter(model, class_names=class_names)
 
     explainer = ShapExplainer(
-        model=adapter,
-        background_data=X[:20],
-        feature_names=feature_names,
-        class_names=class_names
+        model=adapter, background_data=X[:20], feature_names=feature_names, class_names=class_names
     )
     return X, y, feature_names, class_names, adapter, explainer
 
@@ -114,6 +103,7 @@ def multiclass_5_setup():
 # ──────────────────────────────────────────────
 # Core Functionality Tests
 # ──────────────────────────────────────────────
+
 
 class TestShapBasic:
     """Basic SHAP explainer functionality."""
@@ -133,8 +123,9 @@ class TestShapBasic:
         for i in [0, 50, 100]:  # One from each Iris class
             explanation = explainer.explain(X[i])
             keys = set(explanation.explanation_data["feature_attributions"].keys())
-            assert keys == set(feature_names), \
-                f"Instance {i}: keys {keys} != feature names {set(feature_names)}"
+            assert keys == set(
+                feature_names
+            ), f"Instance {i}: keys {keys} != feature names {set(feature_names)}"
 
     def test_attribution_count_matches_features(self, iris_setup):
         """Number of attributions equals number of features."""
@@ -150,8 +141,7 @@ class TestShapBasic:
 
         explanation = explainer.explain(X[0])
         for k, v in explanation.explanation_data["feature_attributions"].items():
-            assert isinstance(v, float), \
-                f"Attribution for '{k}' is {type(v)}, expected float"
+            assert isinstance(v, float), f"Attribution for '{k}' is {type(v)}, expected float"
 
     def test_target_class_is_valid(self, iris_setup):
         """target_class is a valid class name matching model prediction."""
@@ -180,8 +170,9 @@ class TestShapBasic:
         explanation = explainer.explain(X[0])
         raw = explanation.explanation_data["shap_values_raw"]
         assert isinstance(raw, list)
-        assert len(raw) == len(feature_names), \
-            f"shap_values_raw has {len(raw)} entries, expected {len(feature_names)}"
+        assert len(raw) == len(
+            feature_names
+        ), f"shap_values_raw has {len(raw)} entries, expected {len(feature_names)}"
 
     def test_shap_values_raw_matches_attributions(self, iris_setup):
         """shap_values_raw values must match feature_attributions values."""
@@ -192,8 +183,9 @@ class TestShapBasic:
         attributions = explanation.explanation_data["feature_attributions"]
 
         for i, fname in enumerate(feature_names):
-            assert abs(raw[i] - attributions[fname]) < 1e-10, \
-                f"raw[{i}]={raw[i]} != attributions['{fname}']={attributions[fname]}"
+            assert (
+                abs(raw[i] - attributions[fname]) < 1e-10
+            ), f"raw[{i}]={raw[i]} != attributions['{fname}']={attributions[fname]}"
 
     def test_feature_names_stored(self, iris_setup):
         """Explanation stores feature_names attribute."""
@@ -218,6 +210,7 @@ class TestShapBasic:
 # Value Correctness Tests
 # ──────────────────────────────────────────────
 
+
 class TestShapValueCorrectness:
     """Tests that verify SHAP values are numerically correct, not just
     structurally valid. These catch bugs like the 3D array flattening
@@ -232,7 +225,7 @@ class TestShapValueCorrectness:
 
         # Pick an instance where predicted class is NOT 0
         for i in range(len(X)):
-            preds = adapter.predict(X[i:i+1])
+            preds = adapter.predict(X[i : i + 1])
             pred_class = int(np.argmax(preds[0]))
             if pred_class != 0:
                 break
@@ -243,7 +236,7 @@ class TestShapValueCorrectness:
         assert explanation.target_class == class_names[pred_class]
 
         # Get raw SHAP values directly from the library
-        raw_sv = explainer.explainer.shap_values(X[i:i+1])
+        raw_sv = explainer.explainer.shap_values(X[i : i + 1])
 
         # Extract the correct class values directly
         if isinstance(raw_sv, list):
@@ -258,9 +251,10 @@ class TestShapValueCorrectness:
         # Compare wrapper attributions to direct extraction
         for j, fname in enumerate(feature_names):
             wrapper_val = explanation.explanation_data["feature_attributions"][fname]
-            assert abs(wrapper_val - float(expected_vals[j])) < 1e-10, \
-                f"Feature '{fname}': wrapper={wrapper_val}, " \
+            assert abs(wrapper_val - float(expected_vals[j])) < 1e-10, (
+                f"Feature '{fname}': wrapper={wrapper_val}, "
                 f"expected={float(expected_vals[j])} (class {pred_class})"
+            )
 
     def test_3d_ndarray_not_flattened_across_classes(self, iris_setup):
         """Verify that 3D SHAP output (samples, features, classes) is sliced
@@ -287,13 +281,13 @@ class TestShapValueCorrectness:
         raw_output = explanation.explanation_data["shap_values_raw"]
 
         # Must have exactly n_features values, NOT n_features * n_classes
-        assert len(raw_output) == n_features, \
-            f"shap_values_raw has {len(raw_output)} values, expected {n_features}. " \
+        assert len(raw_output) == n_features, (
+            f"shap_values_raw has {len(raw_output)} values, expected {n_features}. "
             f"Possible flatten bug: {n_features} * {n_classes} = {n_features * n_classes}"
+        )
 
-    def test_each_class_gets_different_attributions(self, iris_setup):
-        """Different target classes should generally produce different
-        SHAP values for the same instance, confirming class selection works."""
+    def test_each_requested_class_selects_the_matching_raw_shap_slice(self, iris_setup):
+        """Wrapper target indices select the corresponding raw SHAP slice."""
         X, y, feature_names, class_names, adapter, explainer = iris_setup
 
         raw_sv = explainer.explainer.shap_values(X[0:1])
@@ -306,16 +300,21 @@ class TestShapValueCorrectness:
             vals_class0 = raw_arr[0, :, 0]
             vals_class1 = raw_arr[0, :, 1]
         else:
-            pytest.skip("Cannot test class differentiation with this SHAP format")
+            pytest.skip("SHAP format has no independent per-output axis to select")
 
-        # At least one feature should differ between classes
-        assert not np.allclose(vals_class0, vals_class1, atol=1e-10), \
-            "SHAP values identical across classes — class selection may be broken"
+        explanation_0 = explainer.explain(X[0], target_class=0)
+        explanation_1 = explainer.explain(X[0], target_class=1)
+
+        assert explanation_0.metadata["output_index"] == 0
+        assert explanation_1.metadata["output_index"] == 1
+        assert explanation_0.explanation_data["shap_values_raw"] == pytest.approx(vals_class0)
+        assert explanation_1.explanation_data["shap_values_raw"] == pytest.approx(vals_class1)
 
 
 # ──────────────────────────────────────────────
 # Multiclass Tests
 # ──────────────────────────────────────────────
+
 
 class TestShapMulticlass:
     """SHAP with multiclass classifiers."""
@@ -324,10 +323,12 @@ class TestShapMulticlass:
         """SHAP works with LogisticRegression on Iris (3-class)."""
         X, y, feature_names, class_names, adapter, explainer = iris_setup
 
-        explanation = explainer.explain(X[10], top_labels=2)
+        explanation = explainer.explain(X[10])
         assert explanation.target_class in class_names
         assert len(explanation.explanation_data["feature_attributions"]) == len(feature_names)
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
 
     def test_random_forest_5class(self, multiclass_5_setup):
         """SHAP works with RandomForest on a 5-class problem."""
@@ -335,7 +336,9 @@ class TestShapMulticlass:
 
         explanation = explainer.explain(X[5])
         assert explanation.target_class in class_names
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
         assert len(explanation.explanation_data["feature_attributions"]) == len(feature_names)
         assert len(explanation.explanation_data["shap_values_raw"]) == len(feature_names)
 
@@ -345,16 +348,17 @@ class TestShapMulticlass:
 
         for i in [0, 20, 40, 60, 80]:
             explanation = explainer.explain(X[i])
-            preds = adapter.predict(X[i:i+1])
+            preds = adapter.predict(X[i : i + 1])
             predicted_label = class_names[np.argmax(preds[0])]
-            assert explanation.target_class == predicted_label, \
-                f"Instance {i}: got '{explanation.target_class}', " \
-                f"expected '{predicted_label}'"
+            assert explanation.target_class == predicted_label, (
+                f"Instance {i}: got '{explanation.target_class}', " f"expected '{predicted_label}'"
+            )
 
 
 # ──────────────────────────────────────────────
 # Binary Classification Tests
 # ──────────────────────────────────────────────
+
 
 class TestShapBinary:
     """SHAP with binary classifiers."""
@@ -365,7 +369,9 @@ class TestShapBinary:
 
         explanation = explainer.explain(X[0])
         assert explanation.target_class in class_names
-        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(feature_names)
+        assert set(explanation.explanation_data["feature_attributions"].keys()) == set(
+            feature_names
+        )
         assert len(explanation.explanation_data["feature_attributions"]) == len(feature_names)
         assert len(explanation.explanation_data["shap_values_raw"]) == len(feature_names)
 
@@ -375,7 +381,7 @@ class TestShapBinary:
 
         for i in [0, 25, 50, 75]:
             explanation = explainer.explain(X[i])
-            preds = adapter.predict(X[i:i+1])
+            preds = adapter.predict(X[i : i + 1])
             predicted_label = class_names[np.argmax(preds[0])]
             assert explanation.target_class == predicted_label
 
@@ -383,6 +389,7 @@ class TestShapBinary:
 # ──────────────────────────────────────────────
 # Regression Tests
 # ──────────────────────────────────────────────
+
 
 class TestShapRegression:
     """SHAP with regression models."""
@@ -410,6 +417,7 @@ class TestShapRegression:
 # ──────────────────────────────────────────────
 # Batch Tests
 # ──────────────────────────────────────────────
+
 
 class TestShapBatch:
     """SHAP batch explanation tests."""
@@ -444,15 +452,17 @@ class TestShapBatch:
         explanations = explainer.explain_batch(instances)
 
         for i, exp in enumerate(explanations):
-            preds = adapter.predict(instances[i:i+1])
+            preds = adapter.predict(instances[i : i + 1])
             predicted_label = class_names[np.argmax(preds[0])]
-            assert exp.target_class == predicted_label, \
-                f"Batch instance {i}: got '{exp.target_class}', expected '{predicted_label}'"
+            assert (
+                exp.target_class == predicted_label
+            ), f"Batch instance {i}: got '{exp.target_class}', expected '{predicted_label}'"
 
 
 # ──────────────────────────────────────────────
 # Global / Cohort SHAP Tests
 # ──────────────────────────────────────────────
+
 
 class TestShapGlobal:
     """Tests for global and cohort-level SHAP analysis."""
@@ -478,7 +488,7 @@ class TestShapGlobal:
         """Cohort-level SHAP works for a subset of data."""
         X, y, feature_names, class_names, adapter, explainer = iris_setup
 
-        cohort_mask = (y == 0)
+        cohort_mask = y == 0
         X_cohort = X[cohort_mask][:5]
 
         shap_values = explainer.explainer.shap_values(X_cohort)

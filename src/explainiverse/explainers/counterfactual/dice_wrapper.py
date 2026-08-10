@@ -1,36 +1,58 @@
-# src/explainiverse/explainers/counterfactual/dice_wrapper.py
-"""
-Counterfactual Explainer - DiCE-style diverse counterfactual explanations.
+"""Constrained, gradient-free counterfactual search for tabular classifiers.
 
-Counterfactual explanations answer "What minimal changes would flip the prediction?"
+The public class name is retained for compatibility, but this implementation
+does not claim to implement the DiCE optimization algorithm.  It performs a
+deterministic multi-start search, projects candidates onto the declared tabular
+domain, and returns only candidates whose predicted class is the requested
+target.
 
-Reference:
-    Mothilal, R.K., Sharma, A., & Tan, C. (2020). Explaining Machine Learning
-    Classifiers through Diverse Counterfactual Explanations. FAT* 2020.
+Counterfactual explanations answer: "Which feasible feature changes would
+change this classifier's prediction?"
 """
+
+from numbers import Integral, Real
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-from typing import List, Optional, Dict, Any, Union
 from scipy.optimize import minimize
+
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.explainers._validation import (
+    as_real_array,
+    ensure_classification_task,
+    normalize_classifier_outputs,
+    validate_name_sequence,
+    validate_single_tabular_instance,
+)
 
 
 class CounterfactualExplainer(BaseExplainer):
+    """Deterministic constrained search for tabular counterfactual examples.
+
+    Continuous features are optimized inside their configured ranges.
+    Categorical features can only take values observed in ``training_data``.
+    Features omitted from both declarations remain fixed to the query value.
+    The method requires classifier probabilities, either as ``(n, C)`` or a
+    one-column/one-dimensional binary positive-class probability.
     """
-    Counterfactual explainer using gradient-free optimization.
-    
-    Generates minimal perturbations that change the model's prediction
-    to a desired class (or just a different class).
-    
-    Attributes:
-        model: Model adapter with .predict() method
-        training_data: Reference data for constraints
-        feature_names: List of feature names
-        continuous_features: List of continuous feature names
-        categorical_features: List of categorical feature names
-    """
-    
+
+    training_data: np.ndarray
+    feature_names: List[str]
+    continuous_features: List[str]
+    categorical_features: List[str]
+    fixed_features: List[str]
+    proximity_weight: float
+    diversity_weight: float
+    random_state: int
+    feature_ranges: Dict[str, tuple]
+    _name_to_index: Dict[str, int]
+    _continuous_indices: np.ndarray
+    _categorical_indices: np.ndarray
+    _fixed_indices: np.ndarray
+    _categorical_values: Dict[int, np.ndarray]
+    scales: np.ndarray
+
     def __init__(
         self,
         model,
@@ -41,262 +63,466 @@ class CounterfactualExplainer(BaseExplainer):
         feature_ranges: Optional[Dict[str, tuple]] = None,
         proximity_weight: float = 0.5,
         diversity_weight: float = 0.5,
-        random_state: int = 42
-    ):
-        """
-        Initialize the Counterfactual explainer.
-        
-        Args:
-            model: Model adapter with .predict() method
-            training_data: Reference data (n_samples, n_features)
-            feature_names: List of feature names
-            continuous_features: Features that can take continuous values
-            categorical_features: Features with discrete values
-            feature_ranges: Dict of {feature_name: (min, max)} constraints
-            proximity_weight: Weight for proximity loss (closer to original)
-            diversity_weight: Weight for diversity among counterfactuals
-            random_state: Random seed
-        """
+        random_state: int = 42,
+    ) -> None:
         super().__init__(model)
-        self.training_data = np.array(training_data)
-        self.feature_names = list(feature_names)
-        self.continuous_features = continuous_features or feature_names
-        self.categorical_features = categorical_features or []
-        self.proximity_weight = proximity_weight
-        self.diversity_weight = diversity_weight
-        self.random_state = random_state
-        self.rng = np.random.RandomState(random_state)
-        
-        # Compute feature ranges from data if not provided
-        if feature_ranges:
-            self.feature_ranges = feature_ranges
+        ensure_classification_task(model, context="Counterfactual search")
+
+        data = as_real_array(
+            training_data,
+            name="training_data",
+            dtype=float,
+            require_finite=True,
+        )
+        validated_names = validate_name_sequence(feature_names, name="feature_names")
+        assert validated_names is not None
+        names = validated_names
+        if data.ndim != 2 or data.shape[0] == 0:
+            raise ValueError("training_data must be a non-empty 2D array")
+        if not names or len(names) != data.shape[1]:
+            raise ValueError("feature_names length must match the training_data columns")
+        for value, name in (
+            (proximity_weight, "proximity_weight"),
+            (diversity_weight, "diversity_weight"),
+        ):
+            if not isinstance(value, Real) or isinstance(value, bool):
+                raise TypeError(f"{name} must be a real number")
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if not isinstance(random_state, Integral) or isinstance(random_state, bool):
+            raise TypeError("random_state must be an integer")
+        if random_state < 0 or random_state > 2**32 - 1:
+            raise ValueError("random_state must be between 0 and 2**32 - 1")
+
+        categorical = [] if categorical_features is None else list(categorical_features)
+        if continuous_features is None:
+            continuous = [name for name in names if name not in categorical]
         else:
-            self.feature_ranges = {}
-            for idx, name in enumerate(feature_names):
-                values = self.training_data[:, idx]
-                self.feature_ranges[name] = (float(np.min(values)), float(np.max(values)))
-        
-        # Compute feature scales for normalization
+            continuous = list(continuous_features)
+        for declaration, label in (
+            (continuous, "continuous_features"),
+            (categorical, "categorical_features"),
+        ):
+            if len(set(declaration)) != len(declaration):
+                raise ValueError(f"{label} must not contain duplicates")
+            unknown = set(declaration).difference(names)
+            if unknown:
+                raise ValueError(f"{label} contains unknown features: {sorted(unknown)}")
+        overlap = set(continuous).intersection(categorical)
+        if overlap:
+            raise ValueError(
+                "continuous_features and categorical_features overlap: " f"{sorted(overlap)}"
+            )
+
+        self.training_data = data
+        self.feature_names = names
+        self.continuous_features = continuous
+        self.categorical_features = categorical
+        declared = set(continuous).union(categorical)
+        self.fixed_features = [name for name in names if name not in declared]
+        self.proximity_weight = float(proximity_weight)
+        self.diversity_weight = float(diversity_weight)
+        self.random_state = int(random_state)
+
+        ranges = {
+            name: (float(np.min(data[:, index])), float(np.max(data[:, index])))
+            for index, name in enumerate(names)
+        }
+        if feature_ranges is not None:
+            unknown = set(feature_ranges).difference(names)
+            if unknown:
+                raise ValueError(f"feature_ranges contains unknown features: {sorted(unknown)}")
+            ranges.update(feature_ranges)
+
+        self.feature_ranges = {}
+        for index, name in enumerate(names):
+            bounds = ranges[name]
+            if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+                raise ValueError(f"feature_ranges[{name!r}] must be a (min, max) pair")
+            lower, upper = map(float, bounds)
+            if not np.isfinite(lower) or not np.isfinite(upper) or lower > upper:
+                raise ValueError(f"Invalid range for feature {name!r}: {bounds!r}")
+            if np.any(data[:, index] < lower) or np.any(data[:, index] > upper):
+                raise ValueError(f"training_data for {name!r} falls outside its feature range")
+            self.feature_ranges[name] = (lower, upper)
+
+        self._name_to_index = {name: index for index, name in enumerate(names)}
+        self._continuous_indices = np.array(
+            [self._name_to_index[name] for name in continuous], dtype=int
+        )
+        self._categorical_indices = np.array(
+            [self._name_to_index[name] for name in categorical], dtype=int
+        )
+        self._fixed_indices = np.array(
+            [self._name_to_index[name] for name in self.fixed_features], dtype=int
+        )
+        self._categorical_values = {
+            index: np.unique(data[:, index]) for index in self._categorical_indices
+        }
         self._compute_scales()
-    
-    def _compute_scales(self):
-        """Compute scaling factors for each feature."""
-        self.scales = np.zeros(len(self.feature_names))
-        for idx, name in enumerate(self.feature_names):
-            min_val, max_val = self.feature_ranges.get(name, (0, 1))
-            scale = max_val - min_val
-            self.scales[idx] = scale if scale > 0 else 1.0
-    
-    def _get_target_class(
-        self,
-        instance: np.ndarray,
-        desired_class: Optional[int] = None
-    ) -> int:
-        """Determine the target class for the counterfactual."""
-        predictions = self.model.predict(instance.reshape(1, -1))
-        
-        if predictions.ndim == 2:
-            current_class = np.argmax(predictions[0])
-            n_classes = predictions.shape[1]
-        else:
-            current_class = int(predictions[0] > 0.5)
-            n_classes = 2
-        
+
+        # Fail at construction if the model does not expose the score contract
+        # required by the optimization objective.
+        self._predict_probabilities(data[:1])
+
+    def _compute_scales(self) -> None:
+        """Compute non-zero range scales used by proximity and diversity."""
+        scales = []
+        for name in self.feature_names:
+            lower, upper = self.feature_ranges[name]
+            width = upper - lower
+            scales.append(width if width > 0 else 1.0)
+        self.scales = np.asarray(scales, dtype=float)
+
+    def _predict_probabilities(self, X: np.ndarray) -> np.ndarray:
+        """Normalize the supported classifier probability representations."""
+        matrix = as_real_array(
+            X,
+            name="model inputs",
+            dtype=float,
+            require_finite=True,
+        )
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(1, -1)
+        return normalize_classifier_outputs(
+            self.model,
+            matrix,
+            context="Counterfactual search",
+            class_names=getattr(self.model, "class_names", None),
+            require_probabilities=True,
+            allow_label_predictions=False,
+        )
+
+    def _get_target_class(self, instance: np.ndarray, desired_class: Optional[int] = None) -> int:
+        """Resolve an output-column target from the original prediction."""
+        probabilities = self._predict_probabilities(instance.reshape(1, -1))[0]
+        current_class = int(np.argmax(probabilities))
+        n_classes = len(probabilities)
+
         if desired_class is not None:
-            return desired_class
-        
-        # Default: flip to any other class
-        if n_classes == 2:
-            return 1 - current_class
-        else:
-            # For multi-class, pick the second most likely class
-            probs = predictions[0]
-            sorted_classes = np.argsort(probs)[::-1]
-            return int(sorted_classes[1]) if sorted_classes[0] == current_class else int(sorted_classes[0])
-    
-    def _proximity_loss(self, cf: np.ndarray, original: np.ndarray) -> float:
-        """Compute normalized distance between counterfactual and original."""
-        diff = (cf - original) / self.scales
-        return float(np.sum(diff ** 2))
-    
-    def _validity_loss(self, cf: np.ndarray, target_class: int) -> float:
-        """Compute loss for achieving the target class."""
-        predictions = self.model.predict(cf.reshape(1, -1))
-        
-        if predictions.ndim == 2:
-            target_prob = predictions[0, target_class]
-            return -np.log(target_prob + 1e-10)
-        else:
-            if target_class == 1:
-                return -np.log(predictions[0] + 1e-10)
-            else:
-                return -np.log(1 - predictions[0] + 1e-10)
-    
-    def _diversity_loss(self, cfs: List[np.ndarray]) -> float:
-        """Compute diversity loss (encourage different counterfactuals)."""
-        if len(cfs) < 2:
+            if not isinstance(desired_class, Integral) or isinstance(desired_class, bool):
+                raise TypeError("desired_class must be an integer output index")
+            target = int(desired_class)
+            if target < 0 or target >= n_classes:
+                raise ValueError(f"desired_class must be between 0 and {n_classes - 1}")
+            if target == current_class:
+                raise ValueError("desired_class must differ from the original class")
+            return target
+
+        order = np.argsort(probabilities, kind="stable")[::-1]
+        return int(next(index for index in order if index != current_class))
+
+    def _proximity_loss(self, candidate: np.ndarray, original: np.ndarray) -> float:
+        diff = (candidate - original) / self.scales
+        return float(np.sum(diff**2))
+
+    def _validity_loss(self, candidate: np.ndarray, target_class: int) -> float:
+        probability = self._predict_probabilities(candidate.reshape(1, -1))[0, target_class]
+        return float(-np.log(max(float(probability), 1e-12)))
+
+    def _diversity_loss(self, candidates: List[np.ndarray]) -> float:
+        """Negative mean pairwise normalized squared distance."""
+        if len(candidates) < 2:
             return 0.0
-        
-        total_dist = 0.0
-        count = 0
-        for i in range(len(cfs)):
-            for j in range(i + 1, len(cfs)):
-                diff = (cfs[i] - cfs[j]) / self.scales
-                total_dist += np.sum(diff ** 2)
-                count += 1
-        
-        return -total_dist / count if count > 0 else 0.0
-    
-    def _generate_single_counterfactual(
+        distances = []
+        for left in range(len(candidates)):
+            for right in range(left + 1, len(candidates)):
+                diff = (candidates[left] - candidates[right]) / self.scales
+                distances.append(float(np.sum(diff**2)))
+        return -float(np.mean(distances))
+
+    def _project(self, candidate: np.ndarray, original: np.ndarray) -> np.ndarray:
+        """Project a candidate onto ranges, categories, and fixed features."""
+        projected = np.asarray(candidate, dtype=float).copy()
+        for index, name in enumerate(self.feature_names):
+            lower, upper = self.feature_ranges[name]
+            projected[index] = np.clip(projected[index], lower, upper)
+        for index in self._categorical_indices:
+            allowed = self._categorical_values[int(index)]
+            projected[index] = allowed[np.argmin(np.abs(allowed - projected[index]))]
+        if self._fixed_indices.size:
+            projected[self._fixed_indices] = original[self._fixed_indices]
+        return projected
+
+    def _validate_query_domain(self, query: np.ndarray) -> None:
+        """Reject a query that is outside the declared feasible domain."""
+        for index, name in enumerate(self.feature_names):
+            lower, upper = self.feature_ranges[name]
+            if query[index] < lower or query[index] > upper:
+                raise ValueError(f"instance value for {name!r} is outside its feature range")
+        for index in self._categorical_indices:
+            allowed = self._categorical_values[int(index)]
+            if not np.any(np.isclose(query[index], allowed, atol=1e-12, rtol=0.0)):
+                name = self.feature_names[int(index)]
+                raise ValueError(
+                    f"instance value for categorical feature {name!r} was not "
+                    "observed in training_data"
+                )
+
+    def _is_target(self, candidate: np.ndarray, target_class: int) -> bool:
+        probabilities = self._predict_probabilities(candidate.reshape(1, -1))[0]
+        return int(np.argmax(probabilities)) == target_class
+
+    def _refine_toward_original(
         self,
-        instance: np.ndarray,
+        candidate: np.ndarray,
+        original: np.ndarray,
         target_class: int,
-        max_iter: int = 100
-    ) -> Optional[np.ndarray]:
-        """
-        Generate a single counterfactual using optimization.
-        """
-        # Start from a random perturbation of the instance
-        cf = instance.copy()
-        cf += self.rng.randn(len(cf)) * 0.1 * self.scales
-        
-        # Clip to valid ranges
-        for idx, name in enumerate(self.feature_names):
-            min_val, max_val = self.feature_ranges.get(name, (-np.inf, np.inf))
-            cf[idx] = np.clip(cf[idx], min_val, max_val)
-        
-        def objective(x):
-            validity = self._validity_loss(x, target_class)
-            proximity = self._proximity_loss(x, instance)
-            return validity + self.proximity_weight * proximity
-        
-        # Define bounds
-        bounds = []
-        for idx, name in enumerate(self.feature_names):
-            min_val, max_val = self.feature_ranges.get(name, (-np.inf, np.inf))
-            bounds.append((min_val, max_val))
-        
-        # Optimize
+        steps: int = 30,
+    ) -> np.ndarray:
+        """Binary-search continuous changes while retaining feasibility."""
+        high = self._project(candidate, original)
+        low = high.copy()
+        if self._continuous_indices.size:
+            low[self._continuous_indices] = original[self._continuous_indices]
+        low = self._project(low, original)
+        if self._is_target(low, target_class):
+            return low
+
+        for _ in range(steps):
+            middle = high.copy()
+            middle[self._continuous_indices] = (
+                low[self._continuous_indices] + high[self._continuous_indices]
+            ) / 2.0
+            middle = self._project(middle, original)
+            if self._is_target(middle, target_class):
+                high = middle
+            else:
+                low = middle
+        return high
+
+    def _candidate_seeds(
+        self,
+        original: np.ndarray,
+        target_class: int,
+        max_attempts: int,
+        rng: np.random.Generator,
+    ):
+        """Yield deterministic target exemplars followed by domain samples."""
+        training_classes = np.argmax(self._predict_probabilities(self.training_data), axis=1)
+        target_rows = self.training_data[training_classes == target_class]
+        if len(target_rows):
+            order = np.argsort(
+                [
+                    self._proximity_loss(self._project(row, original), original)
+                    for row in target_rows
+                ],
+                kind="stable",
+            )
+            target_rows = target_rows[order]
+
+        for attempt in range(max_attempts):
+            if attempt < len(target_rows):
+                seed = target_rows[attempt].copy()
+            elif len(target_rows):
+                seed = target_rows[int(rng.integers(len(target_rows)))].copy()
+                if self._continuous_indices.size:
+                    seed[self._continuous_indices] += rng.normal(
+                        0.0,
+                        0.15 * self.scales[self._continuous_indices],
+                    )
+            else:
+                seed = original.copy()
+                for index in self._continuous_indices:
+                    lower, upper = self.feature_ranges[self.feature_names[int(index)]]
+                    seed[index] = rng.uniform(lower, upper)
+                for index in self._categorical_indices:
+                    allowed = self._categorical_values[int(index)]
+                    seed[index] = allowed[int(rng.integers(len(allowed)))]
+            yield self._project(seed, original)
+
+    def _optimize_seed(
+        self,
+        seed: np.ndarray,
+        original: np.ndarray,
+        target_class: int,
+        existing: List[np.ndarray],
+        max_iter: int,
+    ) -> np.ndarray:
+        if not self._continuous_indices.size:
+            return seed
+
+        indices = self._continuous_indices
+        bounds = [self.feature_ranges[self.feature_names[int(index)]] for index in indices]
+
+        def assemble(values: np.ndarray) -> np.ndarray:
+            candidate = seed.copy()
+            candidate[indices] = values
+            return self._project(candidate, original)
+
+        def objective(values: np.ndarray) -> float:
+            candidate = assemble(values)
+            loss = self._validity_loss(candidate, target_class)
+            loss += self.proximity_weight * self._proximity_loss(candidate, original)
+            if existing and self.diversity_weight:
+                distances = []
+                for prior in existing:
+                    diff = (candidate - prior) / self.scales
+                    distances.append(min(float(np.sum(diff**2)), 1.0))
+                loss -= self.diversity_weight * float(np.mean(distances))
+            return float(loss)
+
         result = minimize(
             objective,
-            cf,
-            method='L-BFGS-B',
+            seed[indices],
+            method="L-BFGS-B",
             bounds=bounds,
-            options={'maxiter': max_iter}
+            options={"maxiter": int(max_iter)},
         )
-        
-        cf_result = result.x
-        
-        # Check if valid (prediction changed)
-        predictions = self.model.predict(cf_result.reshape(1, -1))
-        if predictions.ndim == 2:
-            pred_class = np.argmax(predictions[0])
-        else:
-            pred_class = int(predictions[0] > 0.5)
-        
-        if pred_class == target_class:
-            return cf_result
-        return None
-    
+        return assemble(result.x)
+
     def _generate_diverse_counterfactuals(
         self,
         instance: np.ndarray,
         target_class: int,
         num_counterfactuals: int,
-        max_attempts: int = 50
+        max_attempts: int = 50,
+        max_iter: int = 100,
     ) -> List[np.ndarray]:
-        """
-        Generate multiple diverse counterfactuals.
-        """
-        counterfactuals = []
-        attempts = 0
-        
-        while len(counterfactuals) < num_counterfactuals and attempts < max_attempts:
-            # Add some randomization to encourage diversity
-            self.rng = np.random.RandomState(self.random_state + attempts)
-            
-            cf = self._generate_single_counterfactual(instance, target_class)
-            
-            if cf is not None:
-                # Check if it's diverse enough from existing CFs
-                is_diverse = True
-                for existing_cf in counterfactuals:
-                    diff = np.abs(cf - existing_cf) / self.scales
-                    if np.max(diff) < 0.1:  # Too similar
-                        is_diverse = False
-                        break
-                
-                if is_diverse:
-                    counterfactuals.append(cf)
-            
-            attempts += 1
-        
+        """Generate only feasible, target-valid, non-duplicate candidates."""
+        rng = np.random.default_rng(self.random_state)
+        counterfactuals: List[np.ndarray] = []
+        for seed in self._candidate_seeds(instance, target_class, max_attempts, rng):
+            optimized = self._optimize_seed(
+                seed,
+                instance,
+                target_class,
+                counterfactuals,
+                max_iter,
+            )
+            options = (optimized, seed)
+            valid = next(
+                (option for option in options if self._is_target(option, target_class)),
+                None,
+            )
+            if valid is None:
+                continue
+            valid = self._refine_toward_original(valid, instance, target_class)
+            if not self._is_target(valid, target_class):
+                continue
+            if any(np.allclose(valid, prior, atol=1e-7, rtol=0.0) for prior in counterfactuals):
+                continue
+            counterfactuals.append(valid)
+            if len(counterfactuals) == num_counterfactuals:
+                break
         return counterfactuals
-    
+
+    def _target_name(self, target_class: int) -> str:
+        class_names = getattr(self.model, "class_names", None)
+        if class_names is not None and target_class < len(class_names):
+            return str(class_names[target_class])
+        return f"class_{target_class}"
+
     def explain(
         self,
         instance: np.ndarray,
         num_counterfactuals: int = 3,
         desired_class: Optional[int] = None,
-        **kwargs
+        **kwargs: Any,
     ) -> Explanation:
-        """
-        Generate counterfactual explanations.
-        
-        Args:
-            instance: The instance to explain (1D array)
-            num_counterfactuals: Number of diverse counterfactuals to generate
-            desired_class: Target class (default: flip to different class)
-            
-        Returns:
-            Explanation object with counterfactuals and changes
-        """
-        instance = np.array(instance).flatten()
-        target_class = self._get_target_class(instance, desired_class)
-        
-        # Get original prediction
-        original_pred = self.model.predict(instance.reshape(1, -1))
-        if original_pred.ndim == 2:
-            original_class = int(np.argmax(original_pred[0]))
-        else:
-            original_class = int(original_pred[0] > 0.5)
-        
-        # Generate counterfactuals
-        counterfactuals = self._generate_diverse_counterfactuals(
-            instance, target_class, num_counterfactuals
+        """Search for feasible counterfactuals in the requested output class."""
+        query = validate_single_tabular_instance(
+            instance,
+            len(self.feature_names),
+            dtype=float,
+            require_finite=True,
         )
-        
-        # Compute changes for each counterfactual
+        self._validate_query_domain(query)
+        if not isinstance(num_counterfactuals, Integral) or isinstance(num_counterfactuals, bool):
+            raise TypeError("num_counterfactuals must be an integer")
+        if num_counterfactuals < 1:
+            raise ValueError("num_counterfactuals must be at least 1")
+
+        max_attempts = kwargs.pop("max_attempts", 50)
+        max_iter = kwargs.pop("max_iter", 100)
+        if kwargs:
+            raise TypeError(f"Unexpected keyword arguments: {sorted(kwargs)}")
+        for value, name in ((max_attempts, "max_attempts"), (max_iter, "max_iter")):
+            if not isinstance(value, Integral) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
+        original_probabilities = self._predict_probabilities(query.reshape(1, -1))[0]
+        original_class = int(np.argmax(original_probabilities))
+        target_class = self._get_target_class(query, desired_class)
+        counterfactuals = self._generate_diverse_counterfactuals(
+            query,
+            target_class,
+            int(num_counterfactuals),
+            max_attempts=int(max_attempts),
+            max_iter=int(max_iter),
+        )
+
         all_changes = []
-        for cf in counterfactuals:
+        predictions = []
+        distances = []
+        for candidate in counterfactuals:
             changes = {}
-            for idx, name in enumerate(self.feature_names):
-                diff = cf[idx] - instance[idx]
-                if abs(diff) > 1e-6:
+            for index, name in enumerate(self.feature_names):
+                difference = candidate[index] - query[index]
+                if abs(difference) > 1e-7:
                     changes[name] = {
-                        "original": float(instance[idx]),
-                        "counterfactual": float(cf[idx]),
-                        "change": float(diff)
+                        "original": float(query[index]),
+                        "counterfactual": float(candidate[index]),
+                        "change": float(difference),
                     }
             all_changes.append(changes)
-        
-        # Compute feature importance based on average change magnitude
-        feature_importance = {}
-        for idx, name in enumerate(self.feature_names):
-            total_change = 0.0
-            for cf in counterfactuals:
-                total_change += abs(cf[idx] - instance[idx]) / self.scales[idx]
-            feature_importance[name] = total_change / max(len(counterfactuals), 1)
-        
+            probabilities = self._predict_probabilities(candidate.reshape(1, -1))[0]
+            predictions.append(probabilities.tolist())
+            distances.append(self._proximity_loss(candidate, query))
+
+        action_magnitudes = None
+        if counterfactuals:
+            action_magnitudes = {}
+            for index, name in enumerate(self.feature_names):
+                changes = [
+                    abs(candidate[index] - query[index]) / self.scales[index]
+                    for candidate in counterfactuals
+                ]
+                action_magnitudes[name] = float(np.mean(changes))
+
+        failure_reason = None
+        if not counterfactuals:
+            failure_reason = (
+                "No valid target-class candidate was found within the declared "
+                "domain and search budget."
+            )
+
+        search_succeeded = bool(counterfactuals)
+        explanation_data = {
+            "algorithm": "constrained_multistart_search",
+            "is_dice_implementation": False,
+            "counterfactuals": [candidate.tolist() for candidate in counterfactuals],
+            "counterfactual_predictions": predictions,
+            "changes": all_changes,
+            "normalized_squared_distances": distances,
+            "original_class": original_class,
+            "original_probabilities": original_probabilities.tolist(),
+            "target_class": target_class,
+            "num_requested": int(num_counterfactuals),
+            "num_generated": len(counterfactuals),
+            "search_succeeded": search_succeeded,
+            "all_counterfactuals_valid": search_succeeded
+            and all(self._is_target(candidate, target_class) for candidate in counterfactuals),
+            "continuous_features": list(self.continuous_features),
+            "categorical_features": list(self.categorical_features),
+            "fixed_features": list(self.fixed_features),
+            "proximity_weight": self.proximity_weight,
+            "diversity_weight": self.diversity_weight,
+            "diversity_loss": self._diversity_loss(counterfactuals),
+            "failure_reason": failure_reason,
+        }
+        if action_magnitudes is not None:
+            explanation_data.update(
+                {
+                    "feature_attributions": action_magnitudes,
+                    "feature_attribution_semantics": (
+                        "mean_absolute_normalized_counterfactual_action"
+                    ),
+                }
+            )
+
         return Explanation(
             explainer_name="Counterfactual",
-            target_class=f"class_{target_class}",
-            explanation_data={
-                "counterfactuals": [cf.tolist() for cf in counterfactuals],
-                "changes": all_changes,
-                "original_class": original_class,
-                "target_class": target_class,
-                "num_generated": len(counterfactuals),
-                "feature_attributions": feature_importance
-            }
+            target_class=self._target_name(target_class),
+            explanation_data=explanation_data,
         )

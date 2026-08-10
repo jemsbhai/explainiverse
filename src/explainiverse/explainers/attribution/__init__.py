@@ -1,6 +1,6 @@
 # src/explainiverse/explainers/attribution/__init__.py
 """
-Attribution-based explainers - feature importance explanations.
+Attribution-based explainers - methods that return feature-attribution scores.
 """
 
 from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer

@@ -7,14 +7,14 @@ Reference:
     Predictions of Any Classifier. KDD 2016.
 """
 
-import pytest
 import numpy as np
+import pytest
 from sklearn.datasets import load_iris
 from sklearn.linear_model import LogisticRegression
 
 from explainiverse.adapters.sklearn_adapter import SklearnAdapter
-from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def iris_setup():
         training_data=X,
         feature_names=feature_names,
         class_names=class_names,
-        mode="classification"
+        mode="classification",
     )
     return X, y, feature_names, class_names, adapter, explainer
 
@@ -52,13 +52,13 @@ def test_lime_explainer_target_and_shape(iris_setup):
     assert isinstance(attributions, dict)
 
     # Attribution keys must be original feature names (not LIME discretized strings)
-    assert set(attributions.keys()) == set(feature_names), \
-        f"Attribution keys {set(attributions.keys())} != feature names {set(feature_names)}"
+    assert set(attributions.keys()) == set(
+        feature_names
+    ), f"Attribution keys {set(attributions.keys())} != feature names {set(feature_names)}"
 
     # All features present; at most num_features have non-zero values
     non_zero = {k: v for k, v in attributions.items() if abs(v) > 1e-10}
-    assert len(non_zero) <= 3, \
-        f"Expected at most 3 non-zero attributions, got {len(non_zero)}"
+    assert len(non_zero) <= 3, f"Expected at most 3 non-zero attributions, got {len(non_zero)}"
 
     # Attribution value types
     for value in attributions.values():
@@ -83,27 +83,27 @@ def test_lime_explainer_num_features_range(iris_setup):
 
     # But at most 2 have non-zero values
     non_zero = {k: v for k, v in attributions.items() if abs(v) > 1e-10}
-    assert len(non_zero) <= 2, \
-        f"Expected at most 2 non-zero attributions, got {len(non_zero)}"
+    assert len(non_zero) <= 2, f"Expected at most 2 non-zero attributions, got {len(non_zero)}"
 
 
-def test_lime_explainer_top_labels(iris_setup):
-    """top_labels parameter produces valid class label."""
+def test_lime_explainer_requires_one_output_and_supports_explicit_target(iris_setup):
+    """The singular return type never silently discards requested outputs."""
     X, y, feature_names, class_names, adapter, explainer = iris_setup
 
-    explanation = explainer.explain(X[2], top_labels=2)
-    assert explanation.target_class in class_names
+    with pytest.raises(ValueError, match="top_labels must be 1"):
+        explainer.explain(X[2], top_labels=2)
+
+    explanation = explainer.explain(X[2], target_class=0)
+    assert explanation.target_class == class_names[0]
 
 
-def test_lime_explainer_plot_does_not_crash(iris_setup):
-    """Explanation plot method does not raise."""
+def test_lime_explainer_plot_is_explicitly_unimplemented(iris_setup):
+    """The generic container must not pretend that a plot was rendered."""
     X, y, feature_names, class_names, adapter, explainer = iris_setup
 
     explanation = explainer.explain(X[3])
-    try:
+    with pytest.raises(NotImplementedError, match="no implemented plotting backend"):
         explanation.plot()
-    except Exception as e:
-        pytest.fail(f"Plot method raised: {e}")
 
 
 def test_lime_all_features_default(iris_setup):
@@ -113,7 +113,7 @@ def test_lime_all_features_default(iris_setup):
     explanation = explainer.explain(X[0])
     attributions = explanation.explanation_data["feature_attributions"]
     assert set(attributions.keys()) == set(feature_names)
-    # With all features requested, most should be non-zero
+    # On this fitted fixture at least one returned coefficient is non-zero.
     non_zero = sum(1 for v in attributions.values() if abs(v) > 1e-10)
     assert non_zero >= 1
 
@@ -126,8 +126,9 @@ def test_lime_attribution_keys_match_feature_names(iris_setup):
     for i in [0, 50, 100]:  # One from each class
         explanation = explainer.explain(X[i])
         keys = set(explanation.explanation_data["feature_attributions"].keys())
-        assert keys == set(feature_names), \
-            f"Instance {i}: keys {keys} != feature names {set(feature_names)}"
+        assert keys == set(
+            feature_names
+        ), f"Instance {i}: keys {keys} != feature names {set(feature_names)}"
 
 
 def test_lime_batch_explain(iris_setup):

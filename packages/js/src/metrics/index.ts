@@ -1,3 +1,5 @@
-// Export metrics here
-// export * from './faithfulness/pgi';
-export { };
+/**
+ * Quarantined placeholder: no JavaScript evaluation metrics are currently
+ * provided or exported by this experimental workspace.
+ */
+export {};

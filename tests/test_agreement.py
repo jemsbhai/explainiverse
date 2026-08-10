@@ -7,24 +7,23 @@ Reference:
     & Lakkaraju, H. (2022). The Disagreement Problem in Explainable
     Machine Learning: A Practitioner's Perspective. TMLR.
 """
-import pytest
 import numpy as np
+import pytest
 
-from explainiverse.evaluation.agreement import (
-    compute_feature_agreement,
-    compute_batch_feature_agreement,
-    compute_rank_agreement,
-    compute_batch_rank_agreement,
-    _extract_attribution_array,
-    _validate_pair,
-    _top_k_indices,
-)
 from explainiverse.core.explanation import Explanation
-
+from explainiverse.evaluation.agreement import (
+    _extract_attribution_array,
+    _top_k_indices,
+    compute_batch_feature_agreement,
+    compute_batch_rank_agreement,
+    compute_feature_agreement,
+    compute_rank_agreement,
+)
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def simple_pair():
@@ -75,6 +74,7 @@ def explanation_pair():
 # Tests: _top_k_indices
 # =============================================================================
 
+
 class TestTopKIndices:
     """Tests for the _top_k_indices helper."""
 
@@ -108,6 +108,7 @@ class TestTopKIndices:
 # =============================================================================
 # Tests: Feature Agreement — Basic
 # =============================================================================
+
 
 class TestFeatureAgreementBasic:
     """Basic functionality tests for Feature Agreement."""
@@ -151,6 +152,7 @@ class TestFeatureAgreementBasic:
 # Tests: Feature Agreement — Parameter Variations
 # =============================================================================
 
+
 class TestFeatureAgreementParameters:
     """Test Feature Agreement across different k values."""
 
@@ -188,6 +190,7 @@ class TestFeatureAgreementParameters:
 # Tests: Feature Agreement — Edge Cases
 # =============================================================================
 
+
 class TestFeatureAgreementEdgeCases:
     """Edge case tests for Feature Agreement."""
 
@@ -200,19 +203,18 @@ class TestFeatureAgreementEdgeCases:
         assert compute_feature_agreement(a, b, k=2) == 1.0
 
     def test_all_zeros_a(self):
-        """When one attribution is all zeros, top-k is deterministic but
-        arbitrary. No crash expected."""
+        """An all-zero vector has no defined strict top-k subset."""
         a = np.zeros(5)
         b = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-        result = compute_feature_agreement(a, b, k=3)
-        assert 0.0 <= result <= 1.0
+        with pytest.raises(ValueError, match="tie spans the cutoff"):
+            compute_feature_agreement(a, b, k=3)
 
     def test_all_zeros_both(self):
-        """Two all-zero attributions should have perfect agreement
-        (same arbitrary ordering)."""
+        """Arbitrary tie-breaking must not fabricate perfect agreement."""
         a = np.zeros(5)
         b = np.zeros(5)
-        assert compute_feature_agreement(a, b, k=3) == 1.0
+        with pytest.raises(ValueError, match="tie spans the cutoff"):
+            compute_feature_agreement(a, b, k=3)
 
     def test_negative_attributions(self):
         """Absolute values are used for ranking."""
@@ -252,6 +254,7 @@ class TestFeatureAgreementEdgeCases:
 # =============================================================================
 # Tests: Rank Agreement — Basic
 # =============================================================================
+
 
 class TestRankAgreementBasic:
     """Basic functionality tests for Rank Agreement."""
@@ -299,6 +302,7 @@ class TestRankAgreementBasic:
 # Tests: Rank Agreement — Parameter Variations
 # =============================================================================
 
+
 class TestRankAgreementParameters:
     """Test Rank Agreement across different k values."""
 
@@ -330,6 +334,7 @@ class TestRankAgreementParameters:
 # Tests: Rank Agreement — Edge Cases
 # =============================================================================
 
+
 class TestRankAgreementEdgeCases:
     """Edge case tests for Rank Agreement."""
 
@@ -341,7 +346,8 @@ class TestRankAgreementEdgeCases:
     def test_all_zeros_both(self):
         a = np.zeros(5)
         b = np.zeros(5)
-        assert compute_rank_agreement(a, b, k=3) == 1.0
+        with pytest.raises(ValueError, match="tie spans the cutoff"):
+            compute_rank_agreement(a, b, k=3)
 
     def test_negative_attributions(self):
         a = np.array([-0.9, 0.1, 0.5])
@@ -353,19 +359,19 @@ class TestRankAgreementEdgeCases:
         a = rng.randn(200)
         assert compute_rank_agreement(a, a.copy(), k=50) == 1.0
 
-    def test_large_feature_space_random(self):
-        """Two random attributions should have low RA for small k."""
+    def test_large_feature_space_seeded_inputs_in_range(self):
+        """Seeded large-vector inputs return a bounded rank-agreement score."""
         rng = np.random.RandomState(99)
         a = rng.randn(100)
         b = rng.randn(100)
         result = compute_rank_agreement(a, b, k=5)
-        # Very unlikely to have high agreement by chance
-        assert result < 1.0
+        assert 0.0 <= result <= 1.0
 
 
 # =============================================================================
 # Tests: Semantic Invariant — RA ≤ FA
 # =============================================================================
+
 
 class TestRAleqFA:
     """Rank Agreement should never exceed Feature Agreement."""
@@ -400,6 +406,7 @@ class TestRAleqFA:
 # =============================================================================
 # Tests: Explanation Objects
 # =============================================================================
+
 
 class TestExplanationObjects:
     """Test that Explanation objects work as inputs."""
@@ -438,6 +445,7 @@ class TestExplanationObjects:
 # Tests: Batch Operations
 # =============================================================================
 
+
 class TestBatchOperations:
     """Test batch versions of both metrics."""
 
@@ -465,8 +473,8 @@ class TestBatchOperations:
         assert len(results) == 1
 
     def test_batch_empty(self):
-        results = compute_batch_feature_agreement([], [], k=1)
-        assert results == []
+        with pytest.raises(ValueError, match="must not be empty"):
+            compute_batch_feature_agreement([], [], k=1)
 
     def test_batch_with_explanations(self, explanation_pair):
         exp_a, exp_b = explanation_pair
@@ -493,6 +501,7 @@ class TestBatchOperations:
 # =============================================================================
 # Tests: Error Handling
 # =============================================================================
+
 
 class TestErrorHandling:
     """Test validation and error handling."""
@@ -527,9 +536,8 @@ class TestErrorHandling:
     def test_2d_arrays(self):
         a = np.array([[0.1, 0.2]])
         b = np.array([[0.3, 0.4]])
-        # Should work because _extract_attribution_array flattens
-        result = compute_feature_agreement(a, b, k=1)
-        assert isinstance(result, float)
+        with pytest.raises(ValueError, match="1-D"):
+            compute_feature_agreement(a, b, k=1)
 
     def test_invalid_type_string(self):
         with pytest.raises(TypeError, match="Expected"):
@@ -567,6 +575,7 @@ class TestErrorHandling:
 # =============================================================================
 # Tests: Specific Scenarios
 # =============================================================================
+
 
 class TestSpecificScenarios:
     """Manually computed expected values for verification."""
@@ -641,6 +650,7 @@ class TestSpecificScenarios:
 # =============================================================================
 # Tests: Consistency across runs
 # =============================================================================
+
 
 class TestDeterminism:
     """Results should be deterministic."""

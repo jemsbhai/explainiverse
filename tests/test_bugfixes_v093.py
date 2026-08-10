@@ -11,25 +11,24 @@ Bug 5: scikit-learn dependency conflict — pyproject.toml change, no unit test 
 These tests require PyTorch.
 """
 
-import pytest
 import numpy as np
+import pytest
 
 try:
     import torch
     import torch.nn as nn
+
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(
-    not TORCH_AVAILABLE,
-    reason="PyTorch not installed"
-)
+pytestmark = pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
 
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def class_names():
@@ -44,16 +43,16 @@ def cnn_with_unflatten():
     This is the architecture pattern that triggered Bugs 2 and 4.
     """
     model = nn.Sequential(
-        nn.Unflatten(1, (1, 28, 28)),       # (batch, 784) -> (batch, 1, 28, 28)
+        nn.Unflatten(1, (1, 28, 28)),  # (batch, 784) -> (batch, 1, 28, 28)
         nn.Conv2d(1, 8, kernel_size=3, padding=1),
         nn.ReLU(),
-        nn.MaxPool2d(2),                     # 28x28 -> 14x14
+        nn.MaxPool2d(2),  # 28x28 -> 14x14
         nn.Conv2d(8, 16, kernel_size=3, padding=1),
         nn.ReLU(),
-        nn.Flatten(),                        # (batch, 16, 14, 14) -> (batch, 3136)
+        nn.Flatten(),  # (batch, 16, 14, 14) -> (batch, 3136)
         nn.Linear(16 * 14 * 14, 64),
         nn.ReLU(),
-        nn.Linear(64, 3)
+        nn.Linear(64, 3),
     )
     torch.manual_seed(42)
     for m in model.modules():
@@ -71,13 +70,13 @@ def simple_cnn_sequential():
     model = nn.Sequential(
         nn.Conv2d(1, 8, kernel_size=3, padding=1),
         nn.ReLU(),
-        nn.MaxPool2d(2),                     # 8x8 -> 4x4
+        nn.MaxPool2d(2),  # 8x8 -> 4x4
         nn.Conv2d(8, 16, kernel_size=3, padding=1),
         nn.ReLU(),
         nn.Flatten(),
         nn.Linear(16 * 4 * 4, 32),
         nn.ReLU(),
-        nn.Linear(32, 3)
+        nn.Linear(32, 3),
     )
     torch.manual_seed(42)
     for m in model.modules():
@@ -92,11 +91,7 @@ def simple_cnn_sequential():
 @pytest.fixture
 def simple_mlp():
     """Simple MLP for device placement tests."""
-    model = nn.Sequential(
-        nn.Linear(4, 16),
-        nn.ReLU(),
-        nn.Linear(16, 3)
-    )
+    model = nn.Sequential(nn.Linear(4, 16), nn.ReLU(), nn.Linear(16, 3))
     torch.manual_seed(42)
     for m in model.modules():
         if isinstance(m, nn.Linear):
@@ -109,6 +104,7 @@ def simple_mlp():
 # =============================================================================
 # Bug 1: LRP Device Mismatch
 # =============================================================================
+
 
 class TestBug1DeviceMismatch:
     """
@@ -124,9 +120,7 @@ class TestBug1DeviceMismatch:
 
         adapter = PyTorchAdapter(simple_mlp, task="classification", class_names=class_names)
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"f{i}" for i in range(4)],
-            class_names=class_names
+            model=adapter, feature_names=[f"f{i}" for i in range(4)], class_names=class_names
         )
         device = explainer._get_model_device()
         assert device == torch.device("cpu")
@@ -138,17 +132,14 @@ class TestBug1DeviceMismatch:
 
         adapter = PyTorchAdapter(simple_mlp, task="classification", class_names=class_names)
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"f{i}" for i in range(4)],
-            class_names=class_names
+            model=adapter, feature_names=[f"f{i}" for i in range(4)], class_names=class_names
         )
         instance = np.random.randn(4).astype(np.float32)
         tensor = explainer._prepare_input_tensor(instance)
         assert tensor.device == torch.device("cpu")
 
     @pytest.mark.skipif(
-        not TORCH_AVAILABLE or not torch.cuda.is_available(),
-        reason="CUDA not available"
+        not TORCH_AVAILABLE or not torch.cuda.is_available(), reason="CUDA not available"
     )
     def test_get_model_device_cuda(self, simple_mlp, class_names):
         """_get_model_device returns CUDA for a CUDA model."""
@@ -158,16 +149,13 @@ class TestBug1DeviceMismatch:
         cuda_model = simple_mlp.to("cuda")
         adapter = PyTorchAdapter(cuda_model, task="classification", class_names=class_names)
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"f{i}" for i in range(4)],
-            class_names=class_names
+            model=adapter, feature_names=[f"f{i}" for i in range(4)], class_names=class_names
         )
         device = explainer._get_model_device()
         assert device.type == "cuda"
 
     @pytest.mark.skipif(
-        not TORCH_AVAILABLE or not torch.cuda.is_available(),
-        reason="CUDA not available"
+        not TORCH_AVAILABLE or not torch.cuda.is_available(), reason="CUDA not available"
     )
     def test_prepare_input_tensor_device_cuda(self, simple_mlp, class_names):
         """Prepared tensor lives on the same device as model (CUDA)."""
@@ -177,17 +165,14 @@ class TestBug1DeviceMismatch:
         cuda_model = simple_mlp.to("cuda")
         adapter = PyTorchAdapter(cuda_model, task="classification", class_names=class_names)
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"f{i}" for i in range(4)],
-            class_names=class_names
+            model=adapter, feature_names=[f"f{i}" for i in range(4)], class_names=class_names
         )
         instance = np.random.randn(4).astype(np.float32)
         tensor = explainer._prepare_input_tensor(instance)
         assert tensor.device.type == "cuda"
 
     @pytest.mark.skipif(
-        not TORCH_AVAILABLE or not torch.cuda.is_available(),
-        reason="CUDA not available"
+        not TORCH_AVAILABLE or not torch.cuda.is_available(), reason="CUDA not available"
     )
     def test_lrp_explain_cuda_model(self, simple_mlp, class_names):
         """Full LRP explain() works on CUDA model without device mismatch."""
@@ -197,9 +182,7 @@ class TestBug1DeviceMismatch:
         cuda_model = simple_mlp.to("cuda")
         adapter = PyTorchAdapter(cuda_model, task="classification", class_names=class_names)
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"f{i}" for i in range(4)],
-            class_names=class_names
+            model=adapter, feature_names=[f"f{i}" for i in range(4)], class_names=class_names
         )
         instance = np.random.randn(4).astype(np.float32)
         explanation = explainer.explain(instance)
@@ -208,8 +191,7 @@ class TestBug1DeviceMismatch:
         assert all(np.isfinite(a) for a in attrs)
 
     @pytest.mark.skipif(
-        not TORCH_AVAILABLE or not torch.cuda.is_available(),
-        reason="CUDA not available"
+        not TORCH_AVAILABLE or not torch.cuda.is_available(), reason="CUDA not available"
     )
     def test_lrp_cnn_explain_cuda(self, simple_cnn_sequential, class_names):
         """Full LRP explain() works on CUDA CNN model."""
@@ -220,9 +202,7 @@ class TestBug1DeviceMismatch:
         adapter = PyTorchAdapter(cuda_model, task="classification", class_names=class_names)
         feature_names = [f"pixel_{i}" for i in range(64)]
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=feature_names,
-            class_names=class_names
+            model=adapter, feature_names=feature_names, class_names=class_names
         )
         instance = np.random.randn(1, 8, 8).astype(np.float32)
         explanation = explainer.explain(instance)
@@ -235,52 +215,82 @@ class TestBug1DeviceMismatch:
 # Bug 2: LRP Double Reshape (Unflatten + Conv2d)
 # =============================================================================
 
+
 class TestBug2DoubleReshape:
     """
-    Bug 2: When a model has Unflatten before Conv2d, _prepare_input_tensor
-    detected Conv2d as first weighted layer and pre-reshaped the input to 4D.
-    Then Unflatten tried to reshape already-4D input, causing dimension errors.
-    Fix: Added _has_unflatten_before_conv() to detect this and skip pre-reshape.
+    Public regression contract for models that reshape flat inputs internally.
+
+    LRP accepts a one-dimensional instance when the first shape-defining layer
+    is ``Unflatten``. A spatial model without ``Unflatten`` instead requires an
+    explicit ``(channels, height, width)`` instance and never guesses a square
+    image shape from a flat feature count.
     """
 
-    def test_has_unflatten_before_conv_true(self, cnn_with_unflatten, class_names):
-        """Correctly detects Unflatten before Conv2d."""
+    def test_public_lrp_accepts_flat_input_for_unflatten_model(
+        self, cnn_with_unflatten, class_names
+    ):
+        """Flat input is preserved for the model's declared Unflatten layer."""
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import LRPExplainer
 
         adapter = PyTorchAdapter(cnn_with_unflatten, task="classification", class_names=class_names)
+        feature_names = [f"pixel_{i}" for i in range(784)]
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"pixel_{i}" for i in range(784)],
-            class_names=class_names
+            model=adapter, feature_names=feature_names, class_names=class_names
         )
-        assert explainer._has_unflatten_before_conv() is True
+        instance = np.linspace(0.0, 1.0, 784, dtype=np.float32)
 
-    def test_has_unflatten_before_conv_false(self, simple_cnn_sequential, class_names):
-        """Returns False for standard CNN without Unflatten."""
+        explanation = explainer.explain(instance, target_class=1)
+
+        assert explanation.target_class == "class_b"
+        assert explanation.feature_names == feature_names
+        assert explanation.explanation_data["input_shape"] == [784]
+        assert list(explanation.explanation_data["feature_attributions"]) == feature_names
+        attributions = np.asarray(explanation.explanation_data["attributions_raw"])
+        assert attributions.shape == (784,)
+        assert np.isfinite(attributions).all()
+
+    def test_public_lrp_accepts_explicit_chw_for_spatial_model(
+        self, simple_cnn_sequential, class_names
+    ):
+        """A standard CNN accepts exactly one explicit CHW instance."""
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import LRPExplainer
 
-        adapter = PyTorchAdapter(simple_cnn_sequential, task="classification", class_names=class_names)
-        explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"pixel_{i}" for i in range(64)],
-            class_names=class_names
+        adapter = PyTorchAdapter(
+            simple_cnn_sequential, task="classification", class_names=class_names
         )
-        assert explainer._has_unflatten_before_conv() is False
+        feature_names = [f"pixel_{i}" for i in range(64)]
+        explainer = LRPExplainer(
+            model=adapter, feature_names=feature_names, class_names=class_names
+        )
+        instance = np.linspace(0.0, 1.0, 64, dtype=np.float32).reshape(1, 8, 8)
 
-    def test_has_unflatten_before_conv_false_mlp(self, simple_mlp, class_names):
-        """Returns False for MLP (no Conv2d at all)."""
+        explanation = explainer.explain(instance, target_class=1)
+
+        assert explanation.target_class == "class_b"
+        assert explanation.explanation_data["input_shape"] == [1, 8, 8]
+        assert list(explanation.explanation_data["feature_attributions"]) == feature_names
+        assert np.asarray(explanation.explanation_data["attributions_raw"]).shape == (64,)
+
+    def test_public_lrp_accepts_one_dimensional_mlp_instance(self, simple_mlp, class_names):
+        """A tabular MLP retains its one-dimensional public input contract."""
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import LRPExplainer
 
         adapter = PyTorchAdapter(simple_mlp, task="classification", class_names=class_names)
+        feature_names = [f"f{i}" for i in range(4)]
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"f{i}" for i in range(4)],
-            class_names=class_names
+            model=adapter, feature_names=feature_names, class_names=class_names
         )
-        assert explainer._has_unflatten_before_conv() is False
+        instance = np.array([0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+
+        explanation = explainer.explain(instance, target_class=1)
+
+        assert explanation.target_class == "class_b"
+        assert explanation.explanation_data["input_shape"] == [4]
+        assert list(explanation.explanation_data["feature_attributions"]) == feature_names
+        assert np.asarray(explanation.explanation_data["attributions_raw"]).shape == (4,)
 
     def test_prepare_input_flat_for_unflatten_model(self, cnn_with_unflatten, class_names):
         """Flat input stays 2D (batch, features) when model has Unflatten."""
@@ -289,31 +299,33 @@ class TestBug2DoubleReshape:
 
         adapter = PyTorchAdapter(cnn_with_unflatten, task="classification", class_names=class_names)
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"pixel_{i}" for i in range(784)],
-            class_names=class_names
+            model=adapter, feature_names=[f"pixel_{i}" for i in range(784)], class_names=class_names
         )
         instance = np.random.randn(784).astype(np.float32)
         tensor = explainer._prepare_input_tensor(instance)
         # Should be 2D (1, 784), NOT 4D (1, 1, 28, 28)
         assert tensor.shape == (1, 784)
 
-    def test_prepare_input_4d_for_standard_cnn(self, simple_cnn_sequential, class_names):
-        """Flat input gets reshaped to 4D for standard CNN without Unflatten."""
+    def test_public_lrp_rejects_flat_input_for_spatial_model(
+        self, simple_cnn_sequential, class_names
+    ):
+        """LRP does not infer spatial geometry from a flat feature vector."""
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import LRPExplainer
 
-        adapter = PyTorchAdapter(simple_cnn_sequential, task="classification", class_names=class_names)
-        explainer = LRPExplainer(
-            model=adapter,
-            feature_names=[f"pixel_{i}" for i in range(64)],
-            class_names=class_names
+        adapter = PyTorchAdapter(
+            simple_cnn_sequential, task="classification", class_names=class_names
         )
-        instance = np.random.randn(64).astype(np.float32)
-        tensor = explainer._prepare_input_tensor(instance)
-        # Should be 4D (1, 1, 8, 8) for CNN
-        assert tensor.dim() == 4
-        assert tensor.shape == (1, 1, 8, 8)
+        explainer = LRPExplainer(
+            model=adapter, feature_names=[f"pixel_{i}" for i in range(64)], class_names=class_names
+        )
+        instance = np.linspace(0.0, 1.0, 64, dtype=np.float32)
+
+        with pytest.raises(
+            ValueError,
+            match=r"A spatial LRP instance must have shape \(channels, height, width\); got \(64,\)",
+        ):
+            explainer.explain(instance, target_class=1)
 
     def test_lrp_explain_unflatten_cnn(self, cnn_with_unflatten, class_names):
         """
@@ -326,9 +338,7 @@ class TestBug2DoubleReshape:
         adapter = PyTorchAdapter(cnn_with_unflatten, task="classification", class_names=class_names)
         feature_names = [f"pixel_{i}" for i in range(784)]
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=feature_names,
-            class_names=class_names
+            model=adapter, feature_names=feature_names, class_names=class_names
         )
         instance = np.random.randn(784).astype(np.float32)
         explanation = explainer.explain(instance)
@@ -344,9 +354,7 @@ class TestBug2DoubleReshape:
         adapter = PyTorchAdapter(cnn_with_unflatten, task="classification", class_names=class_names)
         feature_names = [f"pixel_{i}" for i in range(784)]
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=feature_names,
-            class_names=class_names
+            model=adapter, feature_names=feature_names, class_names=class_names
         )
         batch = np.random.randn(3, 784).astype(np.float32)
         explanations = explainer.explain_batch(batch)
@@ -361,11 +369,14 @@ class TestBug2DoubleReshape:
 # Bug 3: LRP MaxPool2d Unpooling
 # =============================================================================
 
+
 class TestBug3MaxPoolUnpooling:
     """
-    Bug 3: F.max_unpool2d could receive mismatched shapes when relevance
-    tensor was not 4D or didn't match the pooled indices shape.
-    Fix: Added 4D assertion, relevance shape matching before unpooling.
+    Public regression contract for supported pooling layers.
+
+    MaxPool2d participates in the verified sequential LRP graph. Each rule
+    keeps its documented activation domain; in particular, z-plus requires
+    non-negative inputs to every weighted layer.
     """
 
     def test_maxpool2d_propagation_standard_cnn(self, simple_cnn_sequential, class_names):
@@ -373,12 +384,12 @@ class TestBug3MaxPoolUnpooling:
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import LRPExplainer
 
-        adapter = PyTorchAdapter(simple_cnn_sequential, task="classification", class_names=class_names)
+        adapter = PyTorchAdapter(
+            simple_cnn_sequential, task="classification", class_names=class_names
+        )
         feature_names = [f"pixel_{i}" for i in range(64)]
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=feature_names,
-            class_names=class_names
+            model=adapter, feature_names=feature_names, class_names=class_names
         )
         instance = np.random.randn(1, 8, 8).astype(np.float32)
         explanation = explainer.explain(instance)
@@ -394,9 +405,7 @@ class TestBug3MaxPoolUnpooling:
         adapter = PyTorchAdapter(cnn_with_unflatten, task="classification", class_names=class_names)
         feature_names = [f"pixel_{i}" for i in range(784)]
         explainer = LRPExplainer(
-            model=adapter,
-            feature_names=feature_names,
-            class_names=class_names
+            model=adapter, feature_names=feature_names, class_names=class_names
         )
         instance = np.random.randn(784).astype(np.float32)
         explanation = explainer.explain(instance)
@@ -404,38 +413,57 @@ class TestBug3MaxPoolUnpooling:
         assert len(attrs) == 784
         assert all(np.isfinite(a) for a in attrs)
 
-    def test_maxpool2d_all_lrp_rules(self, simple_cnn_sequential, class_names):
-        """All LRP rules produce finite results through MaxPool2d."""
+    def test_maxpool2d_rules_respect_their_input_domains(self, simple_cnn_sequential, class_names):
+        """Pooling works for each rule on-domain, and z-plus rejects negatives."""
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import LRPExplainer
 
-        adapter = PyTorchAdapter(simple_cnn_sequential, task="classification", class_names=class_names)
+        adapter = PyTorchAdapter(
+            simple_cnn_sequential, task="classification", class_names=class_names
+        )
         feature_names = [f"pixel_{i}" for i in range(64)]
-        instance = np.random.randn(1, 8, 8).astype(np.float32)
+        signed_instance = np.linspace(-1.0, 1.0, 64, dtype=np.float32).reshape(1, 8, 8)
+        nonnegative_instance = np.linspace(0.0, 1.0, 64, dtype=np.float32).reshape(1, 8, 8)
 
-        for rule in ["epsilon", "gamma", "z_plus"]:
+        for rule, instance in (
+            ("epsilon", signed_instance),
+            ("gamma", signed_instance),
+            ("z_plus", nonnegative_instance),
+        ):
             explainer = LRPExplainer(
-                model=adapter,
-                feature_names=feature_names,
-                class_names=class_names,
-                rule=rule
+                model=adapter, feature_names=feature_names, class_names=class_names, rule=rule
             )
-            explanation = explainer.explain(instance)
-            attrs = list(explanation.explanation_data["feature_attributions"].values())
-            assert all(np.isfinite(a) for a in attrs), (
-                f"Rule '{rule}' produced non-finite attributions through MaxPool2d"
-            )
+            explanation = explainer.explain(instance, target_class=1)
+            attributions = np.asarray(explanation.explanation_data["attributions_raw"])
+            assert explanation.explanation_data["rule"] == rule
+            assert attributions.shape == (64,)
+            assert np.isfinite(attributions).all()
+
+        z_plus = LRPExplainer(
+            model=adapter,
+            feature_names=feature_names,
+            class_names=class_names,
+            rule="z_plus",
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"z_plus requires non-negative inputs to every weighted layer; layer 0",
+        ):
+            z_plus.explain(signed_instance, target_class=1)
 
 
 # =============================================================================
 # Bug 4: GradCAM Input Shape Validation
 # =============================================================================
 
+
 class TestBug4GradCAMFlatInput:
     """
-    Bug 4: GradCAM.explain() rejected flat (1D/2D) input with ValueError,
-    but models with Unflatten layers expect flat input.
-    Fix: Added _model_has_unflatten() check and flat input handling path.
+    Public GradCAM input-shape regression contract.
+
+    A flat input is accepted only when the wrapped model declares an
+    ``Unflatten`` layer. Standard spatial models require one explicit CHW/HWC
+    image or a single-image NCHW tensor.
     """
 
     @pytest.fixture
@@ -444,6 +472,7 @@ class TestBug4GradCAMFlatInput:
         CNN with Unflatten and named conv layers (needed for GradCAM target_layer).
         GradCAM requires a non-Sequential model with named attributes for layer access.
         """
+
         class UnflattenCNN(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -477,23 +506,32 @@ class TestBug4GradCAMFlatInput:
         model.eval()
         return model
 
-    def test_model_has_unflatten_true(self, cnn_with_unflatten_named, class_names):
-        """_model_has_unflatten detects Unflatten in model."""
+    def test_public_gradcam_flat_unflatten_contract(self, cnn_with_unflatten_named, class_names):
+        """Flat input yields a heatmap at the Unflatten layer's spatial size."""
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import GradCAMExplainer
 
         adapter = PyTorchAdapter(
             cnn_with_unflatten_named, task="classification", class_names=class_names
         )
-        explainer = GradCAMExplainer(
-            model=adapter,
-            target_layer="conv2",
-            class_names=class_names
-        )
-        assert explainer._model_has_unflatten() is True
+        explainer = GradCAMExplainer(model=adapter, target_layer="conv2", class_names=class_names)
+        flat_input = np.linspace(0.0, 1.0, 784, dtype=np.float32)
 
-    def test_model_has_unflatten_false(self, class_names):
-        """_model_has_unflatten returns False for standard CNN."""
+        explanation = explainer.explain(flat_input, target_class=1)
+
+        heatmap = np.asarray(explanation.explanation_data["heatmap"])
+        assert explanation.target_class == "class_b"
+        assert explanation.explanation_data["input_shape"] == [1, 784]
+        assert explanation.explanation_data["heatmap_shape"] == [28, 28]
+        assert explanation.explanation_data["target_layer"] == "conv2"
+        assert explanation.explanation_data["target_index"] == 1
+        assert heatmap.shape == (28, 28)
+        assert np.isfinite(heatmap).all()
+        assert np.all((0.0 <= heatmap) & (heatmap <= 1.0))
+
+    def test_public_gradcam_standard_cnn_chw_contract(self, class_names):
+        """A standard CNN accepts CHW and records the normalized NCHW shape."""
+
         class StandardCNN(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -515,12 +553,19 @@ class TestBug4GradCAMFlatInput:
         from explainiverse.explainers.gradient import GradCAMExplainer
 
         adapter = PyTorchAdapter(model, task="classification", class_names=class_names)
-        explainer = GradCAMExplainer(
-            model=adapter,
-            target_layer="conv1",
-            class_names=class_names
-        )
-        assert explainer._model_has_unflatten() is False
+        explainer = GradCAMExplainer(model=adapter, target_layer="conv1", class_names=class_names)
+        image = np.linspace(0.0, 1.0, 3 * 8 * 8, dtype=np.float32).reshape(3, 8, 8)
+
+        explanation = explainer.explain(image, target_class=1)
+
+        heatmap = np.asarray(explanation.explanation_data["heatmap"])
+        assert explanation.target_class == "class_b"
+        assert explanation.explanation_data["input_shape"] == [1, 3, 8, 8]
+        assert explanation.explanation_data["heatmap_shape"] == [8, 8]
+        assert explanation.explanation_data["target_index"] == 1
+        assert heatmap.shape == (8, 8)
+        assert np.isfinite(heatmap).all()
+        assert np.all((0.0 <= heatmap) & (heatmap <= 1.0))
 
     def test_gradcam_flat_input_accepted(self, cnn_with_unflatten_named, class_names):
         """
@@ -533,11 +578,7 @@ class TestBug4GradCAMFlatInput:
         adapter = PyTorchAdapter(
             cnn_with_unflatten_named, task="classification", class_names=class_names
         )
-        explainer = GradCAMExplainer(
-            model=adapter,
-            target_layer="conv2",
-            class_names=class_names
-        )
+        explainer = GradCAMExplainer(model=adapter, target_layer="conv2", class_names=class_names)
         # Flat input — previously would raise ValueError
         flat_input = np.random.randn(784).astype(np.float32)
         explanation = explainer.explain(flat_input)
@@ -551,17 +592,14 @@ class TestBug4GradCAMFlatInput:
         adapter = PyTorchAdapter(
             cnn_with_unflatten_named, task="classification", class_names=class_names
         )
-        explainer = GradCAMExplainer(
-            model=adapter,
-            target_layer="conv2",
-            class_names=class_names
-        )
+        explainer = GradCAMExplainer(model=adapter, target_layer="conv2", class_names=class_names)
         batched_flat_input = np.random.randn(1, 784).astype(np.float32)
         explanation = explainer.explain(batched_flat_input)
         assert "heatmap" in explanation.explanation_data
 
     def test_gradcam_standard_cnn_still_rejects_flat(self, class_names):
         """Standard CNN (no Unflatten) still rejects flat input with clear error."""
+
         class StandardCNN(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -583,17 +621,20 @@ class TestBug4GradCAMFlatInput:
         from explainiverse.explainers.gradient import GradCAMExplainer
 
         adapter = PyTorchAdapter(model, task="classification", class_names=class_names)
-        explainer = GradCAMExplainer(
-            model=adapter,
-            target_layer="conv1",
-            class_names=class_names
-        )
+        explainer = GradCAMExplainer(model=adapter, target_layer="conv1", class_names=class_names)
         flat_input = np.random.randn(192).astype(np.float32)
-        with pytest.raises(ValueError, match="Expected 3D or 4D"):
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"Expected one CHW/HWC image, a \(1, C, H, W\) tensor, or a flat input "
+                r"for a model with an Unflatten layer; got shape \(192,\)"
+            ),
+        ):
             explainer.explain(flat_input)
 
     def test_gradcam_standard_cnn_4d_still_works(self, class_names):
         """Standard CNN still works with proper 4D input (no regression)."""
+
         class StandardCNN(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -623,11 +664,7 @@ class TestBug4GradCAMFlatInput:
         from explainiverse.explainers.gradient import GradCAMExplainer
 
         adapter = PyTorchAdapter(model, task="classification", class_names=class_names)
-        explainer = GradCAMExplainer(
-            model=adapter,
-            target_layer="conv1",
-            class_names=class_names
-        )
+        explainer = GradCAMExplainer(model=adapter, target_layer="conv1", class_names=class_names)
         image = np.random.randn(1, 3, 8, 8).astype(np.float32)
         explanation = explainer.explain(image)
         assert "heatmap" in explanation.explanation_data
@@ -636,6 +673,7 @@ class TestBug4GradCAMFlatInput:
 # =============================================================================
 # Bug 5: scikit-learn Dependency (pyproject.toml only — integration test)
 # =============================================================================
+
 
 class TestBug5ScikitLearnDependency:
     """
@@ -648,9 +686,10 @@ class TestBug5ScikitLearnDependency:
         """Installed scikit-learn meets the >=1.6 minimum."""
         import sklearn
         from packaging.version import Version
-        assert Version(sklearn.__version__) >= Version("1.6"), (
-            f"scikit-learn {sklearn.__version__} < 1.6 — pyproject.toml fix not applied"
-        )
+
+        assert Version(sklearn.__version__) >= Version(
+            "1.6"
+        ), f"scikit-learn {sklearn.__version__} < 1.6 — pyproject.toml fix not applied"
 
 
 if __name__ == "__main__":

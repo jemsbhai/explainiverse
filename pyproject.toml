@@ -1,14 +1,14 @@
 [project]
 name = "explainiverse"
-version = "0.13.2"
-description = "Unified, extensible explainability framework supporting 23 XAI methods including LIME, SHAP, LRP, TCAV, GradCAM, HiResCAM, ScoreCAM, and more"
+version = "0.14.0"
+description = "Unified, extensible explainability framework with audited method metadata and evaluation diagnostics"
 authors = [
     { name = "Muntaser Syed", email = "jemsbhai@gmail.com" },
 ]
 license = "MIT"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-keywords = ["xai", "explainability", "interpretability", "machine-learning", "lime", "shap", "anchors"]
+keywords = ["xai", "explainability", "interpretability", "machine-learning", "lime", "shap"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -24,16 +24,18 @@ dependencies = [
     "numpy>=1.24,<3.0",
     "lime>=0.2.0.1,<1.0",
     "scikit-learn>=1.6,<2.0",
-    "shap>=0.46,<1.0",
+    "shap>=0.46,<0.50; python_version < '3.11'",
+    "shap>=0.50,<1.0; python_version >= '3.11'",
     "pandas>=1.5,<3.0",
     "scipy>=1.10,<3.0",
-    "xgboost>=1.7,<4.0",
+    "xgboost>=1.7.3,<3.1; python_version < '3.11'",
+    "xgboost>=1.7,<4.0; python_version >= '3.11'",
 ]
 
 [project.optional-dependencies]
-torch = ["torch>=2.0"]
+torch = ["torch>=2.0", "captum>=0.8,<1.0"]
 image = ["scikit-image>=0.20"]
-all = ["torch>=2.0", "scikit-image>=0.20"]
+all = ["torch>=2.0", "captum>=0.8,<1.0", "scikit-image>=0.20"]
 
 [project.urls]
 Homepage = "https://github.com/jemsbhai/explainiverse"
@@ -48,6 +50,20 @@ pytest-cov = ">=4.1"
 black = "^24.0"
 isort = "^5.13"
 mypy = "^1.8"
+quantus = "^0.6.0"
+grad-cam = "^1.5.5"
+diff-cover = ">=9.2,<11.0"
+twine = ">=5.1,<7.0"
+
+[tool.poetry.group.tutorial]
+optional = true
+
+[tool.poetry.group.tutorial.dependencies]
+nbformat = ">=5.10,<6.0"
+nbclient = ">=0.10,<1.0"
+ipykernel = ">=6.29,<8.0"
+ipywidgets = ">=8.1,<9.0"
+matplotlib = ">=3.7,<4.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -55,6 +71,17 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 filterwarnings = []
+xfail_strict = true
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["explainiverse"]
+
+[tool.coverage.report]
+fail_under = 81
+precision = 1
+show_missing = true
 
 [tool.black]
 line-length = 100
@@ -63,6 +90,22 @@ target-version = ['py310', 'py311', 'py312']
 [tool.isort]
 profile = "black"
 line_length = 100
+
+[tool.mypy]
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = [
+    "captum.*",
+    "lime.*",
+    "nbclient.*",
+    "nbformat.*",
+    "pandas.*",
+    "scipy.*",
+    "shap.*",
+    "sklearn.*",
+]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["poetry-core"]

@@ -1,29 +1,24 @@
-import { describe, it, expect, vi } from 'vitest';
-// @ts-ignore
+import { describe, expect, it, vi } from 'vitest';
+
 import { BaseExplainer } from '../../src/core/explainer';
-// @ts-ignore
 import { Explanation } from '../../src/core/explanation';
 
-// Concrete implementation for testing
-class TestExplainer extends BaseExplainer {
-    async explain(instance: any): Promise<Explanation> {
-        return new Explanation(
-            'TestExplainer',
-            'test_class',
-            { feature_attributions: {} }
-        );
-    }
+type Model = { predict: ReturnType<typeof vi.fn> };
+
+class TestExplainer extends BaseExplainer<Model> {
+  public explain(_instance: unknown): Promise<Explanation> {
+    return Promise.resolve(
+      new Explanation('TestExplainer', 'test_class', { feature_attributions: {} }),
+    );
+  }
 }
 
 describe('BaseExplainer', () => {
-    it('should be extended by concrete classes', async () => {
-        const model = { predict: vi.fn() };
-        const explainer = new TestExplainer(model);
+  it('retains the supplied model by reference and delegates explanation semantics', async () => {
+    const model: Model = { predict: vi.fn() };
+    const explainer = new TestExplainer(model);
 
-        expect(explainer.model).toBe(model);
-
-        const explanation = await explainer.explain({});
-        expect(explanation).toBeInstanceOf(Explanation);
-        expect(explanation.explainerName).toBe('TestExplainer');
-    });
+    expect(explainer.model).toBe(model);
+    await expect(explainer.explain({})).resolves.toBeInstanceOf(Explanation);
+  });
 });

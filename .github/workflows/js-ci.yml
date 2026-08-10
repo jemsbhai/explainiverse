@@ -2,40 +2,92 @@ name: JS Package CI
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: ["main", "develop"]
     paths:
-      - 'packages/js/**'
+      - "packages/js/**"
+      - ".github/workflows/js-ci.yml"
   pull_request:
-    branches: [ "main", "develop" ]
+    branches: ["main", "develop"]
     paths:
-      - 'packages/js/**'
+      - "packages/js/**"
+      - ".github/workflows/js-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: js-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
+    name: Test and build (Node.js ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/js
 
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [18.x, 20.x]
+        node-version: [20.x, 22.x]
 
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'npm'
-        cache-dependency-path: packages/js/package-lock.json
-        
-    - name: Install dependencies
-      run: npm ci
-      
-    - name: Run tests
-      run: npm test
-      
-    - name: Build
-      run: npm run build
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: packages/js/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke-test the packed tarball as a consumer
+        shell: bash
+        run: |
+          npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/explainiverse-pack.json"
+          tarball="$(node -e "const fs = require('fs'); const result = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); process.stdout.write(result[0].filename);" "$RUNNER_TEMP/explainiverse-pack.json")"
+          consumer_dir="$RUNNER_TEMP/explainiverse-js-consumer"
+          mkdir -p "$consumer_dir"
+          cd "$consumer_dir"
+          npm init --yes
+          npm install "$RUNNER_TEMP/$tarball"
+          node - <<'NODE'
+          const root = require('explainiverse-js-experimental');
+          const core = require('explainiverse-js-experimental/core');
+          const visualizer = require('explainiverse-js-experimental/visualizer');
+
+          for (const [entryPoint, exports] of Object.entries({ root, core, visualizer })) {
+            if (Object.keys(exports).length === 0) {
+              throw new Error(`${entryPoint} entry point has no runtime exports`);
+            }
+          }
+
+          for (const [name, value] of Object.entries({
+            Explanation: root.Explanation,
+            BaseExplainer: core.BaseExplainer,
+            ExplainerRegistry: core.ExplainerRegistry,
+            ExplanationVisualizer: visualizer.ExplanationVisualizer,
+          })) {
+            if (typeof value !== 'function') {
+              throw new Error(`${name} is not a function in the packed consumer install`);
+            }
+          }
+          NODE

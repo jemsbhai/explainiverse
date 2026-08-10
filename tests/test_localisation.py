@@ -1,11 +1,10 @@
 # tests/test_localisation.py
-"""
-Comprehensive tests for Phase 3 localisation metrics.
+"""Contract and analytical tests for localisation metrics.
 
 Tests are organised by component:
   - LocalisationMask dataclass
   - Pointing Game (Zhang et al., 2018)
-  - (further metrics will be added incrementally)
+  - Additional exported localisation diagnostics
 
 Test categories per metric:
   - Basic functionality & return types
@@ -15,40 +14,40 @@ Test categories per metric:
   - Edge cases (all-zero mask, all-one mask, single element, etc.)
   - Batch operations
   - Error handling & validation
-  - Semantic validation (correct explanations score higher)
+  - Formula-controlled mask/attribution relationships
   - Explanation object input
   - Determinism / reproducibility
 """
 import numpy as np
 import pytest
 
+from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation.localisation import (
     LocalisationMask,
-    compute_pointing_game,
-    compute_batch_pointing_game,
-    compute_attribution_localisation,
-    compute_batch_attribution_localisation,
-    compute_top_k_intersection,
-    compute_batch_top_k_intersection,
-    compute_relevance_mass_accuracy,
-    compute_batch_relevance_mass_accuracy,
-    compute_relevance_rank_accuracy,
-    compute_batch_relevance_rank_accuracy,
-    compute_auc,
-    compute_batch_auc,
-    compute_energy_based_pointing_game,
-    compute_batch_energy_based_pointing_game,
-    compute_focus,
-    compute_batch_focus,
     compute_attribution_iou,
+    compute_attribution_localisation,
+    compute_auc,
     compute_batch_attribution_iou,
+    compute_batch_attribution_localisation,
+    compute_batch_auc,
+    compute_batch_energy_based_pointing_game,
+    compute_batch_focus,
+    compute_batch_pointing_game,
+    compute_batch_relevance_mass_accuracy,
+    compute_batch_relevance_rank_accuracy,
+    compute_batch_top_k_intersection,
+    compute_energy_based_pointing_game,
+    compute_focus,
+    compute_pointing_game,
+    compute_relevance_mass_accuracy,
+    compute_relevance_rank_accuracy,
+    compute_top_k_intersection,
 )
-from explainiverse.core.explanation import Explanation
-
 
 # ============================================================================
 # Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def simple_tabular_mask():
@@ -72,7 +71,11 @@ def simple_explanation():
         target_class="0",
         explanation_data={
             "feature_attributions": {
-                "f0": 0.9, "f1": 0.1, "f2": 0.5, "f3": 0.2, "f4": 0.05,
+                "f0": 0.9,
+                "f1": 0.1,
+                "f2": 0.5,
+                "f3": 0.2,
+                "f4": 0.05,
             }
         },
         feature_names=["f0", "f1", "f2", "f3", "f4"],
@@ -82,6 +85,7 @@ def simple_explanation():
 # ============================================================================
 # LocalisationMask — Construction & Validation
 # ============================================================================
+
 
 class TestLocalisationMaskConstruction:
     """Tests for LocalisationMask dataclass creation and validation."""
@@ -158,10 +162,9 @@ class TestLocalisationMaskConstruction:
         m = LocalisationMask(mask=np.ones(5))
         assert m.n_relevant == 5
 
-    def test_3d_mask_image(self):
-        m = LocalisationMask(mask=np.ones((3, 4, 4)))
-        assert m.is_image
-        assert m.shape == (3, 4, 4)
+    def test_3d_mask_rejected_as_ambiguous(self):
+        with pytest.raises(ValueError, match="one-dimensional.*two-dimensional"):
+            LocalisationMask(mask=np.ones((3, 4, 4)))
 
 
 class TestLocalisationMaskFactoryMethods:
@@ -169,7 +172,12 @@ class TestLocalisationMaskFactoryMethods:
 
     def test_from_bounding_box_basic(self):
         m = LocalisationMask.from_bounding_box(
-            height=10, width=10, y_min=2, y_max=5, x_min=3, x_max=7,
+            height=10,
+            width=10,
+            y_min=2,
+            y_max=5,
+            x_min=3,
+            x_max=7,
         )
         assert m.mask_type == "bounding_box"
         assert m.mask.shape == (10, 10)
@@ -177,20 +185,31 @@ class TestLocalisationMaskFactoryMethods:
 
     def test_from_bounding_box_full_image(self):
         m = LocalisationMask.from_bounding_box(
-            height=4, width=4, y_min=0, y_max=4, x_min=0, x_max=4,
+            height=4,
+            width=4,
+            y_min=0,
+            y_max=4,
+            x_min=0,
+            x_max=4,
         )
         assert m.n_relevant == 16
 
     def test_from_bounding_box_with_metadata(self):
         m = LocalisationMask.from_bounding_box(
-            height=10, width=10, y_min=0, y_max=2, x_min=0, x_max=2,
+            height=10,
+            width=10,
+            y_min=0,
+            y_max=2,
+            x_min=0,
+            x_max=2,
             label="dog",
         )
         assert m.metadata["label"] == "dog"
 
     def test_from_feature_indices_basic(self):
         m = LocalisationMask.from_feature_indices(
-            n_features=5, relevant_indices=[0, 2, 4],
+            n_features=5,
+            relevant_indices=[0, 2, 4],
         )
         assert m.mask_type == "feature_set"
         assert m.n_relevant == 3
@@ -198,25 +217,30 @@ class TestLocalisationMaskFactoryMethods:
 
     def test_from_feature_indices_empty(self):
         m = LocalisationMask.from_feature_indices(
-            n_features=3, relevant_indices=[],
+            n_features=3,
+            relevant_indices=[],
         )
         assert m.n_relevant == 0
 
     def test_from_feature_indices_invalid_index(self):
         with pytest.raises(ValueError, match="out of range"):
             LocalisationMask.from_feature_indices(
-                n_features=3, relevant_indices=[5],
+                n_features=3,
+                relevant_indices=[5],
             )
 
     def test_from_feature_indices_negative_index(self):
         with pytest.raises(ValueError, match="out of range"):
             LocalisationMask.from_feature_indices(
-                n_features=3, relevant_indices=[-1],
+                n_features=3,
+                relevant_indices=[-1],
             )
 
     def test_from_feature_indices_with_metadata(self):
         m = LocalisationMask.from_feature_indices(
-            n_features=5, relevant_indices=[1], source="expert",
+            n_features=5,
+            relevant_indices=[1],
+            source="expert",
         )
         assert m.metadata["source"] == "expert"
 
@@ -224,6 +248,7 @@ class TestLocalisationMaskFactoryMethods:
 # ============================================================================
 # Pointing Game — Basic Functionality
 # ============================================================================
+
 
 class TestPointingGameBasic:
     """Basic functionality tests for Pointing Game."""
@@ -272,18 +297,20 @@ class TestPointingGameImageData:
         a[3, 3] = 1.0  # outside the mask
         assert compute_pointing_game(a, simple_image_mask) == 0.0
 
-    def test_3d_attribution_2d_mask(self, simple_image_mask):
+    def test_3d_attribution_2d_mask_rejected(self, simple_image_mask):
         # (C, H, W) attribution, (H, W) mask — channel sum
         a = np.zeros((3, 4, 4))
         a[0, 0, 0] = 0.5
         a[1, 0, 0] = 0.3
         a[2, 0, 0] = 0.2  # total at (0,0) = 1.0, inside mask
-        assert compute_pointing_game(a, simple_image_mask) == 1.0
+        with pytest.raises(ValueError, match="pre-pooled"):
+            compute_pointing_game(a, simple_image_mask)
 
-    def test_3d_attribution_2d_mask_miss(self, simple_image_mask):
+    def test_3d_attribution_2d_mask_miss_rejected(self, simple_image_mask):
         a = np.zeros((3, 4, 4))
         a[:, 3, 3] = 1.0  # outside mask
-        assert compute_pointing_game(a, simple_image_mask) == 0.0
+        with pytest.raises(ValueError, match="pre-pooled"):
+            compute_pointing_game(a, simple_image_mask)
 
 
 class TestPointingGameTolerance:
@@ -317,11 +344,12 @@ class TestPointingGameTolerance:
         a[4, 4] = 1.0  # 4 pixels away
         assert compute_pointing_game(a, mask, tolerance=1) == 0.0
 
-    def test_tolerance_ignored_for_tabular(self, simple_tabular_mask):
+    def test_tolerance_rejected_for_tabular(self, simple_tabular_mask):
         """Tolerance only applies to spatial (≥2D) masks; 1-D uses flat path."""
         a = np.array([0.1, 0.9, 0.3, 0.2, 0.05])  # max at idx 1, not in mask
         # tolerance is ignored for 1-D
-        assert compute_pointing_game(a, simple_tabular_mask, tolerance=1) == 0.0
+        with pytest.raises(ValueError, match="only for 2-D"):
+            compute_pointing_game(a, simple_tabular_mask, tolerance=1)
 
 
 class TestPointingGameWithLocalisationMask:
@@ -329,14 +357,20 @@ class TestPointingGameWithLocalisationMask:
 
     def test_with_feature_set_mask(self):
         m = LocalisationMask.from_feature_indices(
-            n_features=5, relevant_indices=[0, 2],
+            n_features=5,
+            relevant_indices=[0, 2],
         )
         a = np.array([0.9, 0.1, 0.3, 0.2, 0.05])
         assert compute_pointing_game(a, m) == 1.0
 
     def test_with_bounding_box_mask(self):
         m = LocalisationMask.from_bounding_box(
-            height=4, width=4, y_min=0, y_max=2, x_min=0, x_max=2,
+            height=4,
+            width=4,
+            y_min=0,
+            y_max=2,
+            x_min=0,
+            x_max=2,
         )
         a = np.zeros((4, 4))
         a[0, 0] = 1.0
@@ -356,9 +390,7 @@ class TestPointingGameWithExplanation:
 
     def test_explanation_input_hit(self, simple_explanation, simple_tabular_mask):
         # f0=0.9 is max, and feature 0 is in mask
-        assert compute_pointing_game(
-            simple_explanation, simple_tabular_mask
-        ) == 1.0
+        assert compute_pointing_game(simple_explanation, simple_tabular_mask) == 1.0
 
     def test_explanation_input_miss(self, simple_explanation):
         mask = np.array([0, 0, 0, 1, 1])  # features 3,4 relevant
@@ -377,21 +409,24 @@ class TestPointingGameEdgeCases:
     def test_single_element_miss(self):
         a = np.array([1.0])
         s = np.array([0.0])
-        assert compute_pointing_game(a, s) == 0.0
+        with pytest.raises(ValueError, match="no relevant elements"):
+            compute_pointing_game(a, s)
 
     def test_all_zero_attributions(self):
         # argmax of all-zero is index 0
         a = np.zeros(5)
         s = np.array([1, 0, 0, 0, 0], dtype=np.float64)
-        assert compute_pointing_game(a, s) == 1.0
+        with pytest.raises(ValueError, match="uniform"):
+            compute_pointing_game(a, s)
 
     def test_all_equal_attributions_hit(self):
         a = np.ones(5) * 0.5
         s = np.array([1, 0, 0, 0, 0], dtype=np.float64)
         # argmax returns first occurrence (idx 0), which is in mask
-        assert compute_pointing_game(a, s) == 1.0
+        with pytest.raises(ValueError, match="uniform"):
+            compute_pointing_game(a, s)
 
-    def test_multiple_maxima_first_wins(self):
+    def test_multiple_maxima_any_hit_wins(self):
         # Two equal maxima; np.argmax returns the first
         a = np.array([0.1, 0.9, 0.9, 0.1])
         s = np.array([0, 1, 0, 0], dtype=np.float64)  # idx 1 in mask
@@ -408,7 +443,7 @@ class TestPointingGameEdgeCases:
         s = np.zeros(10000)
         max_idx = np.argmax(np.abs(a))
         s[max_idx] = 1.0  # put the mask exactly at the argmax
-        assert compute_pointing_game(a, s) == 1.0
+        assert compute_pointing_game(a, s, use_abs=True) == 1.0
 
 
 class TestPointingGameErrorHandling:
@@ -444,14 +479,12 @@ class TestPointingGameDeterminism:
 
     def test_deterministic_results(self, simple_tabular_mask):
         a = np.array([0.9, 0.1, 0.3, 0.2, 0.05])
-        results = [
-            compute_pointing_game(a, simple_tabular_mask) for _ in range(10)
-        ]
+        results = [compute_pointing_game(a, simple_tabular_mask) for _ in range(10)]
         assert all(r == results[0] for r in results)
 
 
-class TestPointingGameSemantic:
-    """Semantic validation: good explanations should score higher."""
+class TestPointingGameFormula:
+    """Direct consequences of the Pointing Game definition."""
 
     def test_perfect_explanation_scores_1(self):
         """If max attribution is always inside mask, score is 1."""
@@ -465,37 +498,11 @@ class TestPointingGameSemantic:
         a = np.array([0.0, 0.0, 0.0, 0.0, 1.0])
         assert compute_pointing_game(a, s) == 0.0
 
-    def test_random_vs_targeted(self):
-        """Over many samples, targeted explanations should beat random."""
-        rng = np.random.default_rng(42)
-        n_samples = 100
-        n_features = 20
-        targeted_hits = 0
-        random_hits = 0
-
-        for _ in range(n_samples):
-            # Create a random mask with ~25% relevant features
-            s = (rng.random(n_features) < 0.25).astype(np.float64)
-            if s.sum() == 0:
-                s[0] = 1.0  # ensure at least one relevant
-
-            # Targeted: put max attribution on a relevant feature
-            relevant_idx = np.where(s == 1)[0]
-            a_targeted = rng.random(n_features) * 0.1
-            a_targeted[rng.choice(relevant_idx)] = 1.0
-            targeted_hits += compute_pointing_game(a_targeted, s)
-
-            # Random: uniformly random attributions
-            a_random = rng.random(n_features)
-            random_hits += compute_pointing_game(a_random, s)
-
-        assert targeted_hits == n_samples  # targeted always hits
-        assert random_hits < targeted_hits  # random should be worse
-
 
 # ============================================================================
 # Batch Pointing Game
 # ============================================================================
+
 
 class TestBatchPointingGame:
     """Tests for compute_batch_pointing_game."""
@@ -573,6 +580,7 @@ class TestBatchPointingGame:
 # Attribution Localisation (Kohlbrenner et al., 2020)
 # ============================================================================
 
+
 class TestAttributionLocalisationBasic:
     """Core functionality of Attribution Localisation."""
 
@@ -610,16 +618,18 @@ class TestAttributionLocalisationBasic:
         assert compute_attribution_localisation(a, s, use_abs=True) == pytest.approx(0.8)
 
     def test_all_zero_attributions(self):
-        """All-zero attributions → 0.0."""
+        """The positive-relevance ratio is undefined with zero mass."""
         a = np.zeros(5)
         s = np.array([1, 1, 0, 0, 0])
-        assert compute_attribution_localisation(a, s) == 0.0
+        with pytest.raises(ValueError, match="total positive relevance is zero"):
+            compute_attribution_localisation(a, s)
 
     def test_all_negative_attributions(self):
-        """All negative attributions → 0.0 (no positive mass)."""
+        """All-negative inputs also have no positive mass."""
         a = np.array([-0.5, -0.3, -0.1])
         s = np.array([1, 0, 0])
-        assert compute_attribution_localisation(a, s) == 0.0
+        with pytest.raises(ValueError, match="total positive relevance is zero"):
+            compute_attribution_localisation(a, s)
 
     def test_return_type(self):
         a = np.array([1.0, 0.0])
@@ -644,12 +654,13 @@ class TestAttributionLocalisationImage:
         s[0:2, 0:2] = 1.0  # 4 of 16 pixels
         assert compute_attribution_localisation(a, s) == pytest.approx(4.0 / 16.0)
 
-    def test_3d_with_channels(self):
+    def test_3d_with_channels_rejected(self):
         a = np.zeros((3, 4, 4))
         a[:, 0:2, 0:2] = 1.0  # all channels, top-left
         s = np.zeros((4, 4))
         s[0:2, 0:2] = 1.0
-        assert compute_attribution_localisation(a, s) == pytest.approx(1.0)
+        with pytest.raises(ValueError, match="pre-pooled"):
+            compute_attribution_localisation(a, s)
 
 
 class TestAttributionLocalisationWithDataclass:
@@ -662,6 +673,7 @@ class TestAttributionLocalisationWithDataclass:
 
     def test_explanation_input(self):
         from explainiverse.core import Explanation
+
         exp = Explanation(
             explainer_name="test",
             target_class="pos",
@@ -673,6 +685,42 @@ class TestAttributionLocalisationWithDataclass:
         # positive inside = 0.8, total positive = 1.0
         assert compute_attribution_localisation(exp, s) == pytest.approx(0.8)
 
+    def test_named_explanation_rejects_extra_feature_identity(self):
+        exp = Explanation(
+            explainer_name="test",
+            target_class="pos",
+            explanation_data={"feature_attributions": {"f0": 0.8, "f1": 0.2}},
+            feature_names=["f0"],
+        )
+        with pytest.raises(ValueError, match="unexpected attributions"):
+            compute_attribution_localisation(exp, np.array([1]))
+
+    def test_unnamed_explanation_requires_complete_indexed_keys(self):
+        ambiguous = Explanation(
+            explainer_name="test",
+            target_class="pos",
+            explanation_data={"feature_attributions": {"age": 0.8, "income": 0.2}},
+        )
+        with pytest.raises(ValueError, match="without feature_names"):
+            compute_attribution_localisation(ambiguous, np.array([1, 0]))
+
+        incomplete = Explanation(
+            explainer_name="test",
+            target_class="pos",
+            explanation_data={"feature_attributions": {"f0": 0.8, "f2": 0.2}},
+        )
+        with pytest.raises(ValueError, match="cover every zero-based index"):
+            compute_attribution_localisation(incomplete, np.array([1, 0]))
+
+    def test_unnamed_indexed_explanation_is_ordered_by_feature_index(self):
+        exp = Explanation(
+            explainer_name="test",
+            target_class="pos",
+            explanation_data={"feature_attributions": {"f1": 0.2, "f0": 0.8}},
+        )
+
+        assert compute_attribution_localisation(exp, np.array([1, 0])) == pytest.approx(0.8)
+
 
 class TestAttributionLocalisationSemantic:
     """Semantic validation tests."""
@@ -682,7 +730,9 @@ class TestAttributionLocalisationSemantic:
         s = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
         a_good = np.array([0.9, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         a_bad = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
-        assert compute_attribution_localisation(a_good, s) > compute_attribution_localisation(a_bad, s)
+        assert compute_attribution_localisation(a_good, s) > compute_attribution_localisation(
+            a_bad, s
+        )
 
 
 class TestAttributionLocalisationErrorHandling:
@@ -723,6 +773,7 @@ class TestBatchAttributionLocalisation:
 # Top-K Intersection (Theiner et al., 2021)
 # ============================================================================
 
+
 class TestTopKIntersectionBasic:
     """Core functionality of Top-K Intersection."""
 
@@ -745,12 +796,11 @@ class TestTopKIntersectionBasic:
         # top-2 by abs: indices 0 (0.9) and 2 (0.8); s[0]=1, s[2]=0 → 1/2
         assert compute_top_k_intersection(a, s, k=2) == pytest.approx(0.5)
 
-    def test_default_k_equals_mask_size(self):
-        """Default k = sum(mask)."""
+    def test_k_must_be_explicit(self):
         a = np.array([0.9, 0.8, 0.7, 0.1, 0.0])
-        s = np.array([1, 1, 1, 0, 0])  # |s| = 3
-        # top-3 by abs: indices 0, 1, 2 — all in mask
-        assert compute_top_k_intersection(a, s) == pytest.approx(1.0)
+        s = np.array([1, 1, 1, 0, 0])
+        with pytest.raises(ValueError, match="explicit k"):
+            compute_top_k_intersection(a, s)
 
     def test_use_abs_false(self):
         """When use_abs=False, rank by raw value (negatives rank low)."""
@@ -783,13 +833,11 @@ class TestTopKIntersectionEdgeCases:
         s = np.array([0, 1, 0])
         assert compute_top_k_intersection(a, s, k=1) == pytest.approx(1.0)
 
-    def test_all_zero_mask_warns(self):
-        """All-zero mask → warning and 0.0."""
+    def test_all_zero_mask_raises(self):
         a = np.array([0.5, 0.3])
         s = np.zeros(2)
-        with pytest.warns(UserWarning, match="no relevant elements"):
-            result = compute_top_k_intersection(a, s, k=1)
-        assert result == 0.0
+        with pytest.raises(ValueError, match="no relevant elements"):
+            compute_top_k_intersection(a, s, k=1)
 
     def test_k_zero_raises(self):
         with pytest.raises(ValueError, match="positive integer"):
@@ -805,7 +853,7 @@ class TestTopKIntersectionEdgeCases:
 
     def test_shape_mismatch(self):
         with pytest.raises(ValueError, match="does not match"):
-            compute_top_k_intersection(np.ones(5), np.ones(3))
+            compute_top_k_intersection(np.ones(5), np.ones(3), k=1)
 
 
 class TestTopKIntersectionImage:
@@ -828,7 +876,9 @@ class TestTopKIntersectionSemantic:
         s = np.array([1, 1, 0, 0, 0, 0, 0, 0])
         a_good = np.array([0.9, 0.8, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0])
         a_bad = np.array([0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.8, 0.9])
-        assert compute_top_k_intersection(a_good, s, k=2) > compute_top_k_intersection(a_bad, s, k=2)
+        assert compute_top_k_intersection(a_good, s, k=2) > compute_top_k_intersection(
+            a_bad, s, k=2
+        )
 
 
 class TestBatchTopKIntersection:
@@ -851,6 +901,7 @@ class TestBatchTopKIntersection:
 # Relevance Mass Accuracy (Arras et al., 2022)
 # ============================================================================
 
+
 class TestRelevanceMassAccuracyBasic:
     """Core functionality of Relevance Mass Accuracy."""
 
@@ -869,36 +920,31 @@ class TestRelevanceMassAccuracyBasic:
         # inside mask = 0, total = 1.625 → 0.0
         assert compute_relevance_mass_accuracy(a, s) == pytest.approx(0.0)
 
-    def test_normalise_effect(self):
-        """normalise=True shifts values to [0,1] first."""
-        a = np.array([-1.0, 1.0])  # → normalised [0.0, 1.0]
+    def test_scale_normalisation_preserves_ratio(self):
+        """Max scaling is valid because it preserves the mass ratio."""
+        a = np.array([2.0, 1.0])
         s = np.array([1, 0])
-        # normalised: [0.0, 1.0]; positive inside = 0; total = 1.0 → 0.0
-        assert compute_relevance_mass_accuracy(a, s, normalise=True) == pytest.approx(0.0)
-        # without normalise: positive of [-1, 1] → [0, 1]; inside = 0; total = 1 → 0.0
-        assert compute_relevance_mass_accuracy(a, s, normalise=False) == pytest.approx(0.0)
+        with_norm = compute_relevance_mass_accuracy(a, s, normalise=True)
+        without_norm = compute_relevance_mass_accuracy(a, s, normalise=False)
+        assert with_norm == pytest.approx(2.0 / 3.0)
+        assert with_norm == pytest.approx(without_norm)
 
-    def test_normalise_makes_difference(self):
-        """Show normalisation changes the result."""
-        a = np.array([-0.5, 0.1, 0.3])  # positive: [0, 0.1, 0.3]
+    def test_signed_heatmap_requires_explicit_pooling(self):
+        a = np.array([-0.5, 0.1, 0.3])
         s = np.array([1, 1, 0])
-        # Without normalise: inside = 0.0 + 0.1 = 0.1, total = 0.4, ratio = 0.25
-        r_no_norm = compute_relevance_mass_accuracy(a, s, normalise=False)
-        assert r_no_norm == pytest.approx(0.1 / 0.4)
-        # With normalise: a → [0.0, 0.75, 1.0]; inside = 0 + 0.75, total = 1.75
-        r_norm = compute_relevance_mass_accuracy(a, s, normalise=True)
-        assert r_norm == pytest.approx(0.75 / 1.75)
+        with pytest.raises(ValueError, match="non-negative, pre-pooled"):
+            compute_relevance_mass_accuracy(a, s)
 
-    def test_all_zero_returns_zero(self):
+    def test_all_zero_raises(self):
         a = np.zeros(4)
         s = np.array([1, 1, 0, 0])
-        assert compute_relevance_mass_accuracy(a, s) == 0.0
+        with pytest.raises(ValueError, match="total relevance is zero"):
+            compute_relevance_mass_accuracy(a, s)
 
-    def test_constant_attributions_returns_zero(self):
-        """Constant attributions → normalised to all zeros → 0.0."""
+    def test_constant_positive_attributions_return_mask_fraction(self):
         a = np.array([0.5, 0.5, 0.5])
         s = np.array([1, 0, 0])
-        assert compute_relevance_mass_accuracy(a, s, normalise=True) == 0.0
+        assert compute_relevance_mass_accuracy(a, s, normalise=True) == pytest.approx(1.0 / 3.0)
 
     def test_use_abs(self):
         """use_abs takes absolute before normalisation."""
@@ -919,23 +965,19 @@ class TestRelevanceMassAccuracyVsAttributionLocalisation:
     """Verify relationship to Attribution Localisation."""
 
     def test_equivalent_without_normalisation(self):
-        """Without normalisation, RMA == AL."""
-        a = np.array([0.6, -0.2, 0.4, 0.1])
+        """For a non-negative map, RMA equals Attribution Localisation."""
+        a = np.array([0.6, 0.2, 0.4, 0.1])
         s = np.array([1, 0, 0, 1])
         al = compute_attribution_localisation(a, s)
         rma = compute_relevance_mass_accuracy(a, s, normalise=False)
         assert al == pytest.approx(rma)
 
-    def test_different_with_normalisation(self):
-        """With normalisation, RMA may differ from AL."""
-        a = np.array([-1.0, 0.5, 1.0, 0.0])
+    def test_scale_normalisation_does_not_change_rma(self):
+        a = np.array([1.0, 0.5, 0.25, 0.0])
         s = np.array([1, 1, 0, 0])
-        al = compute_attribution_localisation(a, s)
-        rma = compute_relevance_mass_accuracy(a, s, normalise=True)
-        # They should generally differ (though not guaranteed for all inputs)
-        # At minimum, both should be valid [0,1]
-        assert 0.0 <= al <= 1.0
-        assert 0.0 <= rma <= 1.0
+        raw = compute_relevance_mass_accuracy(a, s, normalise=False)
+        scaled = compute_relevance_mass_accuracy(a, s, normalise=True)
+        assert scaled == pytest.approx(raw)
 
 
 class TestRelevanceMassAccuracyImage:
@@ -967,14 +1009,14 @@ class TestBatchRelevanceMassAccuracy:
     def test_batch_normalise_kwarg(self):
         a = np.array([0.5, 0.5, 0.5])
         s = np.array([1, 0, 0])
-        # normalise=True with constant → 0.0
         results = compute_batch_relevance_mass_accuracy([a], [s], normalise=True)
-        assert results[0] == 0.0
+        assert results[0] == pytest.approx(1.0 / 3.0)
 
 
 # ============================================================================
 # Relevance Rank Accuracy (Arras et al., 2022)
 # ============================================================================
+
 
 class TestRelevanceRankAccuracyBasic:
     """Core functionality of Relevance Rank Accuracy."""
@@ -1001,17 +1043,15 @@ class TestRelevanceRankAccuracyBasic:
     def test_use_abs_false(self):
         a = np.array([-0.9, 0.5, 0.3])
         s = np.array([1, 0, 0])  # |s|=1
-        # use_abs=False: top-1 by raw = index 1 (0.5); s[1]=0 → 0.0
-        assert compute_relevance_rank_accuracy(a, s, use_abs=False) == pytest.approx(0.0)
-        # use_abs=True: top-1 by abs = index 0 (0.9); s[0]=1 → 1.0
+        with pytest.raises(ValueError, match="non-negative, pre-pooled"):
+            compute_relevance_rank_accuracy(a, s, use_abs=False)
         assert compute_relevance_rank_accuracy(a, s, use_abs=True) == pytest.approx(1.0)
 
-    def test_all_zero_mask_warns(self):
+    def test_all_zero_mask_raises(self):
         a = np.array([0.5, 0.3])
         s = np.zeros(2)
-        with pytest.warns(UserWarning, match="no relevant elements"):
-            result = compute_relevance_rank_accuracy(a, s)
-        assert result == 0.0
+        with pytest.raises(ValueError, match="no relevant elements"):
+            compute_relevance_rank_accuracy(a, s)
 
     def test_return_type(self):
         a = np.array([1.0, 0.0])
@@ -1051,7 +1091,9 @@ class TestRelevanceRankAccuracySemantic:
         s = np.array([1, 1, 0, 0, 0, 0, 0, 0])
         a_good = np.array([0.9, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         a_bad = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
-        assert compute_relevance_rank_accuracy(a_good, s) >= compute_relevance_rank_accuracy(a_bad, s)
+        assert compute_relevance_rank_accuracy(a_good, s) == pytest.approx(1.0)
+        with pytest.raises(ValueError, match="tie straddles"):
+            compute_relevance_rank_accuracy(a_bad, s)
 
 
 class TestBatchRelevanceRankAccuracy:
@@ -1073,6 +1115,7 @@ class TestBatchRelevanceRankAccuracy:
 # ============================================================================
 # AUC (Fawcett, 2006)
 # ============================================================================
+
 
 class TestAUCBasic:
     """Core functionality of ROC-AUC localisation metric."""
@@ -1125,19 +1168,17 @@ class TestAUCBasic:
 class TestAUCEdgeCases:
     """Edge cases for AUC."""
 
-    def test_all_zero_mask_warns(self):
+    def test_all_zero_mask_raises(self):
         a = np.array([0.5, 0.3])
         s = np.zeros(2)
-        with pytest.warns(UserWarning, match="degenerate"):
-            result = compute_auc(a, s)
-        assert result == 0.5
+        with pytest.raises(ValueError, match="no relevant elements"):
+            compute_auc(a, s)
 
-    def test_all_one_mask_warns(self):
+    def test_all_one_mask_raises(self):
         a = np.array([0.5, 0.3])
         s = np.ones(2)
-        with pytest.warns(UserWarning, match="degenerate"):
-            result = compute_auc(a, s)
-        assert result == 0.5
+        with pytest.raises(ValueError, match="no negative elements"):
+            compute_auc(a, s)
 
     def test_two_elements_perfect(self):
         """Smallest non-degenerate case."""
@@ -1203,6 +1244,7 @@ class TestBatchAUC:
 # Energy-Based Pointing Game (Wang et al., 2020)
 # ============================================================================
 
+
 class TestEBPGBasic:
     """Core functionality of Energy-Based Pointing Game."""
 
@@ -1225,20 +1267,17 @@ class TestEBPGBasic:
         # inside = 0.5, total = 1.0
         assert compute_energy_based_pointing_game(a, s) == pytest.approx(0.5)
 
-    def test_negative_attributions_included(self):
-        """Unlike AL, negative attributions are NOT clipped."""
+    def test_negative_attributions_rejected(self):
         a = np.array([0.8, -0.2, 0.0, 0.0])
         s = np.array([1, 1, 0, 0])
-        # inside = 0.8 + (-0.2) = 0.6, total = 0.8 + (-0.2) = 0.6
-        assert compute_energy_based_pointing_game(a, s) == pytest.approx(1.0)
+        with pytest.raises(ValueError, match="non-negative saliency"):
+            compute_energy_based_pointing_game(a, s)
 
-    def test_negative_result_possible(self):
-        """With negative attributions, result can be negative."""
+    def test_signed_map_cannot_produce_out_of_range_score(self):
         a = np.array([-0.5, 0.0, 0.8, 0.0])
         s = np.array([1, 0, 0, 0])
-        # inside = -0.5, total = 0.3 → -0.5/0.3 < 0
-        result = compute_energy_based_pointing_game(a, s)
-        assert result < 0.0
+        with pytest.raises(ValueError, match="non-negative saliency"):
+            compute_energy_based_pointing_game(a, s)
 
     def test_use_abs(self):
         """use_abs makes all attributions positive."""
@@ -1247,10 +1286,11 @@ class TestEBPGBasic:
         # abs: [0.5, 0.0, 0.3, 0.0]; inside = 0.5, total = 0.8
         assert compute_energy_based_pointing_game(a, s, use_abs=True) == pytest.approx(0.5 / 0.8)
 
-    def test_all_zero_returns_zero(self):
+    def test_all_zero_raises(self):
         a = np.zeros(4)
         s = np.array([1, 1, 0, 0])
-        assert compute_energy_based_pointing_game(a, s) == 0.0
+        with pytest.raises(ValueError, match="total saliency energy is zero"):
+            compute_energy_based_pointing_game(a, s)
 
     def test_return_type(self):
         a = np.array([1.0, 0.0])
@@ -1269,15 +1309,11 @@ class TestEBPGVsAttributionLocalisation:
         ebpg = compute_energy_based_pointing_game(a, s)
         assert al == pytest.approx(ebpg)
 
-    def test_different_for_negative(self):
-        """For negative attributions, they differ."""
+    def test_signed_input_requires_explicit_preprocessing(self):
         a = np.array([0.5, -0.3, 0.4, 0.0])
         s = np.array([1, 1, 0, 0])
-        al = compute_attribution_localisation(a, s)  # uses max(a,0)
-        ebpg = compute_energy_based_pointing_game(a, s)  # uses raw a
-        # AL: positive inside = 0.5, total positive = 0.9 → 0.556
-        # EBPG: inside = 0.5 + (-0.3) = 0.2, total = 0.6 → 0.333
-        assert al != pytest.approx(ebpg)
+        with pytest.raises(ValueError, match="non-negative saliency"):
+            compute_energy_based_pointing_game(a, s)
 
 
 class TestEBPGImage:
@@ -1304,59 +1340,64 @@ class TestBatchEBPG:
 
     def test_batch_size_mismatch(self):
         with pytest.raises(ValueError, match="Batch sizes"):
-            compute_batch_energy_based_pointing_game(
-                [np.ones(3)], [np.ones(3), np.ones(3)]
-            )
+            compute_batch_energy_based_pointing_game([np.ones(3)], [np.ones(3), np.ones(3)])
 
 
 # ============================================================================
 # Focus (Arias-Duart et al., 2022)
 # ============================================================================
 
+
 class TestFocusBasic:
     """Core functionality of Focus metric."""
 
     def test_perfect_focus(self):
-        """All positive attribution in the target tile."""
-        a = np.array([0.8, 0.5, 0.0, 0.0])
-        s = np.array([1, 1, 0, 0])
+        a = np.zeros((4, 4))
+        a[:2, :] = 1.0
+        s = np.zeros((4, 4))
+        s[:2, :] = 1.0
         assert compute_focus(a, s) == pytest.approx(1.0)
 
     def test_no_focus(self):
-        """No positive attribution in the target tile."""
-        a = np.array([0.0, 0.0, 0.8, 0.5])
-        s = np.array([1, 1, 0, 0])
+        a = np.zeros((4, 4))
+        a[2:, :] = 1.0
+        s = np.zeros((4, 4))
+        s[:2, :] = 1.0
         assert compute_focus(a, s) == pytest.approx(0.0)
 
     def test_partial_focus(self):
-        """Some positive attribution in and out of tile."""
-        a = np.array([0.6, 0.0, 0.4, 0.0])
-        s = np.array([1, 0, 0, 0])
-        assert compute_focus(a, s) == pytest.approx(0.6 / 1.0)
+        a = np.ones((4, 4))
+        s = np.zeros((4, 4))
+        s[:2, :] = 1.0
+        assert compute_focus(a, s) == pytest.approx(0.5)
 
     def test_negative_attributions_clipped(self):
-        """Focus uses max(a, 0), so negatives are ignored."""
-        a = np.array([0.5, -0.8, 0.0, 0.0])
-        s = np.array([1, 1, 0, 0])
+        a = np.full((4, 4), -1.0)
+        a[:2, :] = 0.5
+        s = np.zeros((4, 4))
+        s[:2, :] = 1.0
         assert compute_focus(a, s) == pytest.approx(1.0)
 
-    def test_all_zero_returns_zero(self):
-        a = np.zeros(4)
-        s = np.array([1, 1, 0, 0])
-        assert compute_focus(a, s) == 0.0
+    def test_all_zero_raises(self):
+        a = np.zeros((4, 4))
+        s = np.zeros((4, 4))
+        s[:2, :] = 1.0
+        with pytest.raises(ValueError, match="total positive relevance is zero"):
+            compute_focus(a, s)
 
     def test_return_type(self):
-        a = np.array([1.0, 0.0])
-        s = np.array([1, 0])
+        a = np.ones((2, 2))
+        s = np.array([[1, 1], [0, 0]])
         assert isinstance(compute_focus(a, s), float)
 
 
 class TestFocusEquivalenceToAL:
-    """Focus is mathematically identical to Attribution Localisation."""
+    """The ratio matches AL once the canonical mosaic is established."""
 
     def test_equivalent_to_al_default(self):
-        a = np.array([0.7, -0.2, 0.3, 0.1, 0.0])
-        s = np.array([1, 1, 0, 0, 0])
+        a = np.arange(16, dtype=float).reshape(4, 4) - 4.0
+        s = np.zeros((4, 4))
+        s[:, :2] = 1.0
         al = compute_attribution_localisation(a, s, use_abs=False)
         focus = compute_focus(a, s)
         assert al == pytest.approx(focus)
@@ -1366,39 +1407,52 @@ class TestFocusMosaicScenario:
     """Simulated mosaic evaluation scenario."""
 
     def test_2x2_mosaic_correct_tile(self):
-        """4-tile mosaic, attribution concentrated in correct tile."""
         a = np.zeros((8, 8))
-        # Correct tile is top-left quadrant
         a[0:4, 0:4] = 0.9
-        # Some noise in other tiles
-        a[4:8, 0:4] = 0.05
+        a[4:8, 4:8] = 0.9
         a[0:4, 4:8] = 0.05
 
         s = np.zeros((8, 8))
-        s[0:4, 0:4] = 1.0  # correct tile mask
+        s[0:4, 0:4] = 1.0
+        s[4:8, 4:8] = 1.0
 
         result = compute_focus(a, s)
-        assert result > 0.8  # Most mass in correct tile
+        assert result > 0.8
 
     def test_2x2_mosaic_wrong_tile(self):
-        """Attribution concentrated in wrong tile."""
         a = np.zeros((8, 8))
-        a[4:8, 4:8] = 0.9  # Bottom-right tile
+        a[0:4, 4:8] = 0.9
+        a[4:8, 0:4] = 0.9
 
         s = np.zeros((8, 8))
-        s[0:4, 0:4] = 1.0  # Top-left is correct
+        s[0:4, 0:4] = 1.0
+        s[4:8, 4:8] = 1.0
 
         result = compute_focus(a, s)
         assert result == pytest.approx(0.0)
+
+    def test_arbitrary_region_rejected(self):
+        a = np.ones((8, 8))
+        s = np.zeros((8, 8))
+        s[1:3, 1:3] = 1.0
+        with pytest.raises(ValueError, match="complete mosaic quadrants"):
+            compute_focus(a, s)
+
+    def test_one_target_quadrant_rejected(self):
+        a = np.ones((8, 8))
+        s = np.zeros((8, 8))
+        s[:4, :4] = 1.0
+        with pytest.raises(ValueError, match="exactly two"):
+            compute_focus(a, s)
 
 
 class TestBatchFocus:
     """Batch processing."""
 
     def test_basic_batch(self):
-        a1 = np.array([1.0, 0.0])
-        a2 = np.array([0.0, 1.0])
-        s = np.array([1, 0])
+        a1 = np.array([[1.0, 1.0], [0.0, 0.0]])
+        a2 = np.array([[0.0, 0.0], [1.0, 1.0]])
+        s = np.array([[1, 1], [0, 0]])
         results = compute_batch_focus([a1, a2], [s, s])
         assert results[0] == pytest.approx(1.0)
         assert results[1] == pytest.approx(0.0)
@@ -1411,6 +1465,7 @@ class TestBatchFocus:
 # ============================================================================
 # Attribution IoU
 # ============================================================================
+
 
 class TestAttributionIoUBasic:
     """Core functionality of Attribution IoU."""
@@ -1515,9 +1570,7 @@ class TestAttributionIoUParameterValidation:
 
     def test_both_threshold_and_percentile_raises(self):
         with pytest.raises(ValueError, match="Exactly one"):
-            compute_attribution_iou(
-                np.ones(3), np.ones(3), threshold=0.5, percentile=50
-            )
+            compute_attribution_iou(np.ones(3), np.ones(3), threshold=0.5, percentile=50)
 
     def test_shape_mismatch(self):
         with pytest.raises(ValueError, match="does not match"):
@@ -1527,12 +1580,11 @@ class TestAttributionIoUParameterValidation:
 class TestAttributionIoUEdgeCases:
     """Edge cases."""
 
-    def test_empty_union_returns_zero(self):
-        """Both binarised attribution and mask are all zeros."""
+    def test_empty_ground_truth_region_raises(self):
         a = np.array([0.0, 0.0, 0.0])
         s = np.array([0, 0, 0])
-        # threshold > max → binarised all 0; mask all 0 → union = 0
-        assert compute_attribution_iou(a, s, threshold=0.5) == 0.0
+        with pytest.raises(ValueError, match="no relevant elements"):
+            compute_attribution_iou(a, s, threshold=0.5)
 
     def test_high_threshold_no_selection(self):
         """Threshold so high nothing is selected."""
@@ -1579,9 +1631,7 @@ class TestBatchAttributionIoU:
 
     def test_batch_size_mismatch(self):
         with pytest.raises(ValueError, match="Batch sizes"):
-            compute_batch_attribution_iou(
-                [np.ones(3)], [np.ones(3), np.ones(3)], threshold=0.5
-            )
+            compute_batch_attribution_iou([np.ones(3)], [np.ones(3), np.ones(3)], threshold=0.5)
 
     def test_batch_percentile_kwarg(self):
         a = np.array([0.0, 0.5, 1.0])

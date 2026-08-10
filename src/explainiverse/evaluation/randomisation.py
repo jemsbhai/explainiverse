@@ -1,6 +1,6 @@
 # src/explainiverse/evaluation/randomisation.py
 """
-Randomisation evaluation metrics for explanations (Phase 5).
+Randomisation diagnostics for explanations.
 
 Implements:
 - Model Parameter Randomisation Test — MPRT (Adebayo et al., 2018)
@@ -9,22 +9,22 @@ Implements:
 - Efficient MPRT (Hedström et al., 2023)
 - Data Randomisation Test (Adebayo et al., 2018)
 
-These metrics evaluate whether explanations are sensitive to the model's
-learned parameters, predicted class, and training data-label relationship.
-A faithful explanation method should produce significantly different
-explanations when the model or data is randomised. Methods that produce
-similar explanations regardless of randomisation are unreliable.
+These diagnostics measure whether explanations change under specified model,
+output, or data randomisations. A score depends on the chosen similarity,
+randomisation order, explainer, and data; it is not by itself proof of
+faithfulness or unreliability.
 
-All metrics support both tabular (1-D) and image (2-D/3-D) data.
-They require PyTorch models for the high-level API, but also provide
-low-level score functions that work on pre-computed attribution arrays.
+Low-level score functions accept the attribution-array shapes documented by
+each function. High-level model-randomisation APIs require supported PyTorch
+models; callers must check the individual shape and target contracts.
 
 Similarity Functions:
     Built-in similarity measures are dispatched via string keys:
     - "spearman": Spearman rank correlation (scipy.stats.spearmanr)
     - "pearson": Pearson correlation (scipy.stats.pearsonr)
     - "cosine": Cosine similarity (1 - scipy.spatial.distance.cosine)
-    - "ssim": Structural Similarity Index (skimage.metrics — optional dep)
+    - "ssim": Structural Similarity Index for 2-D or channel-first ``(C,H,W)``
+      maps (skimage.metrics — optional dep)
     - "mse": Negative Mean Squared Error (scipy/numpy)
     Custom callables f(a, b) -> float are also accepted.
 
@@ -43,15 +43,17 @@ References:
     https://arxiv.org/abs/2401.06465
 """
 import copy
-import warnings
+import re
+from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Tuple, TypedDict, Union
 
 import numpy as np
-from typing import Union, Callable, List, Dict, Optional, Tuple
-
 from scipy import stats
 from scipy.spatial.distance import cosine as scipy_cosine_distance
 
 from explainiverse.core.explanation import Explanation
+
+if TYPE_CHECKING:
+    import torch
 
 
 # =============================================================================
@@ -62,14 +64,38 @@ from explainiverse.core.explanation import Explanation
 SimilarityFunc = Callable[[np.ndarray, np.ndarray], float]
 
 
+class MPRTResult(TypedDict):
+    """Structured result shared by the MPRT variants."""
+
+    layer_scores: List[float]
+    layer_names: List[str]
+    mean_score: float
+
+
+class SmoothMPRTResult(MPRTResult, total=False):
+    """MPRT core scores plus Smooth MPRT protocol-disclosure metadata."""
+
+    variant: str
+    randomisation_order: str
+    nr_samples: int
+    noise_magnitude: float
+    smoothing_inputs_paired: bool
+    rng_streams_split: bool
+    clean_input_included: bool
+    paper_default_order_used: bool
+    paper_recommended_sample_count_met: bool
+    paper_conformant_defaults_used: bool
+    claim_scope: str
+
+
 def _spearman_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
     Spearman rank correlation between two attribution vectors.
 
-    Returns the correlation coefficient (range [-1, 1]). If either
-    vector is constant (zero variance), returns 0.0 with a warning
-    suppressed (this is expected when a fully randomised model
-    produces near-uniform attributions).
+    Returns the correlation coefficient (range [-1, 1]). Correlation is
+    mathematically undefined for fewer than two observations or when either
+    vector is constant, so those cases raise instead of being silently scored
+    as zero similarity.
 
     Args:
         a: First attribution vector (1-D, flattened).
@@ -79,14 +105,12 @@ def _spearman_similarity(a: np.ndarray, b: np.ndarray) -> float:
         Spearman correlation coefficient.
     """
     if a.size < 2 or b.size < 2:
-        return 0.0
-    if np.std(a) < 1e-12 or np.std(b) < 1e-12:
-        return 0.0
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=stats.ConstantInputWarning)
-        corr, _ = stats.spearmanr(a, b)
+        raise ValueError("Spearman correlation requires at least two values per attribution.")
+    if np.ptp(a) == 0.0 or np.ptp(b) == 0.0:
+        raise ValueError("Spearman correlation is undefined for constant attributions.")
+    corr, _ = stats.spearmanr(a, b)
     if np.isnan(corr):
-        return 0.0
+        raise ValueError("Spearman correlation is undefined for these attributions.")
     return float(corr)
 
 
@@ -94,8 +118,9 @@ def _pearson_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
     Pearson correlation between two attribution vectors.
 
-    Returns the correlation coefficient (range [-1, 1]). Returns 0.0
-    for constant inputs.
+    Returns the correlation coefficient (range [-1, 1]). Correlation is
+    undefined for fewer than two observations or constant inputs, so those
+    cases raise instead of being silently scored as zero similarity.
 
     Args:
         a: First attribution vector (1-D, flattened).
@@ -105,14 +130,12 @@ def _pearson_similarity(a: np.ndarray, b: np.ndarray) -> float:
         Pearson correlation coefficient.
     """
     if a.size < 2 or b.size < 2:
-        return 0.0
-    if np.std(a) < 1e-12 or np.std(b) < 1e-12:
-        return 0.0
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=stats.ConstantInputWarning)
-        corr, _ = stats.pearsonr(a, b)
+        raise ValueError("Pearson correlation requires at least two values per attribution.")
+    if np.ptp(a) == 0.0 or np.ptp(b) == 0.0:
+        raise ValueError("Pearson correlation is undefined for constant attributions.")
+    corr, _ = stats.pearsonr(a, b)
     if np.isnan(corr):
-        return 0.0
+        raise ValueError("Pearson correlation is undefined for these attributions.")
     return float(corr)
 
 
@@ -120,9 +143,10 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
     Cosine similarity between two attribution vectors.
 
-    Computed as 1 - cosine_distance. Range [-1, 1] (typically [0, 1]
-    for non-negative attributions). Returns 0.0 if either vector is
-    all zeros.
+    Computed as 1 - cosine_distance. Range [-1, 1], or [0, 1] when both
+    nonzero attribution vectors are elementwise non-negative. It is undefined if either
+    vector has zero norm, so that case raises instead of being silently scored
+    as zero similarity.
 
     Args:
         a: First attribution vector (1-D, flattened).
@@ -132,34 +156,49 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
         Cosine similarity.
     """
     if np.linalg.norm(a) < 1e-12 or np.linalg.norm(b) < 1e-12:
-        return 0.0
+        raise ValueError("Cosine similarity is undefined for zero-norm attributions.")
     dist = scipy_cosine_distance(a, b)
     if np.isnan(dist):
-        return 0.0
+        raise ValueError("Cosine similarity is undefined for these attributions.")
     return float(1.0 - dist)
 
 
-def _ssim_similarity(a: np.ndarray, b: np.ndarray) -> float:
+def _ssim_similarity(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    channel_axis: Optional[int] = None,
+) -> float:
     """
     Structural Similarity Index (SSIM) between two attribution maps.
 
-    Requires scikit-image (optional dependency). Only meaningful for
-    2-D or 3-D (image) data. For 1-D (tabular) data, this will reshape
-    into a 2-D array if possible, but Spearman/Pearson is recommended.
+    Requires scikit-image (optional dependency) and 2-D or 3-D image maps.
+    The built-in ``"ssim"`` similarity contract interprets every 3-D map as
+    channel-first ``(C, H, W)``, matching the image-attribution layout emitted
+    by the gradient explainers. Direct callers may pass another
+    ``channel_axis`` (for example ``-1`` for ``(H, W, C)``). One-dimensional
+    arrays are rejected; use Spearman or Pearson for the library's
+    tabular-vector contract.
 
     Uses data_range computed from the union of both arrays to ensure
     consistent scaling.
 
     Args:
-        a: First attribution map (2-D or 3-D).
-        b: Second attribution map (2-D or 3-D).
+        a: First attribution map, either ``(H, W)`` or ``(C, H, W)`` by
+            default.
+        b: Second attribution map with the same shape and layout as ``a``.
+        channel_axis: Channel dimension for 3-D inputs. ``None`` selects axis
+            0, the library's channel-first default. It must remain ``None``
+            for 2-D inputs.
 
     Returns:
         SSIM value in [-1, 1]. Higher = more similar.
 
     Raises:
         ImportError: If scikit-image is not installed.
-        ValueError: If inputs are not at least 2-D.
+        TypeError: If ``channel_axis`` is not an integer or ``None``.
+        ValueError: If inputs are not 2-D or 3-D image maps, or if
+            ``channel_axis`` is invalid for their rank.
     """
     try:
         from skimage.metrics import structural_similarity
@@ -169,31 +208,58 @@ def _ssim_similarity(a: np.ndarray, b: np.ndarray) -> float:
             "Install it with: pip install explainiverse[image]"
         )
 
-    if a.ndim < 2 or b.ndim < 2:
+    a = np.asarray(a)
+    b = np.asarray(b)
+    if a.shape != b.shape:
+        raise ValueError(f"SSIM attribution shapes must match, got {a.shape} and {b.shape}.")
+    if a.ndim not in (2, 3):
         raise ValueError(
-            f"SSIM requires at least 2-D arrays, got shapes "
-            f"{a.shape} and {b.shape}. Use 'spearman' or 'pearson' "
-            f"for 1-D (tabular) data."
+            f"SSIM requires 2-D spatial maps or 3-D image maps, got shapes "
+            f"{a.shape} and {b.shape}. Use 'spearman' or 'pearson' for 1-D "
+            f"(tabular) data."
         )
+    if a.ndim == 2:
+        if channel_axis is not None:
+            raise ValueError("channel_axis must be None for 2-D SSIM maps.")
+        resolved_channel_axis = None
+    else:
+        if channel_axis is None:
+            resolved_channel_axis = 0
+        else:
+            if isinstance(channel_axis, bool) or not isinstance(channel_axis, (int, np.integer)):
+                raise TypeError("channel_axis must be an integer axis or None.")
+            resolved_channel_axis = int(channel_axis)
+            if resolved_channel_axis < -3 or resolved_channel_axis >= 3:
+                raise ValueError("channel_axis must identify an axis of the 3-D SSIM maps.")
+    if np.iscomplexobj(a) or np.iscomplexobj(b):
+        raise ValueError("SSIM attribution maps must be real-valued.")
+    try:
+        a = a.astype(np.float64, copy=False)
+        b = b.astype(np.float64, copy=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SSIM attribution maps must be numeric.") from exc
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        raise ValueError("SSIM attribution maps must contain only finite values.")
 
-    data_range = max(
-        a.max() - a.min(),
-        b.max() - b.min(),
-    )
-    if data_range < 1e-12:
-        # Both arrays are effectively constant
+    data_range = float(max(np.max(a), np.max(b)) - min(np.min(a), np.min(b)))
+    if data_range == 0.0:
+        # A zero range over the union means both finite maps contain the same
+        # single value. Different constant maps have a nonzero union range.
         return 1.0
 
-    # For multi-channel images (e.g. 3-D with channel dim), set channel_axis
-    channel_axis = None
-    if a.ndim == 3:
-        channel_axis = -1  # assume channel-last; common after flattening batch
-
-    return float(structural_similarity(
-        a, b,
-        data_range=data_range,
-        channel_axis=channel_axis,
-    ))
+    score = float(
+        structural_similarity(
+            a,
+            b,
+            data_range=data_range,
+            channel_axis=resolved_channel_axis,
+        )
+    )
+    # SSIM is strictly below one for unequal maps, but floating-point
+    # round-off can collapse a value extremely close to one onto exactly one.
+    if score == 1.0 and not np.array_equal(a, b):
+        return float(np.nextafter(1.0, -np.inf))
+    return score
 
 
 def _mse_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -254,8 +320,7 @@ def _resolve_similarity_func(
     if callable(similarity_func):
         return similarity_func
     raise TypeError(
-        f"similarity_func must be a string or callable, "
-        f"got {type(similarity_func).__name__}."
+        f"similarity_func must be a string or callable, " f"got {type(similarity_func).__name__}."
     )
 
 
@@ -283,8 +348,7 @@ def _compute_similarity(
     """
     if attr_a.shape != attr_b.shape:
         raise ValueError(
-            f"Attribution shapes must match: got {attr_a.shape} "
-            f"and {attr_b.shape}."
+            f"Attribution shapes must match: got {attr_a.shape} " f"and {attr_b.shape}."
         )
 
     func = _resolve_similarity_func(similarity_func)
@@ -300,6 +364,74 @@ def _compute_similarity(
 # =============================================================================
 # Attribution Extraction
 # =============================================================================
+
+
+_INDEXED_FEATURE_KEY = re.compile(r"^(feature_|feat_|f|x)(0|[1-9][0-9]*)$", re.IGNORECASE)
+
+
+def _ordered_explanation_attribution_values(
+    raw: Mapping,
+    feature_names: Optional[List[str]],
+) -> List[object]:
+    """Return values only when the mapping's feature identity is complete."""
+    if feature_names is not None:
+        if isinstance(feature_names, (str, bytes)):
+            raise ValueError("Explanation feature_names must be a sequence of strings.")
+        try:
+            names = list(feature_names)
+        except TypeError as exc:
+            raise ValueError("Explanation feature_names must be a sequence of strings.") from exc
+        if not names:
+            raise ValueError("Explanation feature_names must not be empty.")
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("Explanation feature_names must contain non-empty strings.")
+        if len(set(names)) != len(names):
+            raise ValueError("Explanation feature_names must be unique.")
+
+        name_set = set(names)
+        missing = [name for name in names if name not in raw]
+        unexpected = [key for key in raw if key not in name_set]
+        if missing or unexpected:
+            problems = []
+            if missing:
+                problems.append(f"missing attributions for feature_names: {missing}")
+            if unexpected:
+                problems.append(
+                    f"unexpected attributions not present in feature_names: {unexpected}"
+                )
+            raise ValueError("Explanation feature identity mismatch: " + "; ".join(problems) + ".")
+        return [raw[name] for name in names]
+
+    indexed = {}
+    key_scheme = None
+    for key, value in raw.items():
+        match = _INDEXED_FEATURE_KEY.fullmatch(key) if isinstance(key, str) else None
+        if match is None:
+            raise ValueError(
+                "Explanation without feature_names must use one consistent, "
+                "zero-based indexed key scheme such as 'feature_0' or 'f0'."
+            )
+        scheme = match.group(1).lower()
+        if key_scheme is None:
+            key_scheme = scheme
+        elif scheme != key_scheme:
+            raise ValueError(
+                "Explanation without feature_names must use one consistent, "
+                "zero-based indexed key scheme such as 'feature_0' or 'f0'."
+            )
+        index = int(match.group(2))
+        if index in indexed:
+            raise ValueError("Explanation indexed feature keys must identify unique indices.")
+        indexed[index] = value
+
+    expected_indices = set(range(len(raw)))
+    if set(indexed) != expected_indices:
+        raise ValueError(
+            "Explanation indexed feature keys must cover every zero-based index "
+            f"from 0 through {len(raw) - 1}."
+        )
+    return [indexed[index] for index in range(len(raw))]
+
 
 def _extract_attribution_array(
     attributions: Union[np.ndarray, "Explanation"],
@@ -323,26 +455,32 @@ def _extract_attribution_array(
     """
     if isinstance(attributions, Explanation):
         attr_dict = attributions.explanation_data.get("feature_attributions", {})
-        if not attr_dict:
+        if not isinstance(attr_dict, Mapping) or not attr_dict:
             raise ValueError("No feature attributions found in Explanation.")
         feature_names = getattr(attributions, "feature_names", None)
-        if feature_names:
-            values = [attr_dict.get(fn, 0.0) for fn in feature_names]
-        else:
-            values = list(attr_dict.values())
-        return np.array(values, dtype=np.float64)
+        values = _ordered_explanation_attribution_values(attr_dict, feature_names)
+        try:
+            result = np.array(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Explanation feature attributions must be numeric.") from exc
 
-    if isinstance(attributions, np.ndarray):
-        return attributions.astype(np.float64)
+    elif isinstance(attributions, np.ndarray):
+        result = attributions.astype(np.float64)
 
-    raise TypeError(
-        f"Expected np.ndarray or Explanation, got {type(attributions).__name__}"
-    )
+    else:
+        raise TypeError(f"Expected np.ndarray or Explanation, got {type(attributions).__name__}")
+
+    if result.size == 0:
+        raise ValueError("Attributions must not be empty.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError("Attributions must contain only finite values.")
+    return result
 
 
 # =============================================================================
 # PyTorch Model Helpers
 # =============================================================================
+
 
 def _validate_torch_available() -> None:
     """Raise ImportError if PyTorch is not installed."""
@@ -377,19 +515,29 @@ def _get_named_layers(
     Raises:
         ValueError: If a requested layer_name is not found in the model.
     """
-    import torch.nn as nn
-
     if layer_names is not None:
+        if len(set(layer_names)) != len(layer_names):
+            raise ValueError("layer_names must not contain duplicates.")
         # User-specified layers
         all_named = dict(model.named_modules())
         result = []
         for name in layer_names:
             if name not in all_named:
                 raise ValueError(
-                    f"Layer '{name}' not found in model. "
-                    f"Available: {sorted(all_named.keys())}"
+                    f"Layer '{name}' not found in model. " f"Available: {sorted(all_named.keys())}"
                 )
-            result.append((name, all_named[name]))
+            module = all_named[name]
+            has_direct_learnable_parameters = any(
+                parameter.requires_grad for parameter in module.parameters(recurse=False)
+            )
+            if not has_direct_learnable_parameters:
+                raise ValueError(f"Layer '{name}' has no direct learnable parameters to randomise.")
+            if not callable(getattr(module, "reset_parameters", None)):
+                raise ValueError(
+                    f"Layer '{name}' does not expose reset_parameters(); "
+                    "its initialization distribution cannot be verified."
+                )
+            result.append((name, module))
         return result
 
     # Auto-detect: leaf modules with at least one learnable parameter
@@ -406,6 +554,25 @@ def _get_named_layers(
     return layers
 
 
+def _validate_input_target_batch(x_batch: np.ndarray, y_batch: np.ndarray) -> None:
+    """Validate the shared high-level randomisation-metric batch contract."""
+    if not isinstance(x_batch, np.ndarray) or not isinstance(y_batch, np.ndarray):
+        raise TypeError("x_batch and y_batch must be NumPy arrays.")
+    if x_batch.ndim < 2:
+        raise ValueError("x_batch must include a non-empty batch dimension and feature dimensions.")
+    if y_batch.ndim != 1:
+        raise ValueError("y_batch must be one-dimensional with shape (batch_size,).")
+    if x_batch.shape[0] == 0:
+        raise ValueError("x_batch and y_batch must not be empty.")
+    if x_batch.shape[0] != y_batch.shape[0]:
+        raise ValueError(
+            f"x_batch and y_batch must have the same batch size; got "
+            f"{x_batch.shape[0]} and {y_batch.shape[0]}."
+        )
+    if not np.all(np.isfinite(x_batch)):
+        raise ValueError("x_batch must contain only finite values.")
+
+
 def _randomise_layer_parameters(
     model,
     layer_name: str,
@@ -414,10 +581,10 @@ def _randomise_layer_parameters(
     """
     Reinitialise a single layer's parameters with random values.
 
-    Uses the same distribution as PyTorch's default initialisation
-    for the layer type (Kaiming uniform for Linear/Conv layers,
-    zeros for biases). This matches the approach in Adebayo et al. (2018)
-    where weights are "reinitialized" to destroy learned representations.
+    Calls the layer's own ``reset_parameters()`` implementation, which is the
+    authoritative initialization contract for that module type. When ``rng``
+    is supplied, the derived PyTorch seed is scoped with ``fork_rng`` so the
+    caller's global CPU/CUDA RNG streams are restored afterwards.
 
     Operates in-place on the model.
 
@@ -431,74 +598,77 @@ def _randomise_layer_parameters(
         ValueError: If layer_name is not found in the model.
     """
     import torch
-    import torch.nn as nn
 
     all_named = dict(model.named_modules())
     if layer_name not in all_named:
         raise ValueError(
-            f"Layer '{layer_name}' not found in model. "
-            f"Available: {sorted(all_named.keys())}"
+            f"Layer '{layer_name}' not found in model. " f"Available: {sorted(all_named.keys())}"
         )
 
     module = all_named[layer_name]
 
-    # Set seed if rng provided
-    if rng is not None:
-        seed = int(rng.integers(0, 2**31))
+    direct_parameters = [
+        parameter for parameter in module.parameters(recurse=False) if parameter.requires_grad
+    ]
+    if not direct_parameters:
+        raise ValueError(f"Layer '{layer_name}' has no direct learnable parameters to randomise.")
+
+    reset_parameters = getattr(module, "reset_parameters", None)
+    if not callable(reset_parameters):
+        raise ValueError(
+            f"Layer '{layer_name}' does not expose reset_parameters(); "
+            "its initialization distribution cannot be verified."
+        )
+
+    if rng is None:
+        reset_parameters()
+        return
+
+    seed = int(rng.integers(0, 2**31))
+    cuda_devices = sorted(
+        {
+            parameter.device.index
+            for parameter in direct_parameters
+            if parameter.device.type == "cuda" and parameter.device.index is not None
+        }
+    )
+    with torch.random.fork_rng(devices=cuda_devices, enabled=True):
         torch.manual_seed(seed)
-
-    # Reinitialise using PyTorch's standard init
-    if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)):
-        nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
-        if module.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-            if fan_in > 0:
-                bound = 1.0 / (fan_in ** 0.5)
-                nn.init.uniform_(module.bias, -bound, bound)
-            else:
-                nn.init.zeros_(module.bias)
-    elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-        if module.weight is not None:
-            nn.init.ones_(module.weight)
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
-        if module.running_mean is not None:
-            module.running_mean.zero_()
-        if module.running_var is not None:
-            module.running_var.fill_(1)
-    elif isinstance(module, (nn.Embedding,)):
-        nn.init.normal_(module.weight)
-    else:
-        # Generic fallback: reinitialise all parameters with normal(0, 0.01)
-        for param in module.parameters():
-            nn.init.normal_(param, mean=0.0, std=0.01)
+        reset_parameters()
 
 
-def _discrete_entropy(attributions: np.ndarray) -> float:
+def _discrete_entropy(attributions: np.ndarray, n_bins: int = 100) -> float:
     """
-    Compute discrete Shannon entropy of normalised absolute attributions.
+    Compute histogram-based discrete Shannon entropy of attribution values.
 
     Used by Efficient MPRT (Hedström et al., 2023) to measure explanation
     complexity. Higher entropy = more uniform (complex/noisy) explanation.
     Lower entropy = more concentrated (simple/sparse) explanation.
 
-    The attributions are first converted to a probability distribution
-    by taking absolute values and normalising to sum to 1.
+    Attribution values (including their signs) are binned into ``n_bins``
+    slots. The empirical frequency in each occupied bin is then used as the
+    probability in Shannon's entropy. This is Equation 4 of Efficient MPRT;
+    it is not entropy over normalised absolute feature magnitudes.
 
     Args:
         attributions: Attribution array (any shape, will be flattened).
 
     Returns:
-        Shannon entropy in nats. Returns 0.0 if all attributions are zero.
+        Shannon entropy in nats. Constant arrays have entropy 0.
     """
-    flat = np.abs(attributions.ravel()).astype(np.float64)
-    total = flat.sum()
-    if total < 1e-12:
-        return 0.0
-    p = flat / total
-    # Filter out zeros to avoid log(0)
-    p = p[p > 0]
-    return float(-np.sum(p * np.log(p)))
+    if not isinstance(n_bins, (int, np.integer)) or isinstance(n_bins, bool):
+        raise TypeError("n_bins must be an integer")
+    if n_bins < 1:
+        raise ValueError("n_bins must be at least 1")
+    flat = np.asarray(attributions, dtype=np.float64).ravel()
+    if flat.size == 0:
+        raise ValueError("attributions must not be empty")
+    if not np.all(np.isfinite(flat)):
+        raise ValueError("attributions must contain only finite values")
+    histogram, _ = np.histogram(flat, bins=int(n_bins))
+    occupied = histogram[histogram > 0].astype(np.float64)
+    probabilities = occupied / occupied.sum()
+    return float(-np.sum(probabilities * np.log(probabilities)))
 
 
 def _add_noise_to_input(
@@ -523,8 +693,6 @@ def _add_noise_to_input(
         Noisy copy of x (same shape).
     """
     data_range = x.max() - x.min()
-    if data_range < 1e-12:
-        data_range = 1.0
     std = noise_magnitude * data_range
     noise = rng.normal(0.0, std, size=x.shape)
     return x + noise
@@ -534,12 +702,13 @@ def _add_noise_to_input(
 # MPRT — Model Parameter Randomisation Test (Adebayo et al., 2018)
 # =============================================================================
 
+
 def compute_mprt_score(
     original_attributions: Union[np.ndarray, "Explanation"],
     randomised_attributions_list: List[Union[np.ndarray, "Explanation"]],
     similarity_func: Union[str, SimilarityFunc] = "spearman",
     layer_names: Optional[List[str]] = None,
-) -> Dict[str, Union[List[float], float]]:
+) -> MPRTResult:
     """
     Compute MPRT score from pre-computed attributions (low-level API).
 
@@ -548,14 +717,13 @@ def compute_mprt_score(
     ``randomised_attributions_list`` corresponds to one randomisation step
     (e.g., after randomising layer 1, then layers 1+2, etc.).
 
-    A faithful explanation method should show decreasing similarity as more
-    layers are randomised (i.e., the model deviates further from the
-    trained state). An explanation that remains similar regardless of
-    randomisation is not sensitive to the model's learned parameters.
+    The returned similarities describe sensitivity to the configured layer
+    randomisations. A monotone trend is not guaranteed, and this diagnostic
+    alone does not establish explanation quality.
 
     **Interpretation:**
-        - Lower mean similarity = better (explanation is model-sensitive)
-        - Monotonically decreasing layer_scores = ideal
+        - Lower similarity means greater change under the configured intervention.
+        - No universal quality threshold or required monotone trend is defined.
 
     Args:
         original_attributions: Attribution array from the original
@@ -565,7 +733,8 @@ def compute_mprt_score(
             randomisation step. Length = number of layers randomised.
         similarity_func: Similarity measure. One of "spearman"
             (default), "pearson", "cosine", "ssim", "mse", or a
-            callable f(a, b) -> float.
+            callable f(a, b) -> float. Three-dimensional SSIM maps use the
+            channel-first ``(C, H, W)`` layout.
         layer_names: Optional list of layer names for labelling. If
             provided, must have same length as randomised_attributions_list.
             Used only for the returned dict keys.
@@ -589,7 +758,7 @@ def compute_mprt_score(
         >>> # After randomising top 2 layers (bigger change)
         >>> rand_2 = np.array([0.3, 0.6, 0.1, 0.7, 0.5])
         >>> result = compute_mprt_score(original, [rand_1, rand_2])
-        >>> result["mean_score"]  # Lower = better
+        >>> result["mean_score"]  # Mean similarity under this intervention
 
     References:
         Adebayo, J., Gilmer, J., Muelly, M., Goodfellow, I. J., Hardt, M.,
@@ -609,12 +778,10 @@ def compute_mprt_score(
     scores = []
     for rand_attr in randomised_attributions_list:
         rand = _extract_attribution_array(rand_attr)
-        score = _compute_similarity(original, rand, similarity_func)
+        score = _finite_scalar_similarity(original, rand, similarity_func)
         scores.append(score)
 
-    names = layer_names if layer_names is not None else [
-        f"layer_{i}" for i in range(len(scores))
-    ]
+    names = layer_names if layer_names is not None else [f"layer_{i}" for i in range(len(scores))]
 
     return {
         "layer_scores": scores,
@@ -632,14 +799,13 @@ def compute_mprt(
     order: str = "cascading",
     layer_names: Optional[List[str]] = None,
     seed: Optional[int] = None,
-) -> Dict[str, Union[List[float], float]]:
+) -> MPRTResult:
     """
     Model Parameter Randomisation Test (Adebayo et al., 2018).
 
-    Tests whether an explanation method is sensitive to the model's learned
-    parameters by progressively randomising model layers and measuring how
-    the explanation changes. A faithful explanation should change
-    significantly when the model's parameters are destroyed.
+    Measures explanation change while progressively randomising model layers.
+    The result is a sensitivity diagnostic under this intervention, not a
+    standalone explanation-quality verdict.
 
     **Algorithm:**
         1. Compute explanation for the original (trained) model.
@@ -661,9 +827,9 @@ def compute_mprt(
           starting from the input layer.
 
     **Interpretation:**
-        - Lower mean_score = better (explanation depends on model)
-        - Decreasing layer_scores = ideal behaviour
-        - Flat/high scores = explanation ignores model parameters (bad)
+        - Lower similarity means greater change under the configured randomisation.
+        - The sequence and mean are descriptive; no universal "better" threshold
+          is defined by this API.
 
     Args:
         model: PyTorch nn.Module. Will be deep-copied internally;
@@ -677,7 +843,8 @@ def compute_mprt(
             Must return an attribution array (any shape).
         similarity_func: Similarity measure. One of "spearman"
             (default), "pearson", "cosine", "ssim", "mse", or a
-            callable f(a, b) -> float.
+            callable f(a, b) -> float. Three-dimensional SSIM maps use the
+            channel-first ``(C, H, W)`` layout.
         order: Randomisation order. One of "cascading" (default),
             "independent", or "bottom_up".
         layer_names: Optional list of specific layer names to randomise.
@@ -710,22 +877,26 @@ def compute_mprt(
         ...     out[0, y].backward()
         ...     return x_t.grad.detach().numpy()
         >>> result = compute_mprt(model, x, y, explain_fn, seed=42)
-        >>> result["mean_score"]  # Lower = better
+        >>> result["mean_score"]  # Mean similarity under this intervention
 
     References:
         Adebayo, J., Gilmer, J., Muelly, M., Goodfellow, I. J., Hardt, M.,
         & Kim, B. (2018). Sanity Checks for Saliency Maps. NeurIPS.
     """
     _validate_torch_available()
-    import torch
+    import torch.nn as nn
+
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module.")
+    if not callable(explain_func):
+        raise TypeError("explain_func must be callable.")
+    _validate_input_target_batch(x_batch, y_batch)
 
     valid_orders = {"cascading", "independent", "bottom_up"}
     if order not in valid_orders:
-        raise ValueError(
-            f"Unknown order '{order}'. Must be one of {sorted(valid_orders)}."
-        )
+        raise ValueError(f"Unknown order '{order}'. Must be one of {sorted(valid_orders)}.")
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(_validated_seed(seed))
 
     # Deep copy to avoid modifying original model
     model_copy = copy.deepcopy(model)
@@ -757,7 +928,7 @@ def compute_mprt(
 
     original_attrs_list = []
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
+        x_single = x_batch[i : i + 1]
         y_single = y_batch[i]
         attr = explain_func(original_model, x_single, y_single)
         original_attrs_list.append(_extract_attribution_array(attr))
@@ -778,13 +949,11 @@ def compute_mprt(
         # Compute explanations for randomised model
         sample_scores = []
         for i in range(batch_size):
-            x_single = x_batch[i:i+1]
+            x_single = x_batch[i : i + 1]
             y_single = y_batch[i]
             rand_attr = explain_func(model_copy, x_single, y_single)
             rand_attr = _extract_attribution_array(rand_attr)
-            score = _compute_similarity(
-                original_attrs_list[i], rand_attr, similarity_func
-            )
+            score = _finite_scalar_similarity(original_attrs_list[i], rand_attr, similarity_func)
             sample_scores.append(score)
 
         # Average across batch
@@ -808,7 +977,7 @@ def compute_batch_mprt(
     order: str = "cascading",
     layer_names: Optional[List[str]] = None,
     seed: Optional[int] = None,
-) -> List[Dict[str, Union[List[float], float]]]:
+) -> List[MPRTResult]:
     """
     Compute MPRT for each sample in a batch individually.
 
@@ -839,13 +1008,14 @@ def compute_batch_mprt(
         Adebayo, J., Gilmer, J., Muelly, M., Goodfellow, I. J., Hardt, M.,
         & Kim, B. (2018). Sanity Checks for Saliency Maps. NeurIPS.
     """
+    _validate_input_target_batch(x_batch, y_batch)
     batch_size = x_batch.shape[0]
     results = []
     for i in range(batch_size):
         result = compute_mprt(
             model=model,
-            x_batch=x_batch[i:i+1],
-            y_batch=y_batch[i:i+1],
+            x_batch=x_batch[i : i + 1],
+            y_batch=y_batch[i : i + 1],
             explain_func=explain_func,
             similarity_func=similarity_func,
             order=order,
@@ -860,6 +1030,116 @@ def compute_batch_mprt(
 # Random Logit Test (Sixt et al., 2020)
 # =============================================================================
 
+
+def _prepare_randomisation_model(model, argument_name: str):
+    """Validate and copy a PyTorch model without changing caller state."""
+    import torch
+
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(f"{argument_name} must be a torch.nn.Module.")
+    model_copy = copy.deepcopy(model)
+    model_copy.eval()
+    return model_copy
+
+
+def _model_input_tensor(model, x_batch: np.ndarray):
+    """Create a validation input on a model's device and floating dtype."""
+    import torch
+
+    reference_tensor = next(model.parameters(), None)
+    if reference_tensor is None:
+        reference_tensor = next(model.buffers(), None)
+
+    x_tensor = torch.as_tensor(x_batch)
+    if reference_tensor is not None:
+        x_tensor = x_tensor.to(device=reference_tensor.device)
+        if reference_tensor.is_floating_point():
+            x_tensor = x_tensor.to(dtype=reference_tensor.dtype)
+    return x_tensor
+
+
+def _classification_output_width(model, x_batch: np.ndarray, argument_name: str) -> int:
+    """Return the number of scalar model outputs per sample.
+
+    Only tensors shaped ``(N, C)`` or ``(N,)`` are unambiguous for the
+    output-index target contract used by these high-level metrics.
+    """
+    import torch
+
+    x_tensor = _model_input_tensor(model, x_batch[:1])
+    with torch.no_grad():
+        output = model(x_tensor)
+
+    if not isinstance(output, torch.Tensor):
+        raise TypeError(
+            f"{argument_name} must return a torch.Tensor, got " f"{type(output).__name__}."
+        )
+    if output.ndim == 1 and output.shape[0] == 1:
+        width = 1
+    elif output.ndim == 2 and output.shape[0] == 1:
+        width = int(output.shape[1])
+    else:
+        raise ValueError(
+            f"{argument_name} must return shape (batch_size, num_outputs) "
+            f"or (batch_size,) for one output; got {tuple(output.shape)}."
+        )
+    if width < 1:
+        raise ValueError(f"{argument_name} returned no output values per sample.")
+    if not bool(torch.isfinite(output).all()):
+        raise ValueError(f"{argument_name} output must contain only finite values.")
+    return width
+
+
+def _validate_output_index_targets(
+    y_batch: np.ndarray,
+    num_outputs: int,
+    *,
+    argument_name: str = "y_batch",
+) -> np.ndarray:
+    """Validate integer output indices and return a platform integer array."""
+    if y_batch.dtype.kind not in {"i", "u"}:
+        raise TypeError(f"{argument_name} must contain integer output indices.")
+    targets: np.ndarray = y_batch.astype(np.int64, copy=False)
+    if np.any(targets < 0) or np.any(targets >= num_outputs):
+        raise ValueError(
+            f"{argument_name} values must be in [0, {num_outputs - 1}] for "
+            f"the model's {num_outputs} outputs."
+        )
+    return targets
+
+
+def _finite_scalar_similarity(
+    attr_a: np.ndarray,
+    attr_b: np.ndarray,
+    similarity_func: Union[str, SimilarityFunc],
+) -> float:
+    """Compute a similarity and reject non-scalar or non-finite results."""
+    score = _compute_similarity(attr_a, attr_b, similarity_func)
+    score_array = np.asarray(score)
+    if score_array.ndim != 0:
+        raise ValueError("similarity_func must return one scalar score per sample.")
+    value = float(score_array)
+    if not np.isfinite(value):
+        raise ValueError("similarity_func returned a non-finite score.")
+    return value
+
+
+def _validated_seed(seed: Optional[int]) -> Optional[int]:
+    """Validate the shared non-negative integer seed contract."""
+    if seed is not None:
+        if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)):
+            raise TypeError("seed must be a non-negative integer or None.")
+        if int(seed) < 0:
+            raise ValueError("seed must be a non-negative integer or None.")
+        seed = int(seed)
+    return seed
+
+
+def _random_logit_rng(seed: Optional[int]) -> np.random.Generator:
+    """Create the metric-local generator under an explicit seed contract."""
+    return np.random.default_rng(_validated_seed(seed))
+
+
 def compute_random_logit_score(
     attr_true_class: Union[np.ndarray, "Explanation"],
     attr_random_class: Union[np.ndarray, "Explanation"],
@@ -868,25 +1148,30 @@ def compute_random_logit_score(
     """
     Compute Random Logit score from pre-computed attributions (low-level API).
 
-    Compares the explanation for the true predicted class against the
-    explanation for a randomly chosen different class. A faithful,
-    class-discriminative explanation method should produce different
-    explanations for different target classes.
+    Compares an explanation for a reference output against an explanation for
+    a different output. Sixt et al. used the ground-truth output as the
+    reference and SSIM as the comparison. This function leaves the reference
+    implicit in the supplied attributions and makes similarity configurable;
+    the default is raw, signed Spearman correlation, not the paper's exact
+    SSIM configuration.
 
     **Interpretation:**
-        - Lower similarity = better (explanation is class-sensitive)
-        - High similarity = explanation ignores which class is targeted (bad)
+        - Lower similarity indicates greater output sensitivity under the
+          selected similarity function.
+        - High similarity indicates weak output sensitivity. This necessary
+          sensitivity check does not by itself establish faithfulness.
 
     Args:
-        attr_true_class: Attribution array for the true/predicted class.
+        attr_true_class: Attribution array for the supplied reference output.
         attr_random_class: Attribution array for a randomly chosen
             different class.
         similarity_func: Similarity measure. One of "spearman"
             (default), "pearson", "cosine", "ssim", "mse", or a
-            callable f(a, b) -> float.
+            callable f(a, b) -> float. Three-dimensional SSIM maps use the
+            channel-first ``(C, H, W)`` layout.
 
     Returns:
-        Similarity score (float). Lower = better.
+        Finite scalar similarity score.
 
     Example:
         >>> import numpy as np
@@ -900,7 +1185,7 @@ def compute_random_logit_score(
     """
     a = _extract_attribution_array(attr_true_class)
     b = _extract_attribution_array(attr_random_class)
-    return _compute_similarity(a, b, similarity_func)
+    return _finite_scalar_similarity(a, b, similarity_func)
 
 
 def compute_random_logit(
@@ -915,47 +1200,59 @@ def compute_random_logit(
     """
     Random Logit Test (Sixt et al., 2020).
 
-    Tests whether an explanation method produces class-discriminative
-    explanations by comparing the explanation for the true target class
-    against the explanation for a randomly chosen different class.
+    Compares the explanation for each *supplied* reference output index in
+    ``y_batch`` against the explanation for a uniformly sampled different
+    output index. Following Sixt et al., callers normally supply ground-truth
+    class indices. Model predictions never replace those supplied targets.
 
     **Algorithm:**
         1. For each sample in the batch:
-           a. Compute explanation targeting the true class y.
+           a. Compute an explanation targeting the supplied output index y.
            b. Choose a random class y' ≠ y.
            c. Compute explanation targeting y'.
            d. Compute similarity between the two explanations.
         2. Return the mean similarity across all samples.
 
-    A faithful explanation should differ significantly when targeting
-    different classes. Methods that produce similar explanations regardless
-    of the target class fail this test.
+    Under this diagnostic, lower cross-output similarity is greater empirical
+    output sensitivity. The API defines no universal pass threshold, and low
+    similarity is not by itself evidence that an explanation is faithful.
+
+    Sixt et al. compared image maps with SSIM. This implementation defaults to
+    raw, signed Spearman correlation so it also has an explicit tabular-data
+    contract; scores from that default are not numerically comparable to the
+    paper's SSIM results.
 
     **Interpretation:**
-        - Lower score = better (explanations are class-discriminative)
-        - Score ≈ 1.0 = explanation ignores target class (bad)
+        - Lower score indicates greater output sensitivity under the selected
+          similarity function.
+        - A score near 1 for correlation-like similarities indicates weak
+          output sensitivity.
 
     Args:
-        model: PyTorch nn.Module. Not modified.
+        model: PyTorch nn.Module returning a tensor shaped ``(N, C)``. It is
+            deep-copied and the caller's model is not modified.
         x_batch: Input data, shape (batch_size, ...).
-        y_batch: True target labels, shape (batch_size,). Used as the
-            "true" class for explanation.
+        y_batch: Integer reference output indices, shape (batch_size,). The
+            paper used ground-truth class indices; predictions are not inferred.
         explain_func: Callable with signature:
             ``explain_func(model, x, y) -> np.ndarray``
             where x is a single input (with batch dim) and y is a
             scalar target class label. Must return attributions.
         similarity_func: Similarity measure (string key or callable).
-        num_classes: Total number of classes. Required to sample a
-            random alternative class. If None, inferred from
-            ``model(x_batch)`` output dimension.
-        seed: Random seed for reproducibility.
+        num_classes: Number of separately attributable model outputs. If
+            supplied, it must exactly match the model output width. If None,
+            it is inferred from a ``(batch_size, num_outputs)`` tensor.
+        seed: Non-negative integer seed for metric-local reproducibility, or
+            None for nondeterministic sampling. The global NumPy RNG is not used.
 
     Returns:
-        Mean similarity score (float). Lower = better.
+        Arithmetic mean of the per-sample similarities. Use
+        :func:`compute_batch_random_logit` for unaggregated scores.
 
     Raises:
         ImportError: If PyTorch is not installed.
-        ValueError: If num_classes < 2.
+        ValueError: If there are fewer than two explicit model outputs, a
+            target is out of range, or the model output contract is ambiguous.
 
     Example:
         >>> import torch.nn as nn
@@ -976,44 +1273,51 @@ def compute_random_logit(
         Why Many Modified BP Attributions Fail. ICML.
     """
     _validate_torch_available()
-    import torch
-
-    rng = np.random.default_rng(seed)
-    model_eval = copy.deepcopy(model)
-    model_eval.eval()
-
-    # Infer num_classes if not provided
-    if num_classes is None:
-        with torch.no_grad():
-            x_t = torch.tensor(x_batch[:1], dtype=torch.float32)
-            out = model_eval(x_t)
-            num_classes = out.shape[-1]
-
+    _validate_input_target_batch(x_batch, y_batch)
+    if not callable(explain_func):
+        raise TypeError("explain_func must be callable.")
+    rng = _random_logit_rng(seed)
+    model_eval = _prepare_randomisation_model(model, "model")
+    inferred_num_classes = _classification_output_width(model_eval, x_batch, "model")
+    if num_classes is not None:
+        if isinstance(num_classes, (bool, np.bool_)) or not isinstance(
+            num_classes, (int, np.integer)
+        ):
+            raise TypeError("num_classes must be an integer or None.")
+        if int(num_classes) < 2:
+            raise ValueError(f"num_classes must be >= 2 for Random Logit Test, got {num_classes}.")
+        if int(num_classes) != inferred_num_classes:
+            raise ValueError(
+                f"num_classes={num_classes} does not match the model output "
+                f"width {inferred_num_classes}."
+            )
+    num_classes = inferred_num_classes
     if num_classes < 2:
-        raise ValueError(
-            f"num_classes must be >= 2 for Random Logit Test, got {num_classes}."
-        )
+        raise ValueError(f"num_classes must be >= 2 for Random Logit Test, got {num_classes}.")
+    targets = _validate_output_index_targets(y_batch, num_classes)
 
     batch_size = x_batch.shape[0]
     scores = []
 
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
-        y_true = int(y_batch[i])
+        x_single = x_batch[i : i + 1]
+        y_true = int(targets[i])
 
         # Explanation for true class
         attr_true = explain_func(model_eval, x_single, y_true)
         attr_true = _extract_attribution_array(attr_true)
 
         # Sample a random different class
-        candidates = [c for c in range(num_classes) if c != y_true]
-        y_random = int(rng.choice(candidates))
+        # Uniformly draw one of C - 1 indices and skip the reference index.
+        y_random = int(rng.integers(0, num_classes - 1))
+        if y_random >= y_true:
+            y_random += 1
 
         # Explanation for random class
         attr_random = explain_func(model_eval, x_single, y_random)
         attr_random = _extract_attribution_array(attr_random)
 
-        score = _compute_similarity(attr_true, attr_random, similarity_func)
+        score = _finite_scalar_similarity(attr_true, attr_random, similarity_func)
         scores.append(score)
 
     return float(np.mean(scores))
@@ -1037,54 +1341,64 @@ def compute_batch_random_logit(
     Args:
         model: PyTorch nn.Module.
         x_batch: Input data, shape (batch_size, ...).
-        y_batch: True target labels, shape (batch_size,).
+        y_batch: Integer reference output indices, shape (batch_size,).
         explain_func: Callable(model, x, y) -> np.ndarray.
         similarity_func: Similarity measure (string or callable).
-        num_classes: Total number of classes. If None, auto-detected.
-        seed: Random seed for reproducibility.
+        num_classes: Number of explicit outputs. If supplied, it must match the
+            model output width exactly; if None, the width is inferred.
+        seed: Non-negative integer seed for metric-local reproducibility, or
+            None for nondeterministic sampling.
 
     Returns:
-        List of per-sample similarity scores. Lower = better.
+        Per-sample similarities in input order. Their arithmetic mean equals
+        :func:`compute_random_logit` for identical arguments.
 
     References:
         Sixt, L., Granz, M., & Landgraf, T. (2020). When Explanations Lie:
         Why Many Modified BP Attributions Fail. ICML.
     """
     _validate_torch_available()
-    import torch
-
-    rng = np.random.default_rng(seed)
-    model_eval = copy.deepcopy(model)
-    model_eval.eval()
-
-    if num_classes is None:
-        with torch.no_grad():
-            x_t = torch.tensor(x_batch[:1], dtype=torch.float32)
-            out = model_eval(x_t)
-            num_classes = out.shape[-1]
-
+    _validate_input_target_batch(x_batch, y_batch)
+    if not callable(explain_func):
+        raise TypeError("explain_func must be callable.")
+    rng = _random_logit_rng(seed)
+    model_eval = _prepare_randomisation_model(model, "model")
+    inferred_num_classes = _classification_output_width(model_eval, x_batch, "model")
+    if num_classes is not None:
+        if isinstance(num_classes, (bool, np.bool_)) or not isinstance(
+            num_classes, (int, np.integer)
+        ):
+            raise TypeError("num_classes must be an integer or None.")
+        if int(num_classes) < 2:
+            raise ValueError(f"num_classes must be >= 2 for Random Logit Test, got {num_classes}.")
+        if int(num_classes) != inferred_num_classes:
+            raise ValueError(
+                f"num_classes={num_classes} does not match the model output "
+                f"width {inferred_num_classes}."
+            )
+    num_classes = inferred_num_classes
     if num_classes < 2:
-        raise ValueError(
-            f"num_classes must be >= 2 for Random Logit Test, got {num_classes}."
-        )
+        raise ValueError(f"num_classes must be >= 2 for Random Logit Test, got {num_classes}.")
+    targets = _validate_output_index_targets(y_batch, num_classes)
 
     batch_size = x_batch.shape[0]
     scores = []
 
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
-        y_true = int(y_batch[i])
+        x_single = x_batch[i : i + 1]
+        y_true = int(targets[i])
 
         attr_true = explain_func(model_eval, x_single, y_true)
         attr_true = _extract_attribution_array(attr_true)
 
-        candidates = [c for c in range(num_classes) if c != y_true]
-        y_random = int(rng.choice(candidates))
+        y_random = int(rng.integers(0, num_classes - 1))
+        if y_random >= y_true:
+            y_random += 1
 
         attr_random = explain_func(model_eval, x_single, y_random)
         attr_random = _extract_attribution_array(attr_random)
 
-        score = _compute_similarity(attr_true, attr_random, similarity_func)
+        score = _finite_scalar_similarity(attr_true, attr_random, similarity_func)
         scores.append(score)
 
     return scores
@@ -1094,18 +1408,19 @@ def compute_batch_random_logit(
 # Smooth MPRT (Hedström et al., 2023)
 # =============================================================================
 
+
 def compute_smooth_mprt(
     model,
     x_batch: np.ndarray,
     y_batch: np.ndarray,
     explain_func: Callable,
     similarity_func: Union[str, SimilarityFunc] = "spearman",
-    order: str = "cascading",
+    order: str = "bottom_up",
     layer_names: Optional[List[str]] = None,
     noise_magnitude: float = 0.1,
-    nr_samples: int = 10,
+    nr_samples: int = 50,
     seed: Optional[int] = None,
-) -> Dict[str, Union[List[float], float]]:
+) -> SmoothMPRTResult:
     """
     Smooth MPRT (Hedström et al., 2023).
 
@@ -1115,25 +1430,26 @@ def compute_smooth_mprt(
     similarity.
 
     **Algorithm:**
-        1. For each sample x_i, generate N noisy copies:
+        1. For each sample x_i, generate N-1 noisy copies and retain the
+           unperturbed input as the final sample:
            x_i^(k) = x_i + ε, where ε ~ N(0, σ²), σ = noise_magnitude * range(x_i)
         2. Compute the "smooth" original explanation as the mean of
            explanations over all noisy copies.
         3. For each layer (in the specified order):
            a. Randomise the layer's parameters.
-           b. Compute the smooth explanation for the randomised model
-              (average over the same N noisy samples).
+           b. Compute the smooth explanation for the randomised model using
+              the exact same noisy inputs used for the original model.
            c. Compute similarity between smooth original and smooth
               randomised explanations.
         4. Return per-layer similarity scores and their mean.
 
-    This addresses a key weakness of standard MPRT: gradient-based
-    explanations can be noisy ("gradient shattering"), causing high
-    variance in similarity measurements. Smooth MPRT produces more
-    stable and reliable scores.
+    Smoothing changes the estimator used before comparison. It does not
+    guarantee lower variance, reliability, or explanation quality for a given
+    model and dataset.
 
     **Interpretation:**
-        Same as MPRT: lower mean_score = better.
+        Lower similarity means greater change under the configured randomisation;
+        it is not a standalone quality ranking.
 
     Args:
         model: PyTorch nn.Module. Deep-copied internally.
@@ -1141,12 +1457,13 @@ def compute_smooth_mprt(
         y_batch: Target labels, shape (batch_size,).
         explain_func: Callable(model, x, y) -> np.ndarray.
         similarity_func: Similarity measure (string or callable).
-        order: Randomisation order ("cascading", "independent", "bottom_up").
+        order: Randomisation order. The paper-conformant default is
+            bottom-up cascading ("bottom_up").
         layer_names: Optional list of layer names to randomise.
         noise_magnitude: Fraction of input range used as noise std.
-            Default 0.1 (10% of input range). From Hedström et al. (2023).
-        nr_samples: Number of noisy samples per input for smoothing.
-            Default 10. Higher = smoother but slower.
+            Default 0.1 (10% of input range).
+        nr_samples: Number of smoothing samples per input. Default 50. More
+            samples require more explanation evaluations.
         seed: Random seed for reproducibility.
 
     Returns:
@@ -1182,19 +1499,37 @@ def compute_smooth_mprt(
         Parameter Randomisation Test. XAI in Action.
     """
     _validate_torch_available()
-    import torch
+    import torch.nn as nn
+
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module.")
+    if not callable(explain_func):
+        raise TypeError("explain_func must be callable.")
+    _validate_input_target_batch(x_batch, y_batch)
 
     valid_orders = {"cascading", "independent", "bottom_up"}
     if order not in valid_orders:
-        raise ValueError(
-            f"Unknown order '{order}'. Must be one of {sorted(valid_orders)}."
-        )
+        raise ValueError(f"Unknown order '{order}'. Must be one of {sorted(valid_orders)}.")
+    if isinstance(nr_samples, (bool, np.bool_)) or not isinstance(nr_samples, (int, np.integer)):
+        raise TypeError("nr_samples must be a positive integer.")
+    nr_samples = int(nr_samples)
     if nr_samples < 1:
         raise ValueError(f"nr_samples must be >= 1, got {nr_samples}.")
-    if noise_magnitude < 0:
+    if isinstance(noise_magnitude, (bool, np.bool_)) or not isinstance(
+        noise_magnitude, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("noise_magnitude must be a finite non-negative number.")
+    noise_magnitude = float(noise_magnitude)
+    if not np.isfinite(noise_magnitude) or noise_magnitude < 0:
         raise ValueError(f"noise_magnitude must be >= 0, got {noise_magnitude}.")
 
-    rng = np.random.default_rng(seed)
+    seed = _validated_seed(seed)
+    # Smoothing draws and parameter initialisations must not consume one
+    # another's random stream. In particular, changing the batch size must not
+    # change the randomised models evaluated for an existing prefix.
+    smoothing_seed, model_seed = np.random.SeedSequence(seed).spawn(2)
+    smoothing_rng = np.random.default_rng(smoothing_seed)
+    model_rng = np.random.default_rng(model_seed)
 
     model_copy = copy.deepcopy(model)
     model_copy.eval()
@@ -1217,24 +1552,38 @@ def compute_smooth_mprt(
     original_model.eval()
     batch_size = x_batch.shape[0]
 
-    def _smooth_explain(mdl, x_single, y_single, noise_rng):
-        """Average explanation over nr_samples noisy copies of x."""
-        accum = None
-        for _ in range(nr_samples):
-            x_noisy = _add_noise_to_input(x_single, noise_magnitude, noise_rng)
-            attr = explain_func(mdl, x_noisy, y_single)
+    def _smooth_explain(mdl, smoothing_inputs, y_single) -> np.ndarray:
+        """Average explanations over a fixed, paired set of inputs."""
+        accum: Optional[np.ndarray] = None
+        for x_noisy in smoothing_inputs:
+            # A third-party explainer is not allowed to mutate the stored
+            # perturbation and thereby unpair later model comparisons.
+            attr = explain_func(mdl, x_noisy.copy(), y_single)
             attr = _extract_attribution_array(attr)
             if accum is None:
                 accum = attr.copy()
             else:
                 accum += attr
+        if accum is None:  # Defensive guard; nr_samples is validated as positive above.
+            raise RuntimeError("Smooth MPRT produced no attribution samples")
         return accum / nr_samples
+
+    paired_smoothing_inputs: list[list[np.ndarray]] = []
+    for i in range(batch_size):
+        x_single = x_batch[i : i + 1]
+        sample_inputs = [
+            _add_noise_to_input(x_single, noise_magnitude, smoothing_rng)
+            for _ in range(nr_samples - 1)
+        ]
+        # Retaining one clean input matches Equation 2 / the reference
+        # implementation and makes nr_samples=1 exactly ordinary MPRT.
+        sample_inputs.append(np.asarray(x_single).copy())
+        paired_smoothing_inputs.append(sample_inputs)
 
     smooth_original_attrs = []
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
         y_single = y_batch[i]
-        smooth_attr = _smooth_explain(original_model, x_single, y_single, rng)
+        smooth_attr = _smooth_explain(original_model, paired_smoothing_inputs[i], y_single)
         smooth_original_attrs.append(smooth_attr)
 
     # For each layer, randomise and compute smooth explanations
@@ -1246,14 +1595,13 @@ def compute_smooth_mprt(
             model_copy = copy.deepcopy(model)
             model_copy.eval()
 
-        _randomise_layer_parameters(model_copy, layer_name, rng=rng)
+        _randomise_layer_parameters(model_copy, layer_name, rng=model_rng)
 
         sample_scores = []
         for i in range(batch_size):
-            x_single = x_batch[i:i+1]
             y_single = y_batch[i]
-            smooth_rand = _smooth_explain(model_copy, x_single, y_single, rng)
-            score = _compute_similarity(
+            smooth_rand = _smooth_explain(model_copy, paired_smoothing_inputs[i], y_single)
+            score = _finite_scalar_similarity(
                 smooth_original_attrs[i], smooth_rand, similarity_func
             )
             sample_scores.append(score)
@@ -1265,6 +1613,19 @@ def compute_smooth_mprt(
         "layer_scores": all_layer_scores,
         "layer_names": all_layer_names,
         "mean_score": float(np.mean(all_layer_scores)),
+        "variant": "smooth_mprt_paired",
+        "randomisation_order": order,
+        "nr_samples": nr_samples,
+        "noise_magnitude": noise_magnitude,
+        "smoothing_inputs_paired": True,
+        "rng_streams_split": True,
+        "clean_input_included": True,
+        "paper_default_order_used": order == "bottom_up",
+        "paper_recommended_sample_count_met": nr_samples >= 50,
+        "paper_conformant_defaults_used": (
+            order == "bottom_up" and nr_samples == 50 and noise_magnitude == 0.1
+        ),
+        "claim_scope": "smooth_model_parameter_randomisation_diagnostic",
     }
 
 
@@ -1274,12 +1635,12 @@ def compute_batch_smooth_mprt(
     y_batch: np.ndarray,
     explain_func: Callable,
     similarity_func: Union[str, SimilarityFunc] = "spearman",
-    order: str = "cascading",
+    order: str = "bottom_up",
     layer_names: Optional[List[str]] = None,
     noise_magnitude: float = 0.1,
-    nr_samples: int = 10,
+    nr_samples: int = 50,
     seed: Optional[int] = None,
-) -> List[Dict[str, Union[List[float], float]]]:
+) -> List[SmoothMPRTResult]:
     """
     Compute Smooth MPRT for each sample in a batch individually.
 
@@ -1302,13 +1663,14 @@ def compute_batch_smooth_mprt(
         Hedström, A., Weber, L., Lapuschkin, S., & Höhne, M. (2023).
         Sanity Checks Revisited. XAI in Action.
     """
+    _validate_input_target_batch(x_batch, y_batch)
     batch_size = x_batch.shape[0]
     results = []
     for i in range(batch_size):
         result = compute_smooth_mprt(
             model=model,
-            x_batch=x_batch[i:i+1],
-            y_batch=y_batch[i:i+1],
+            x_batch=x_batch[i : i + 1],
+            y_batch=y_batch[i : i + 1],
             explain_func=explain_func,
             similarity_func=similarity_func,
             order=order,
@@ -1325,12 +1687,14 @@ def compute_batch_smooth_mprt(
 # Efficient MPRT (Hedström et al., 2023)
 # =============================================================================
 
+
 def compute_efficient_mprt(
     model,
     x_batch: np.ndarray,
     y_batch: np.ndarray,
     explain_func: Callable,
     seed: Optional[int] = None,
+    n_bins: int = 100,
 ) -> float:
     """
     Efficient MPRT (Hedström et al., 2023).
@@ -1348,20 +1712,16 @@ def compute_efficient_mprt(
         4. Compute explanation for the fully randomised model.
         5. Compute entropy of the randomised explanation.
         6. Return the relative complexity increase:
-           score = (entropy_random - entropy_original) / entropy_max
-           where entropy_max = ln(num_features).
+           score = (entropy_random - entropy_original) / entropy_original.
 
-    The intuition is: a faithful explanation should be relatively
-    simple/structured (low entropy) for the trained model, but become
-    more uniform/noisy (high entropy) when the model is randomised.
-    A larger positive score indicates the explanation was meaningfully
-    capturing model structure.
+    The returned value measures the relative rise in histogram entropy after
+    parameter randomisation. It does not prove that an explanation captured
+    model structure or that low/high entropy is intrinsically good.
 
     **Interpretation:**
-        - Higher score = better (explanation was model-sensitive)
-        - Score ≈ 0 = explanation complexity unchanged (bad)
-        - Negative score = original explanation was MORE noisy than
-          random (very bad, suggests the method adds noise)
+        - Positive values mean histogram entropy increased after randomisation.
+        - Zero means no relative entropy change; negative values mean entropy fell.
+        - The API defines no universal quality threshold.
 
     Args:
         model: PyTorch nn.Module. Deep-copied internally.
@@ -1369,9 +1729,11 @@ def compute_efficient_mprt(
         y_batch: Target labels, shape (batch_size,).
         explain_func: Callable(model, x, y) -> np.ndarray.
         seed: Random seed for reproducibility.
+        n_bins: Number of histogram slots used by the paper's discrete
+            entropy complexity function.
 
     Returns:
-        Mean relative complexity increase (float). Higher = better.
+        Mean relative histogram-entropy increase.
 
     Raises:
         ImportError: If PyTorch is not installed.
@@ -1396,9 +1758,15 @@ def compute_efficient_mprt(
         Parameter Randomisation Test. XAI in Action.
     """
     _validate_torch_available()
-    import torch
+    import torch.nn as nn
 
-    rng = np.random.default_rng(seed)
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module.")
+    if not callable(explain_func):
+        raise TypeError("explain_func must be callable.")
+    _validate_input_target_batch(x_batch, y_batch)
+    rng = np.random.default_rng(_validated_seed(seed))
+    _discrete_entropy(np.array([0.0]), n_bins=n_bins)
     batch_size = x_batch.shape[0]
 
     # Original model explanations
@@ -1409,33 +1777,34 @@ def compute_efficient_mprt(
     random_model = copy.deepcopy(model)
     random_model.eval()
     layers = _get_named_layers(random_model)
+    if not layers:
+        raise ValueError("Model has no layers with learnable parameters to randomise.")
     for layer_name, _ in layers:
         _randomise_layer_parameters(random_model, layer_name, rng=rng)
 
     scores = []
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
+        x_single = x_batch[i : i + 1]
         y_single = y_batch[i]
 
         # Original explanation entropy
         attr_orig = explain_func(original_model, x_single, y_single)
         attr_orig = _extract_attribution_array(attr_orig)
-        entropy_orig = _discrete_entropy(attr_orig)
+        entropy_orig = _discrete_entropy(attr_orig, n_bins=n_bins)
 
         # Randomised explanation entropy
         attr_rand = explain_func(random_model, x_single, y_single)
         attr_rand = _extract_attribution_array(attr_rand)
-        entropy_rand = _discrete_entropy(attr_rand)
+        if attr_rand.shape != attr_orig.shape:
+            raise ValueError("Original and randomised attributions must have the same shape")
+        entropy_rand = _discrete_entropy(attr_rand, n_bins=n_bins)
 
-        # Maximum possible entropy for this dimensionality
-        num_features = attr_orig.size
-        entropy_max = np.log(num_features) if num_features > 1 else 1.0
-
-        # Relative complexity increase
-        if entropy_max < 1e-12:
-            score = 0.0
-        else:
-            score = (entropy_rand - entropy_orig) / entropy_max
+        if entropy_orig <= np.finfo(float).eps:
+            raise ValueError(
+                "Efficient MPRT relative rise is undefined because the "
+                "original explanation histogram entropy is zero"
+            )
+        score = (entropy_rand - entropy_orig) / entropy_orig
 
         scores.append(float(score))
 
@@ -1448,6 +1817,7 @@ def compute_batch_efficient_mprt(
     y_batch: np.ndarray,
     explain_func: Callable,
     seed: Optional[int] = None,
+    n_bins: int = 100,
 ) -> List[float]:
     """
     Compute Efficient MPRT for each sample individually.
@@ -1458,18 +1828,25 @@ def compute_batch_efficient_mprt(
         y_batch: Target labels, shape (batch_size,).
         explain_func: Callable(model, x, y) -> np.ndarray.
         seed: Random seed.
+        n_bins: Number of histogram slots for discrete entropy.
 
     Returns:
-        List of per-sample complexity increase scores. Higher = better.
+        List of per-sample relative histogram-entropy increases.
 
     References:
         Hedström, A., Weber, L., Lapuschkin, S., & Höhne, M. (2023).
         Sanity Checks Revisited. XAI in Action.
     """
     _validate_torch_available()
-    import torch
+    import torch.nn as nn
 
-    rng = np.random.default_rng(seed)
+    if not isinstance(model, nn.Module):
+        raise TypeError("model must be a torch.nn.Module.")
+    if not callable(explain_func):
+        raise TypeError("explain_func must be callable.")
+    _validate_input_target_batch(x_batch, y_batch)
+    rng = np.random.default_rng(_validated_seed(seed))
+    _discrete_entropy(np.array([0.0]), n_bins=n_bins)
     batch_size = x_batch.shape[0]
 
     original_model = copy.deepcopy(model)
@@ -1478,29 +1855,32 @@ def compute_batch_efficient_mprt(
     random_model = copy.deepcopy(model)
     random_model.eval()
     layers = _get_named_layers(random_model)
+    if not layers:
+        raise ValueError("Model has no layers with learnable parameters to randomise.")
     for layer_name, _ in layers:
         _randomise_layer_parameters(random_model, layer_name, rng=rng)
 
     scores = []
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
+        x_single = x_batch[i : i + 1]
         y_single = y_batch[i]
 
         attr_orig = explain_func(original_model, x_single, y_single)
         attr_orig = _extract_attribution_array(attr_orig)
-        entropy_orig = _discrete_entropy(attr_orig)
+        entropy_orig = _discrete_entropy(attr_orig, n_bins=n_bins)
 
         attr_rand = explain_func(random_model, x_single, y_single)
         attr_rand = _extract_attribution_array(attr_rand)
-        entropy_rand = _discrete_entropy(attr_rand)
+        if attr_rand.shape != attr_orig.shape:
+            raise ValueError("Original and randomised attributions must have the same shape")
+        entropy_rand = _discrete_entropy(attr_rand, n_bins=n_bins)
 
-        num_features = attr_orig.size
-        entropy_max = np.log(num_features) if num_features > 1 else 1.0
-
-        if entropy_max < 1e-12:
-            score = 0.0
-        else:
-            score = (entropy_rand - entropy_orig) / entropy_max
+        if entropy_orig <= np.finfo(float).eps:
+            raise ValueError(
+                "Efficient MPRT relative rise is undefined because the "
+                "original explanation histogram entropy is zero"
+            )
+        score = (entropy_rand - entropy_orig) / entropy_orig
 
         scores.append(float(score))
 
@@ -1511,6 +1891,57 @@ def compute_batch_efficient_mprt(
 # Data Randomisation Test (Adebayo et al., 2018)
 # =============================================================================
 
+
+def _model_architecture_signature(model) -> tuple:
+    """Build a strict module/parameter/buffer shape signature."""
+    return tuple(
+        (
+            name,
+            type(module),
+            tuple(
+                (parameter_name, tuple(parameter.shape))
+                for parameter_name, parameter in module.named_parameters(recurse=False)
+            ),
+            tuple(
+                (buffer_name, tuple(buffer.shape))
+                for buffer_name, buffer in module.named_buffers(recurse=False)
+            ),
+        )
+        for name, module in model.named_modules()
+    )
+
+
+def _prepare_data_randomisation_call(
+    model_trained,
+    model_random_labels,
+    x_batch: np.ndarray,
+    y_batch: np.ndarray,
+    explain_func: Callable,
+):
+    """Validate the paper's same-architecture, same-target comparison."""
+    _validate_input_target_batch(x_batch, y_batch)
+    if not callable(explain_func):
+        raise TypeError("explain_func must be callable.")
+
+    model_a = _prepare_randomisation_model(model_trained, "model_trained")
+    model_b = _prepare_randomisation_model(model_random_labels, "model_random_labels")
+    if _model_architecture_signature(model_a) != _model_architecture_signature(model_b):
+        raise ValueError(
+            "model_trained and model_random_labels must have the same module "
+            "architecture and parameter/buffer shapes."
+        )
+
+    width_a = _classification_output_width(model_a, x_batch, "model_trained")
+    width_b = _classification_output_width(model_b, x_batch, "model_random_labels")
+    if width_a != width_b:
+        raise ValueError(
+            "model_trained and model_random_labels must expose the same number "
+            f"of outputs; got {width_a} and {width_b}."
+        )
+    targets = _validate_output_index_targets(y_batch, width_a)
+    return model_a, model_b, targets
+
+
 def compute_data_randomisation_score(
     attr_trained: Union[np.ndarray, "Explanation"],
     attr_random_labels: Union[np.ndarray, "Explanation"],
@@ -1519,15 +1950,17 @@ def compute_data_randomisation_score(
     """
     Compute Data Randomisation score from pre-computed attributions (low-level API).
 
-    Compares the explanation from a model trained on true labels against
-    the explanation from a model trained on randomised labels. A faithful
-    explanation should differ significantly between the two models, since
-    the model trained on random labels has learned no meaningful
-    data-label relationship.
+    Compares an explanation from a model trained on true labels against an
+    explanation from the same architecture trained on randomly permuted
+    labels. Adebayo et al. reported several comparisons; the default here is
+    their raw, signed Spearman-rank comparison. Absolute-value preprocessing,
+    SSIM, and HOG similarity are not applied implicitly.
 
     **Interpretation:**
-        - Lower similarity = better (explanation captures data structure)
-        - High similarity = explanation ignores training data (bad)
+        - Lower similarity indicates greater sensitivity to label
+          randomisation under the selected comparison.
+        - High similarity indicates weak sensitivity. Passing this necessary
+          check does not by itself establish explanation faithfulness.
 
     Args:
         attr_trained: Attribution array from the model trained on
@@ -1536,10 +1969,11 @@ def compute_data_randomisation_score(
             on randomised labels.
         similarity_func: Similarity measure. One of "spearman"
             (default), "pearson", "cosine", "ssim", "mse", or a
-            callable f(a, b) -> float.
+            callable f(a, b) -> float. Three-dimensional SSIM maps use the
+            channel-first ``(C, H, W)`` layout.
 
     Returns:
-        Similarity score (float). Lower = better.
+        Finite scalar similarity score.
 
     Example:
         >>> import numpy as np
@@ -1553,7 +1987,7 @@ def compute_data_randomisation_score(
     """
     a = _extract_attribution_array(attr_trained)
     b = _extract_attribution_array(attr_random_labels)
-    return _compute_similarity(a, b, similarity_func)
+    return _finite_scalar_similarity(a, b, similarity_func)
 
 
 def compute_data_randomisation(
@@ -1572,17 +2006,17 @@ def compute_data_randomisation(
     trained on true labels against a model trained on randomised
     (shuffled) labels.
 
-    Unlike MPRT which tests sensitivity to model parameters, this test
-    evaluates whether explanations capture meaningful data-label
-    structure. A model trained on random labels memorises noise rather
-    than learning real patterns, so a faithful explanation should look
-    fundamentally different.
+    Unlike MPRT, which perturbs model parameters, this test asks whether an
+    explanation changes after the instance-label relationship in training is
+    broken. It is a necessary sensitivity check, not a sufficient proof that
+    an explanation captures the data-generating process.
 
-    **Important:** The user must provide both models. Training a model
-    on random labels is computationally expensive and dataset-specific,
-    so the library does not handle it internally. This design choice
-    follows the principle that the library evaluates explanations, not
-    trains models.
+    **Important:** The caller must provide both models. The function verifies
+    that their module structures and parameter/buffer shapes match, but cannot
+    verify their training histories. The caller is responsible for ensuring
+    that ``model_random_labels`` was trained on one fixed permutation of all
+    training labels; merely supplying a different random initialisation does
+    not perform the data-randomisation test.
 
     **Algorithm:**
         1. For each sample in the batch:
@@ -1592,23 +2026,21 @@ def compute_data_randomisation(
         2. Return the mean similarity across all samples.
 
     **Interpretation:**
-        - Lower score = better (explanation captures data structure)
-        - Score ≈ 1.0 = explanation ignores training data (bad)
-
-    **Note:** This metric is excluded from Quantus due to the
-    requirement of providing a retrained model. Explainiverse includes
-    it as it completes the full Adebayo et al. (2018) evaluation
-    framework and is critical for comprehensive sanity checking.
+        - Lower score indicates greater sensitivity to the training-label
+          permutation under the selected similarity function.
+        - A score near 1 for correlation-like similarities indicates weak
+          sensitivity; it is not a standalone faithfulness verdict.
 
     Args:
-        model_trained: PyTorch nn.Module trained on true labels.
-            Not modified.
+        model_trained: PyTorch nn.Module trained on true labels. Deep-copied;
+            the caller's model is not modified.
         model_random_labels: PyTorch nn.Module trained on randomised
             labels (same architecture, same data, shuffled labels).
             Not modified.
         x_batch: Input data, shape (batch_size, ...).
-        y_batch: Target labels, shape (batch_size,). Used as the
-            target class for both explanations.
+        y_batch: Integer output indices, shape (batch_size,), used unchanged
+            for both explanations. A one-output model therefore accepts only
+            index 0; no class-sign convention is guessed.
         explain_func: Callable with signature:
             ``explain_func(model, x, y) -> np.ndarray``
             where x is a single input (with batch dim) and y is a
@@ -1616,17 +2048,21 @@ def compute_data_randomisation(
         similarity_func: Similarity measure (string key or callable).
 
     Returns:
-        Mean similarity score (float). Lower = better.
+        Arithmetic mean of per-sample similarities. Use
+        :func:`compute_batch_data_randomisation` for unaggregated scores.
 
     Raises:
         ImportError: If PyTorch is not installed.
+        ValueError: If batches, target indices, model architectures, or output
+            contracts are incompatible.
 
     Example:
         >>> import torch.nn as nn
         >>> import numpy as np
-        >>> # Model trained normally
+        >>> # Architecture illustration only: before evaluating, train model_true
+        >>> # normally and fit model_rand on one fixed label permutation.
+        >>> # Fresh initialisations alone are not valid inputs.
         >>> model_true = nn.Sequential(nn.Linear(10, 20), nn.ReLU(), nn.Linear(20, 3))
-        >>> # Model trained on shuffled labels (different weights)
         >>> model_rand = nn.Sequential(nn.Linear(10, 20), nn.ReLU(), nn.Linear(20, 3))
         >>> x = np.random.randn(5, 10).astype(np.float32)
         >>> y = np.array([0, 1, 2, 0, 1])
@@ -1636,27 +2072,25 @@ def compute_data_randomisation(
         ...     out = model(x_t)
         ...     out[0, y].backward()
         ...     return x_t.grad.detach().numpy()
-        >>> score = compute_data_randomisation(
-        ...     model_true, model_rand, x, y, explain_fn
-        ... )
+        >>> # score = compute_data_randomisation(
+        >>> #     model_true, model_rand, x, y, explain_fn
+        >>> # )
 
     References:
         Adebayo, J., Gilmer, J., Muelly, M., Goodfellow, I. J., Hardt, M.,
         & Kim, B. (2018). Sanity Checks for Saliency Maps. NeurIPS.
     """
     _validate_torch_available()
-
-    model_a = copy.deepcopy(model_trained)
-    model_a.eval()
-    model_b = copy.deepcopy(model_random_labels)
-    model_b.eval()
+    model_a, model_b, targets = _prepare_data_randomisation_call(
+        model_trained, model_random_labels, x_batch, y_batch, explain_func
+    )
 
     batch_size = x_batch.shape[0]
     scores = []
 
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
-        y_single = y_batch[i]
+        x_single = x_batch[i : i + 1]
+        y_single = int(targets[i])
 
         attr_trained = explain_func(model_a, x_single, y_single)
         attr_trained = _extract_attribution_array(attr_trained)
@@ -1664,7 +2098,7 @@ def compute_data_randomisation(
         attr_random = explain_func(model_b, x_single, y_single)
         attr_random = _extract_attribution_array(attr_random)
 
-        score = _compute_similarity(attr_trained, attr_random, similarity_func)
+        score = _finite_scalar_similarity(attr_trained, attr_random, similarity_func)
         scores.append(score)
 
     return float(np.mean(scores))
@@ -1688,30 +2122,30 @@ def compute_batch_data_randomisation(
         model_trained: PyTorch nn.Module trained on true labels.
         model_random_labels: PyTorch nn.Module trained on randomised labels.
         x_batch: Input data, shape (batch_size, ...).
-        y_batch: Target labels, shape (batch_size,).
+        y_batch: Integer output indices, shape (batch_size,), used unchanged
+            for both explanations.
         explain_func: Callable(model, x, y) -> np.ndarray.
         similarity_func: Similarity measure (string or callable).
 
     Returns:
-        List of per-sample similarity scores. Lower = better.
+        Per-sample similarities in input order. Their arithmetic mean equals
+        :func:`compute_data_randomisation` for identical arguments.
 
     References:
         Adebayo, J., Gilmer, J., Muelly, M., Goodfellow, I. J., Hardt, M.,
         & Kim, B. (2018). Sanity Checks for Saliency Maps. NeurIPS.
     """
     _validate_torch_available()
-
-    model_a = copy.deepcopy(model_trained)
-    model_a.eval()
-    model_b = copy.deepcopy(model_random_labels)
-    model_b.eval()
+    model_a, model_b, targets = _prepare_data_randomisation_call(
+        model_trained, model_random_labels, x_batch, y_batch, explain_func
+    )
 
     batch_size = x_batch.shape[0]
     scores = []
 
     for i in range(batch_size):
-        x_single = x_batch[i:i+1]
-        y_single = y_batch[i]
+        x_single = x_batch[i : i + 1]
+        y_single = int(targets[i])
 
         attr_trained = explain_func(model_a, x_single, y_single)
         attr_trained = _extract_attribution_array(attr_trained)
@@ -1719,7 +2153,7 @@ def compute_batch_data_randomisation(
         attr_random = explain_func(model_b, x_single, y_single)
         attr_random = _extract_attribution_array(attr_random)
 
-        score = _compute_similarity(attr_trained, attr_random, similarity_func)
+        score = _finite_scalar_similarity(attr_trained, attr_random, similarity_func)
         scores.append(score)
 
     return scores

@@ -1,0 +1,13 @@
+# Lowest supported direct runtime dependencies for the Python 3.10 contract.
+# XGBoost 1.7.0.post0 through 1.7.2 x86-64 Linux wheels are tagged cp39 internally.
+# 1.7.3 is the first 1.7 release whose x86-64 Linux wheel supports CPython 3.10.
+numpy==1.24.0
+lime==0.2.0.1
+scikit-learn==1.6.0
+shap==0.46.0
+pandas==1.5.0
+scipy==1.10.0
+xgboost==1.7.3
+torch==2.0.0
+captum==0.8.0
+scikit-image==0.20.0

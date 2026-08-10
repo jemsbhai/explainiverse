@@ -1,607 +1,584 @@
-# src/explainiverse/evaluation/fairness.py
-"""
-Fairness evaluation metrics for explanations (Phase 7).
+"""Group-disparity diagnostics for explanation evaluations.
 
-Implements 6 fairness metrics for evaluating whether post hoc explanations
-exhibit group-based or individual-based disparities:
+This module intentionally distinguishes measurable disparities from fairness
+verdicts.  A gap in a scalar explanation property can be evidence for an
+audit, but it does not by itself establish that an explainer or model is fair.
 
-1. Group Fairness (Dai et al., 2022) — composable disparity across demographic groups
-2. Individual Fairness (Dwork et al., 2012; adapted) — similar individuals get
-   similar explanations regardless of protected attribute
-3. Counterfactual Explanation Fairness (Kusner et al., 2017; adapted) — explanations
-   should not change when only the protected attribute is flipped
-4. Fidelity Disparity (Balagopalan et al., 2022) — max/mean explanation quality
-   gaps across subgroup pairs
-5. Attribution Parity (novel synthesis) — whether the protected feature itself
-   receives disproportionate attribution across groups
-6. Conditional Fairness (Hardt et al., 2016; adapted) — explanation quality
-   equality conditioned on model prediction
+The canonical paper-backed implementation in this module is
+``compute_fidelity_gap``.  It implements Balagopalan et al. (2022),
+Definitions 3.3 and 3.4, for *supplied per-instance fidelity scores*.  The
+remaining functions are clearly labelled diagnostics or compatibility names:
 
-Also provides FairnessMetricRegistry for extensibility — users can register
-custom fairness metrics with the same pattern used by the ExplainerRegistry.
+* ``compute_group_metric_disparity`` applies the group-comparison framework of
+  Dai et al. (2022) to a caller-selected scalar property.  Its default is only
+  attribution L1 magnitude, not a validated explanation-quality measure.
+* the cross-group Lipschitz, sensitive-intervention, sensitive-attribution,
+  and prediction-conditioned functions are useful audit probes.  They are not
+  implementations of Dwork individual fairness, Kusner counterfactual
+  fairness, or Hardt equality of opportunity.
 
-References:
-    Dai, J., Upadhyay, S., Aïvodji, U., Bach, S. H., & Lakkaraju, H. (2022).
-    Fairness via Explanation Quality: Evaluating Disparities in the Quality
-    of Post hoc Explanations. AIES. https://doi.org/10.1145/3514094.3534159
+References
+----------
+Dai, J., Upadhyay, S., Aivodji, U., Bach, S. H., & Lakkaraju, H. (2022).
+Fairness via Explanation Quality: Evaluating Disparities in the Quality of
+Post hoc Explanations. AIES. https://doi.org/10.1145/3514094.3534159
 
-    Balagopalan, A., Zhang, H., Hamidieh, K., Hartvigsen, T., Rudzicz, F., &
-    Ghassemi, M. (2022). The Road to Explainability is Paved with Bias:
-    Measuring the Fairness of Explanations. FAccT.
-    https://doi.org/10.1145/3531146.3533179
-
-    Dwork, C., Hardt, M., Pitassi, T., Reingold, O., & Zemel, R. (2012).
-    Fairness Through Awareness. ITCS.
-
-    Kusner, M. J., Loftus, J., Russell, C., & Silva, R. (2017).
-    Counterfactual Fairness. NeurIPS.
-
-    Hardt, M., Price, E., & Srebro, N. (2016). Equality of Opportunity in
-    Supervised Learning. NeurIPS.
-
-    Aïvodji, U., Arai, H., Fortineau, O., Gambs, S., Hara, S., & Tapp, A.
-    (2019). Fairwashing: the risk of rationalization. ICML.
+Balagopalan, A., Zhang, H., Hamidieh, K., Hartvigsen, T., Rudzicz, F., &
+Ghassemi, M. (2022). The Road to Explainability is Paved with Bias: Measuring
+the Fairness of Explanations. FAccT.
+https://doi.org/10.1145/3531146.3533179
 """
 
-import warnings
-import numpy as np
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+from dataclasses import dataclass
 from itertools import combinations
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-    Type,
-    Union,
-)
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from explainiverse.core.explanation import Explanation
+import numpy as np
+
 from explainiverse.core.explainer import BaseExplainer
+from explainiverse.core.explanation import Explanation
+
+ScalarMetric = Callable[[np.ndarray], float]
 
 
-# =============================================================================
-# Default Inner Metrics
-# =============================================================================
-
-def _default_inner_metric(attr_vector: np.ndarray) -> float:
-    """
-    Default per-instance explanation quality metric: L1 norm.
-
-    This measures the total magnitude of the attribution vector, which
-    serves as a simple proxy for explanation "intensity". Disparity in
-    this value across groups indicates that some groups receive explanations
-    with systematically different magnitudes.
-
-    Args:
-        attr_vector: 1D numpy array of attribution values for one instance.
-
-    Returns:
-        Scalar quality score for this instance.
-    """
+def _attribution_l1_magnitude(attr_vector: np.ndarray) -> float:
+    """Return attribution L1 magnitude; this is not a quality or fairness score."""
     return float(np.sum(np.abs(attr_vector)))
 
 
-# =============================================================================
-# Input Validation Helpers
-# =============================================================================
+# Kept private-name compatible for callers that imported it despite the underscore.
+_default_inner_metric = _attribution_l1_magnitude
+
+
+def _validate_matrix(values: Any, name: str) -> np.ndarray:
+    if isinstance(values, (str, bytes)):
+        raise TypeError(f"{name} must be a numeric two-dimensional array.")
+    try:
+        array = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be convertible to a numeric array: {exc}") from exc
+    if array.ndim != 2:
+        raise ValueError(f"{name} must be 2D, got shape {array.shape}.")
+    if array.shape[0] == 0:
+        raise ValueError(f"{name} must contain at least one sample.")
+    if array.shape[1] == 0:
+        raise ValueError(f"{name} must contain at least one feature.")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return array
+
 
 def _validate_attributions(attributions: Any) -> np.ndarray:
-    """
-    Validate and convert attributions to a 2D numpy array.
+    return _validate_matrix(attributions, "attributions")
 
-    Args:
-        attributions: Array-like of shape (n_samples, n_features).
 
-    Returns:
-        2D numpy float64 array.
-
-    Raises:
-        TypeError: If not array-like.
-        ValueError: If wrong dimensionality or empty.
-    """
-    if isinstance(attributions, str):
-        raise TypeError(
-            f"attributions must be array-like, got {type(attributions).__name__}"
-        )
+def _normalise_label(value: Any, name: str) -> Any:
+    label = value.item() if isinstance(value, np.generic) else value
+    if label is None:
+        raise ValueError(f"{name} must not contain missing labels.")
+    if isinstance(label, (float, np.floating)) and not np.isfinite(label):
+        raise ValueError(f"{name} must not contain NaN or infinite labels.")
     try:
-        arr = np.asarray(attributions, dtype=np.float64)
+        hash(label)
+    except TypeError as exc:
+        raise TypeError(f"Every {name} label must be hashable, got {label!r}.") from exc
+    return label
+
+
+def _validate_labels(labels: Any, n_samples: int, name: str) -> np.ndarray:
+    if isinstance(labels, (str, bytes)):
+        raise TypeError(f"{name} must be a one-dimensional array of labels.")
+    try:
+        array = np.asarray(labels, dtype=object)
     except (TypeError, ValueError) as exc:
-        raise TypeError(
-            f"attributions must be convertible to a numeric numpy array: {exc}"
-        ) from exc
-
-    if arr.ndim != 2:
-        raise ValueError(
-            f"attributions must be 2D (n_samples, n_features), got shape {arr.shape}"
-        )
-    if arr.shape[0] == 0:
-        raise ValueError("attributions must not be empty (0 samples).")
-    return arr
+        raise TypeError(f"{name} must be array-like: {exc}") from exc
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be 1D, got shape {array.shape}.")
+    if len(array) != n_samples:
+        raise ValueError(f"{name} length ({len(array)}) does not match sample count ({n_samples}).")
+    if len(array) == 0:
+        raise ValueError(f"{name} must not be empty.")
+    return np.asarray([_normalise_label(v, name) for v in array], dtype=object)
 
 
-def _validate_sensitive_features(
-    sensitive_features: Any,
-    n_samples: int,
-) -> np.ndarray:
-    """
-    Validate sensitive features array and coerce to group labels.
-
-    Accepts int, float, or string arrays. Float arrays are cast to int
-    when they contain whole numbers.
-
-    Args:
-        sensitive_features: 1D array-like of group labels.
-        n_samples: Expected number of samples (must match).
-
-    Returns:
-        1D numpy array of group labels (dtype varies: int or str).
-
-    Raises:
-        ValueError: If length mismatch or empty.
-    """
-    sf = np.asarray(sensitive_features)
-    if sf.ndim != 1:
-        raise ValueError(
-            f"sensitive_features must be 1D, got shape {sf.shape}"
-        )
-    if len(sf) != n_samples:
-        raise ValueError(
-            f"sensitive_features length ({len(sf)}) does not match "
-            f"attributions rows ({n_samples}). Length mismatch."
-        )
-    if len(sf) == 0:
-        raise ValueError("sensitive_features must not be empty.")
-
-    # Coerce float -> int when possible (e.g. 0.0 -> 0)
-    if sf.dtype.kind == 'f':
-        if np.all(sf == sf.astype(int)):
-            sf = sf.astype(int)
-    return sf
+def _validate_sensitive_features(sensitive_features: Any, n_samples: int) -> np.ndarray:
+    return _validate_labels(sensitive_features, n_samples, "sensitive_features")
 
 
-def _partition_by_group(
-    sensitive_features: np.ndarray,
-) -> Dict[Any, np.ndarray]:
-    """
-    Partition sample indices by group label.
-
-    Args:
-        sensitive_features: 1D array of group labels.
-
-    Returns:
-        Dict mapping group_label -> array of indices belonging to that group.
-    """
+def _partition_by_group(labels: np.ndarray) -> Dict[Any, np.ndarray]:
     groups: Dict[Any, List[int]] = {}
-    for i, g in enumerate(sensitive_features):
-        key = g.item() if hasattr(g, 'item') else g
-        groups.setdefault(key, []).append(i)
-    return {k: np.array(v) for k, v in groups.items()}
+    for index, label in enumerate(labels):
+        groups.setdefault(label, []).append(index)
+    return {label: np.asarray(indices, dtype=np.int64) for label, indices in groups.items()}
 
 
-# =============================================================================
-# Statistical Testing Helpers
-# =============================================================================
+def _require_multiple_groups(groups: Dict[Any, np.ndarray], context: str) -> None:
+    if len(groups) < 2:
+        raise ValueError(
+            f"{context} requires at least two observed groups; a one-group sample "
+            "cannot identify a between-group disparity."
+        )
 
-def _mann_whitney_u(a: np.ndarray, b: np.ndarray) -> float:
-    """
-    Mann-Whitney U test p-value for two independent samples.
 
-    Returns 1.0 if either sample has fewer than 1 element or all values
-    are identical (no variation).
-
-    Args:
-        a: 1D array of metric values for group A.
-        b: 1D array of metric values for group B.
-
-    Returns:
-        Two-sided p-value.
-    """
-    if len(a) < 1 or len(b) < 1:
-        return 1.0
-    # If both samples are constant and equal, no test needed
-    if np.std(a) == 0 and np.std(b) == 0 and np.mean(a) == np.mean(b):
-        return 1.0
+def _validate_scores(scores: Any, n_samples: int, name: str) -> np.ndarray:
+    if isinstance(scores, (str, bytes)):
+        raise TypeError(f"{name} must be a numeric one-dimensional array.")
     try:
-        from scipy.stats import mannwhitneyu
-        _, p = mannwhitneyu(a, b, alternative='two-sided')
-        return float(p)
-    except Exception:
-        return 1.0
+        array = np.asarray(scores, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be numeric: {exc}") from exc
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be 1D, got shape {array.shape}.")
+    if len(array) != n_samples:
+        raise ValueError(f"{name} length ({len(array)}) does not match sample count ({n_samples}).")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return array
 
 
-def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
+def _score_rows(attributions: np.ndarray, metric: ScalarMetric) -> np.ndarray:
+    if not callable(metric):
+        raise TypeError("inner_metric must be callable.")
+    scores: List[float] = []
+    for index, row in enumerate(attributions):
+        try:
+            raw_score = metric(row.copy())
+        except Exception as exc:
+            raise ValueError(f"inner_metric failed for row {index}: {exc}") from exc
+        value = np.asarray(raw_score)
+        if value.ndim != 0 or value.dtype.kind not in "iuf":
+            raise TypeError(
+                "inner_metric must return one real scalar per row; "
+                f"row {index} returned shape {value.shape}."
+            )
+        score = float(value)
+        if not np.isfinite(score):
+            raise ValueError(f"inner_metric returned a non-finite value for row {index}.")
+        scores.append(score)
+    return np.asarray(scores, dtype=np.float64)
+
+
+def _mann_whitney_u(a: np.ndarray, b: np.ndarray) -> Optional[float]:
+    """Return a two-sided Mann-Whitney U p-value when it is defined.
+
+    If every pooled observation is identical, the tie-corrected asymptotic
+    variance is zero.  SciPy versions have returned either ``1.0`` or ``NaN``
+    for that degenerate case; this API reports ``None`` instead of presenting a
+    version-dependent or undefined value as statistical evidence.
     """
-    Cohen's d effect size between two samples.
+    if len(a) == 0 or len(b) == 0:
+        raise ValueError("Mann-Whitney U requires two non-empty samples.")
+    pooled = np.concatenate((a, b))
+    if np.all(pooled == pooled[0]):
+        return None
+    from scipy.stats import mannwhitneyu
 
-    Uses pooled standard deviation. Returns 0.0 if both samples have
-    zero variance.
-
-    Args:
-        a: 1D array of metric values for group A.
-        b: 1D array of metric values for group B.
-
-    Returns:
-        Cohen's d (positive = group A has higher mean).
-    """
-    n_a, n_b = len(a), len(b)
-    if n_a < 1 or n_b < 1:
-        return 0.0
-    mean_a, mean_b = np.mean(a), np.mean(b)
-    var_a, var_b = np.var(a, ddof=1) if n_a > 1 else 0.0, np.var(b, ddof=1) if n_b > 1 else 0.0
-    pooled_std = np.sqrt(
-        ((n_a - 1) * var_a + (n_b - 1) * var_b)
-        / max(n_a + n_b - 2, 1)
-    )
-    if pooled_std < 1e-15:
-        return 0.0
-    return float((mean_a - mean_b) / pooled_std)
+    result = mannwhitneyu(a, b, alternative="two-sided")
+    p_value = float(result.pvalue)
+    if not np.isfinite(p_value):
+        raise ValueError("Mann-Whitney U returned a non-finite p-value.")
+    return p_value
 
 
-# =============================================================================
-# FairnessMetricMeta & FairnessMetricRegistry
-# =============================================================================
+def _cohens_d(a: np.ndarray, b: np.ndarray) -> Optional[float]:
+    """Return pooled Cohen's d, or ``None`` when sample variance is unavailable."""
+    if len(a) < 2 or len(b) < 2:
+        return None
+    mean_difference = float(np.mean(a) - np.mean(b))
+    degrees_of_freedom = len(a) + len(b) - 2
+    pooled_variance = (
+        (len(a) - 1) * np.var(a, ddof=1) + (len(b) - 1) * np.var(b, ddof=1)
+    ) / degrees_of_freedom
+    if pooled_variance == 0.0:
+        if mean_difference == 0.0:
+            return 0.0
+        return float(np.copysign(np.inf, mean_difference))
+    return float(mean_difference / np.sqrt(pooled_variance))
 
-@dataclass
+
+def _group_statistics(
+    scores: np.ndarray,
+    groups: Dict[Any, np.ndarray],
+) -> Dict[str, Any]:
+    group_scores = {label: scores[indices] for label, indices in groups.items()}
+    group_means = {label: float(np.mean(values)) for label, values in group_scores.items()}
+    pairwise_gaps: Dict[Tuple[Any, Any], float] = {}
+    pairwise_p_values: Dict[Tuple[Any, Any], Optional[float]] = {}
+    pairwise_effect_sizes: Dict[Tuple[Any, Any], Optional[float]] = {}
+    for left, right in combinations(groups, 2):
+        pair = (left, right)
+        pairwise_gaps[pair] = abs(group_means[left] - group_means[right])
+        pairwise_p_values[pair] = _mann_whitney_u(group_scores[left], group_scores[right])
+        pairwise_effect_sizes[pair] = _cohens_d(group_scores[left], group_scores[right])
+
+    effects = [abs(value) for value in pairwise_effect_sizes.values() if value is not None]
+    available_p_values = [value for value in pairwise_p_values.values() if value is not None]
+    unavailable_p_value_pairs = [pair for pair, value in pairwise_p_values.items() if value is None]
+    return {
+        "disparity": float(max(pairwise_gaps.values())),
+        "group_means": group_means,
+        "pairwise_gaps": pairwise_gaps,
+        "pairwise_p_values": pairwise_p_values,
+        "pairwise_effect_sizes": pairwise_effect_sizes,
+        # Compatibility summaries.  For >2 groups, p_value is explicitly an
+        # uncorrected minimum and must not be treated as a family-wise p-value.
+        "p_value": float(min(available_p_values)) if available_p_values else None,
+        "p_value_unavailable_pairs": unavailable_p_value_pairs,
+        "effect_size": float(max(effects)) if effects else None,
+        "p_value_adjustment": "none",
+        "p_value_summary": (
+            "two-sided Mann-Whitney U; None marks completely tied pooled samples"
+            if len(groups) == 2
+            else (
+                "minimum available uncorrected pairwise two-sided Mann-Whitney U; "
+                "None marks completely tied pooled samples"
+            )
+        ),
+    }
+
+
+_FAIRNESS_LEVELS = frozenset({"group", "individual", "conditional"})
+
+
+@dataclass(frozen=True)
 class FairnessMetricMeta:
-    """
-    Metadata for a fairness metric, used for discovery and filtering.
+    """Discovery metadata for a registered disparity diagnostic."""
 
-    Attributes:
-        level: Granularity — "group", "individual", or "conditional".
-        composable: Whether the metric accepts a user-supplied inner metric.
-        description: Human-readable description.
-        paper_reference: Citation for the original paper.
-    """
-    level: str  # "group", "individual", "conditional"
+    level: str
     composable: bool = False
     description: str = ""
     paper_reference: Optional[str] = None
+    canonical_claim: bool = False
+    claim_scope: str = "diagnostic only"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.level, str) or self.level.strip() not in _FAIRNESS_LEVELS:
+            raise ValueError(f"level must be one of {sorted(_FAIRNESS_LEVELS)}, got {self.level!r}")
+        if not isinstance(self.composable, bool):
+            raise TypeError("composable must be bool")
+        if not isinstance(self.canonical_claim, bool):
+            raise TypeError("canonical_claim must be bool")
+        if not isinstance(self.description, str):
+            raise TypeError("description must be a string")
+        if self.paper_reference is not None and (
+            not isinstance(self.paper_reference, str) or not self.paper_reference.strip()
+        ):
+            raise ValueError("paper_reference must be a non-empty string or None")
+        if not isinstance(self.claim_scope, str) or not self.claim_scope.strip():
+            raise ValueError("claim_scope must be a non-empty string")
+        object.__setattr__(self, "level", self.level.strip())
+        object.__setattr__(self, "description", self.description.strip())
+        object.__setattr__(self, "claim_scope", self.claim_scope.strip())
+        if self.paper_reference is not None:
+            object.__setattr__(self, "paper_reference", self.paper_reference.strip())
 
     def matches(self, level: Optional[str] = None) -> bool:
-        """Check if this metadata matches the given filter criteria."""
-        if level is not None and self.level != level:
-            return False
-        return True
+        return level is None or self.level == level
 
 
 class FairnessMetricRegistry:
-    """
-    Extensible registry for fairness evaluation metrics.
+    """Registry for fairness-related metrics and disparity diagnostics."""
 
-    Modelled on the ExplainerRegistry pattern. Allows registration of
-    custom fairness metrics via programmatic or decorator-based APIs.
-
-    Example:
-        from explainiverse.evaluation.fairness import (
-            FairnessMetricRegistry, FairnessMetricMeta
-        )
-
-        registry = FairnessMetricRegistry()
-
-        @registry.register_decorator(
-            name="my_metric",
-            meta=FairnessMetricMeta(level="group", composable=False),
-        )
-        def my_custom_fairness(attributions, sensitive_features, **kwargs):
-            ...
-            return {"score": 0.42}
-
-        result = registry.evaluate("my_metric", attributions, sensitive_features)
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._registry: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _validated_name(name: str) -> str:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Metric name must be a non-empty string.")
+        return name.strip()
 
     def register(
         self,
         name: str,
-        metric_fn: Callable,
+        metric_fn: Callable[..., Dict[str, Any]],
         meta: FairnessMetricMeta,
         override: bool = False,
     ) -> None:
-        """
-        Register a fairness metric function with metadata.
-
-        Args:
-            name: Unique identifier (e.g. "group_fairness").
-            metric_fn: Callable(attributions, sensitive_features, **kw) -> dict.
-            meta: Metadata describing the metric.
-            override: If True, allows overwriting an existing registration.
-
-        Raises:
-            ValueError: If name already registered and override=False.
-        """
+        name = self._validated_name(name)
+        if not callable(metric_fn):
+            raise TypeError("metric_fn must be callable.")
+        if not isinstance(meta, FairnessMetricMeta):
+            raise TypeError("meta must be a FairnessMetricMeta instance.")
+        if not isinstance(override, bool):
+            raise TypeError("override must be bool.")
         if name in self._registry and not override:
             raise ValueError(
-                f"Fairness metric '{name}' is already registered. "
-                "Use override=True to replace."
+                f"Fairness metric '{name}' is already registered. " "Use override=True to replace."
             )
         self._registry[name] = {"fn": metric_fn, "meta": meta}
 
     def unregister(self, name: str) -> None:
-        """
-        Remove a fairness metric from the registry.
-
-        Raises:
-            KeyError: If the metric is not registered.
-        """
+        name = self._validated_name(name)
         if name not in self._registry:
-            raise KeyError(
-                f"Fairness metric '{name}' is not registered."
-            )
+            raise KeyError(f"Fairness metric '{name}' is not registered.")
         del self._registry[name]
 
     def get(self, name: str) -> Dict[str, Any]:
-        """
-        Retrieve a registered metric entry by name.
-
-        Returns:
-            Dict with "fn" and "meta" keys.
-
-        Raises:
-            KeyError: If the metric is not registered.
-        """
+        name = self._validated_name(name)
         if name not in self._registry:
-            available = list(self._registry.keys())
             raise KeyError(
-                f"Fairness metric '{name}' is not registered. "
-                f"Available: {available}"
+                f"Fairness metric '{name}' is not registered. " f"Available: {list(self._registry)}"
             )
-        return self._registry[name]
+        # Return a detached entry. The metadata itself is frozen, so callers
+        # cannot mutate registry discovery contracts through either surface.
+        entry = self._registry[name]
+        return {"fn": entry["fn"], "meta": entry["meta"]}
 
     def get_meta(self, name: str) -> FairnessMetricMeta:
-        """Get just the metadata for a metric."""
         return self.get(name)["meta"]
 
     def list_metrics(self, with_meta: bool = False) -> Any:
-        """
-        List all registered fairness metrics.
-
-        Args:
-            with_meta: If True, return dict with metadata.
-
-        Returns:
-            List of names, or dict of {name: {"fn": ..., "meta": ...}}.
-        """
-        if with_meta:
-            return dict(self._registry)
-        return list(self._registry.keys())
+        if not isinstance(with_meta, bool):
+            raise TypeError("with_meta must be bool")
+        return (
+            {
+                name: {"fn": entry["fn"], "meta": entry["meta"]}
+                for name, entry in self._registry.items()
+            }
+            if with_meta
+            else list(self._registry)
+        )
 
     def filter(self, level: Optional[str] = None) -> List[str]:
-        """
-        Filter metrics by level (group, individual, conditional).
-
-        Returns:
-            List of matching metric names.
-        """
-        results = []
-        for name, entry in self._registry.items():
-            if entry["meta"].matches(level=level):
-                results.append(name)
-        return results
+        if level is not None and level not in _FAIRNESS_LEVELS:
+            raise ValueError(f"level must be one of {sorted(_FAIRNESS_LEVELS)} or None")
+        return [
+            name for name, entry in self._registry.items() if entry["meta"].matches(level=level)
+        ]
 
     def evaluate(
         self,
         name: str,
         attributions: np.ndarray,
         sensitive_features: np.ndarray,
-        **kwargs,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Evaluate a registered fairness metric by name.
+        return self.get(name)["fn"](attributions, sensitive_features, **kwargs)
 
-        Args:
-            name: Metric name.
-            attributions: 2D array (n_samples, n_features).
-            sensitive_features: 1D array of group labels.
-            **kwargs: Additional keyword arguments for the metric.
+    def register_decorator(self, name: str, meta: FairnessMetricMeta) -> Callable:
+        def decorator(function: Callable) -> Callable:
+            self.register(name, function, meta)
+            return function
 
-        Returns:
-            Dict of metric results.
-        """
-        entry = self.get(name)
-        return entry["fn"](attributions, sensitive_features, **kwargs)
-
-    def register_decorator(
-        self,
-        name: str,
-        meta: FairnessMetricMeta,
-    ) -> Callable:
-        """
-        Decorator for registering a fairness metric function.
-
-        Usage:
-            @registry.register_decorator(
-                name="my_metric",
-                meta=FairnessMetricMeta(level="group"),
-            )
-            def my_metric(attributions, sensitive_features, **kwargs):
-                return {"score": 0.0}
-        """
-        def decorator(fn: Callable) -> Callable:
-            self.register(name, fn, meta)
-            return fn
         return decorator
 
     def summary(self) -> str:
-        """Generate a human-readable summary of all registered metrics."""
         lines = [
             "=" * 60,
-            "Explainiverse — Registered Fairness Metrics",
+            "Explainiverse - Registered Fairness-Related Diagnostics",
             "=" * 60,
             "",
         ]
         for name, entry in self._registry.items():
             meta: FairnessMetricMeta = entry["meta"]
-            desc = meta.description or "(no description)"
-            lines.append(f"  {name} [{meta.level}]: {desc}")
-        lines.append("")
-        lines.append(f"Total: {len(self._registry)} metrics")
-        lines.append("=" * 60)
+            lines.append(f"  {name} [{meta.level}]: {meta.description or '(no description)'}")
+        lines.extend(["", f"Total: {len(self._registry)} metrics", "=" * 60])
         return "\n".join(lines)
 
 
-# =============================================================================
-# Metric 1: Group Fairness (Dai et al., 2022)
-# =============================================================================
+def compute_group_metric_disparity(
+    attributions: Any,
+    sensitive_features: Any,
+    inner_metric: Optional[ScalarMetric] = None,
+) -> Dict[str, Any]:
+    """Compare a scalar attribution property across observed groups.
+
+    This follows the compositional audit pattern of Dai et al. (2022), but the
+    interpretation is only as valid as ``inner_metric``.  When omitted, the
+    function compares attribution L1 magnitude and makes no explanation-quality
+    or fairness claim.
+    """
+    attrs = _validate_attributions(attributions)
+    labels = _validate_sensitive_features(sensitive_features, len(attrs))
+    groups = _partition_by_group(labels)
+    _require_multiple_groups(groups, "Group metric disparity")
+
+    supplied_metric = inner_metric is not None
+    metric: ScalarMetric = inner_metric if inner_metric is not None else _attribution_l1_magnitude
+    scores = _score_rows(attrs, metric)
+    result = _group_statistics(scores, groups)
+    result.update(
+        {
+            "metric_name": (
+                getattr(metric, "__name__", "custom_metric")
+                if supplied_metric
+                else "attribution_l1_magnitude"
+            ),
+            "inner_metric_supplied": supplied_metric,
+            "canonical_explanation_quality": False,
+            "canonical_fairness_metric": False,
+            "interpretation": (
+                "Between-group difference in the selected scalar property; "
+                "not a standalone fairness verdict."
+            ),
+        }
+    )
+    return result
+
 
 def compute_group_fairness(
     attributions: Any,
     sensitive_features: Any,
-    inner_metric: Optional[Callable[[np.ndarray], float]] = None,
+    inner_metric: Optional[ScalarMetric] = None,
 ) -> Dict[str, Any]:
+    """Compatibility name for :func:`compute_group_metric_disparity`.
+
+    The return value is a disparity diagnostic, not a binary or normative
+    determination of fairness.
     """
-    Compute group-based explanation fairness disparity.
+    return compute_group_metric_disparity(attributions, sensitive_features, inner_metric)
 
-    Measures whether explanation quality differs across demographic groups
-    by computing an inner quality metric per instance, averaging per group,
-    and reporting the disparity (max absolute difference between group means),
-    along with statistical tests.
 
-    For binary groups this is the absolute difference of means; for multi-group
-    it is the maximum pairwise absolute difference.
-
-    Args:
-        attributions: Array of shape (n_samples, n_features) — pre-computed
-            attribution vectors.
-        sensitive_features: 1D array of group labels (int, float, or str).
-            Length must match attributions rows.
-        inner_metric: Optional callable that takes a 1D attribution vector
-            and returns a scalar quality score. Defaults to L1 norm.
-
-    Returns:
-        Dict with keys:
-            - "disparity": float — maximum pairwise gap in group means.
-            - "group_means": dict — {group_label: mean_score}.
-            - "p_value": float — Mann-Whitney U p-value (binary groups) or
-              minimum pairwise p-value (multi-group).
-            - "effect_size": float — Cohen's d (binary) or max absolute
-              Cohen's d (multi-group).
-
-    References:
-        Dai, J., et al. (2022). Fairness via Explanation Quality. AIES.
-    """
-    attrs = _validate_attributions(attributions)
-    sf = _validate_sensitive_features(sensitive_features, attrs.shape[0])
-
-    if inner_metric is None:
-        inner_metric = _default_inner_metric
-
-    # Compute per-instance quality scores
-    scores = np.array([inner_metric(attrs[i]) for i in range(attrs.shape[0])])
-
-    # Partition into groups
-    groups = _partition_by_group(sf)
-
-    if len(groups) < 2:
-        # Single group — no disparity possible
-        single_key = list(groups.keys())[0]
-        return {
-            "disparity": 0.0,
-            "group_means": {single_key: float(np.mean(scores))},
-            "p_value": 1.0,
-            "effect_size": 0.0,
-        }
-
-    # Per-group means
-    group_means = {}
-    group_scores = {}
-    for label, indices in groups.items():
-        gs = scores[indices]
-        group_means[label] = float(np.mean(gs))
-        group_scores[label] = gs
-
-    # Pairwise comparisons
-    labels = list(groups.keys())
-    max_disparity = 0.0
-    min_p = 1.0
-    max_effect = 0.0
-
-    for la, lb in combinations(labels, 2):
-        gap = abs(group_means[la] - group_means[lb])
-        if gap > max_disparity:
-            max_disparity = gap
-        p = _mann_whitney_u(group_scores[la], group_scores[lb])
-        if p < min_p:
-            min_p = p
-        d = abs(_cohens_d(group_scores[la], group_scores[lb]))
-        if d > max_effect:
-            max_effect = d
-
-    return {
-        "disparity": float(max_disparity),
-        "group_means": group_means,
-        "p_value": float(min_p),
-        "effect_size": float(max_effect),
-    }
+def _extract_tabular_attribution(
+    explanation: Explanation,
+    n_features: int,
+    expected_names: Optional[Tuple[str, ...]],
+) -> Tuple[np.ndarray, Tuple[str, ...]]:
+    if not isinstance(explanation, Explanation):
+        raise TypeError("explainer.explain() must return an Explanation instance.")
+    mapping = explanation.explanation_data.get("feature_attributions")
+    if not isinstance(mapping, dict) or not mapping:
+        raise ValueError("Explanation must contain a non-empty feature_attributions mapping.")
+    if explanation.feature_names is None:
+        raise ValueError(
+            "Explanation.feature_names is required to align tabular attributions safely."
+        )
+    names = tuple(explanation.feature_names)
+    if len(names) != n_features or len(set(names)) != n_features:
+        raise ValueError(
+            "Explanation.feature_names must contain one unique name per input feature."
+        )
+    if set(mapping) != set(names):
+        raise ValueError("feature_attributions keys must match Explanation.feature_names exactly.")
+    if expected_names is not None and names != expected_names:
+        raise ValueError("Explanation feature order changed between samples.")
+    try:
+        vector = np.asarray([mapping[name] for name in names], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Attribution values must be numeric: {exc}") from exc
+    if not np.all(np.isfinite(vector)):
+        raise ValueError("Explanation attributions must be finite.")
+    return vector, names
 
 
 def compute_group_fairness_score(
     explainer: BaseExplainer,
-    inputs: np.ndarray,
+    inputs: Any,
     sensitive_features: Any,
-    inner_metric: Optional[Callable[[np.ndarray], float]] = None,
+    inner_metric: Optional[ScalarMetric] = None,
 ) -> Dict[str, Any]:
-    """
-    Explainer-based API for group fairness: generates attributions, then evaluates.
-
-    Args:
-        explainer: An Explainiverse explainer instance.
-        inputs: 2D array (n_samples, n_features).
-        sensitive_features: 1D array of group labels.
-        inner_metric: Optional inner quality metric.
-
-    Returns:
-        Same as compute_group_fairness().
-    """
-    from explainiverse.evaluation.axiomatic import (
-        _extract_attribution_vector,
-    )
-
-    inputs = np.asarray(inputs, dtype=np.float64)
-    n_features = inputs.shape[1]
-
-    attr_rows = []
-    for i in range(inputs.shape[0]):
-        exp = explainer.explain(inputs[i])
-        if not getattr(exp, 'feature_names', None):
-            exp.feature_names = [f"feature_{j}" for j in range(n_features)]
-        vec = _extract_attribution_vector(exp)
-        attr_rows.append(vec)
-
-    attributions = np.array(attr_rows, dtype=np.float64)
-    return compute_group_fairness(attributions, sensitive_features, inner_metric)
+    """Generate aligned tabular attributions, then compute group disparity."""
+    data = _validate_matrix(inputs, "inputs")
+    rows: List[np.ndarray] = []
+    expected_names: Optional[Tuple[str, ...]] = None
+    for row in data:
+        explanation = explainer.explain(row.copy())
+        vector, expected_names = _extract_tabular_attribution(
+            explanation, data.shape[1], expected_names
+        )
+        rows.append(vector)
+    return compute_group_metric_disparity(np.vstack(rows), sensitive_features, inner_metric)
 
 
 def compute_batch_group_fairness(
     batch_attributions: List[np.ndarray],
     batch_sensitive_features: List[Any],
-    inner_metric: Optional[Callable[[np.ndarray], float]] = None,
+    inner_metric: Optional[ScalarMetric] = None,
 ) -> List[Dict[str, Any]]:
+    """Compute group scalar disparities for equally sized batch lists."""
+    if len(batch_attributions) != len(batch_sensitive_features):
+        raise ValueError("batch_attributions and batch_sensitive_features must have equal lengths.")
+    if len(batch_attributions) == 0:
+        raise ValueError("Batch inputs must not be empty.")
+    return [
+        compute_group_metric_disparity(attrs, labels, inner_metric)
+        for attrs, labels in zip(batch_attributions, batch_sensitive_features)
+    ]
+
+
+def compute_cross_group_lipschitz_diagnostic(
+    inputs: Any,
+    attributions: Any,
+    sensitive_features: Any,
+    distance_threshold: Optional[float] = None,
+    n_pairs: int = 500,
+    random_state: int = 42,
+) -> Dict[str, Any]:
+    """Measure attribution/input distance ratios for nearby cross-group pairs.
+
+    Distances depend on feature scaling and the chosen representation.  This
+    empirical ratio is therefore not Dwork et al.'s task-specific individual
+    fairness guarantee.
     """
-    Batch computation of group fairness across multiple attribution sets.
+    data = _validate_matrix(inputs, "inputs")
+    attrs = _validate_attributions(attributions)
+    if len(data) != len(attrs):
+        raise ValueError("inputs and attributions must have the same row count.")
+    labels = _validate_sensitive_features(sensitive_features, len(data))
+    groups = _partition_by_group(labels)
+    _require_multiple_groups(groups, "Cross-group Lipschitz diagnostic")
+    if isinstance(n_pairs, (bool, np.bool_)) or not isinstance(n_pairs, (int, np.integer)):
+        raise TypeError("n_pairs must be a positive integer.")
+    if n_pairs <= 0:
+        raise ValueError("n_pairs must be positive.")
+    if isinstance(random_state, (bool, np.bool_)) or not isinstance(
+        random_state, (int, np.integer)
+    ):
+        raise TypeError("random_state must be an integer.")
+    if distance_threshold is not None:
+        if isinstance(distance_threshold, (bool, np.bool_)):
+            raise TypeError("distance_threshold must be a non-negative finite number.")
+        distance_threshold = float(distance_threshold)
+        if not np.isfinite(distance_threshold) or distance_threshold < 0:
+            raise ValueError("distance_threshold must be non-negative and finite.")
 
-    Args:
-        batch_attributions: List of 2D arrays.
-        batch_sensitive_features: List of 1D group-label arrays.
-        inner_metric: Optional inner quality metric.
+    pairs: List[Tuple[int, int]] = []
+    for left, right in combinations(groups, 2):
+        pairs.extend((int(i), int(j)) for i in groups[left] for j in groups[right])
+    feature_distances = np.asarray(
+        [np.linalg.norm(data[i] - data[j]) for i, j in pairs], dtype=np.float64
+    )
+    attribution_distances = np.asarray(
+        [np.linalg.norm(attrs[i] - attrs[j]) for i, j in pairs], dtype=np.float64
+    )
+    selected_threshold = (
+        float(np.percentile(feature_distances, 25))
+        if distance_threshold is None
+        else distance_threshold
+    )
+    qualifying = np.flatnonzero(feature_distances <= selected_threshold)
+    if len(qualifying) == 0:
+        raise ValueError(
+            "No cross-group pairs satisfy distance_threshold; the requested local "
+            "diagnostic is not estimable."
+        )
+    if len(qualifying) > n_pairs:
+        rng = np.random.default_rng(int(random_state))
+        qualifying = np.sort(rng.choice(qualifying, size=n_pairs, replace=False))
 
-    Returns:
-        List of result dicts (one per batch element).
-    """
-    results = []
-    for attrs, sf in zip(batch_attributions, batch_sensitive_features):
-        results.append(compute_group_fairness(attrs, sf, inner_metric))
-    return results
+    feature_selected = feature_distances[qualifying]
+    attribution_selected = attribution_distances[qualifying]
+    ratios = np.empty_like(feature_selected)
+    zero_distance = feature_selected == 0.0
+    ratios[~zero_distance] = attribution_selected[~zero_distance] / feature_selected[~zero_distance]
+    ratios[zero_distance & (attribution_selected == 0.0)] = 0.0
+    ratios[zero_distance & (attribution_selected > 0.0)] = np.inf
 
+    return {
+        "score": float(np.mean(ratios)),
+        "max_ratio": float(np.max(ratios)),
+        "n_pairs_evaluated": int(len(qualifying)),
+        "distance_threshold": selected_threshold,
+        "canonical_individual_fairness": False,
+        "interpretation": (
+            "Cross-group attribution sensitivity in the supplied, scale-dependent "
+            "input and attribution representations."
+        ),
+    }
 
-# =============================================================================
-# Metric 2: Individual Fairness (Dwork et al., 2012; adapted)
-# =============================================================================
 
 def compute_individual_fairness(
     inputs: Any,
@@ -611,108 +588,101 @@ def compute_individual_fairness(
     n_pairs: int = 500,
     random_state: int = 42,
 ) -> Dict[str, Any]:
+    """Compatibility name for a cross-group Lipschitz diagnostic."""
+    return compute_cross_group_lipschitz_diagnostic(
+        inputs,
+        attributions,
+        sensitive_features,
+        distance_threshold,
+        n_pairs,
+        random_state,
+    )
+
+
+def compute_sensitive_attribution_change(
+    inputs: Any,
+    attributions: Any,
+    sensitive_feature_idx: int,
+    counterfactual_explainer: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+) -> Dict[str, Any]:
+    """Measure attribution change under an intervention or matched-group proxy.
+
+    Changing one observed column while holding all others fixed is not a
+    structural-causal counterfactual.  Nearest-opposite-group matching is
+    observational rather than counterfactual.  Both modes are reported as
+    diagnostics, never as Kusner counterfactual fairness.
     """
-    Compute individual fairness of explanations.
-
-    Measures whether similar individuals from different groups receive similar
-    explanations. For cross-group pairs within a feature-space distance
-    threshold, computes the Lipschitz ratio:
-        explanation_distance / feature_distance.
-
-    A high ratio indicates unfairness: similar individuals are receiving
-    very different explanations.
-
-    Args:
-        inputs: 2D array (n_samples, n_features) — original feature values.
-        attributions: 2D array (n_samples, n_features) — attribution vectors.
-        sensitive_features: 1D group-label array.
-        distance_threshold: Maximum L2 feature distance for a pair to be
-            considered "similar". If None, uses the 25th percentile of all
-            cross-group distances.
-        n_pairs: Maximum number of cross-group pairs to sample.
-        random_state: Seed for reproducibility.
-
-    Returns:
-        Dict with keys:
-            - "score": float — mean Lipschitz ratio across qualifying pairs.
-              0 = perfectly fair, higher = more unfair.
-            - "max_ratio": float — worst-case Lipschitz ratio.
-            - "n_pairs_evaluated": int — how many cross-group pairs were used.
-
-    References:
-        Dwork, C., et al. (2012). Fairness Through Awareness. ITCS.
-    """
-    X = _validate_attributions(np.asarray(inputs, dtype=np.float64))
-    A = _validate_attributions(np.asarray(attributions, dtype=np.float64))
-    sf = _validate_sensitive_features(sensitive_features, X.shape[0])
-
-    if X.shape != A.shape:
+    data = _validate_matrix(inputs, "inputs")
+    attrs = _validate_attributions(attributions)
+    if len(data) != len(attrs):
+        raise ValueError("inputs and attributions must have the same row count.")
+    if isinstance(sensitive_feature_idx, (bool, np.bool_)) or not isinstance(
+        sensitive_feature_idx, (int, np.integer)
+    ):
+        raise TypeError("sensitive_feature_idx must be an integer.")
+    index = int(sensitive_feature_idx)
+    if index < 0 or index >= data.shape[1]:
         raise ValueError(
-            f"inputs shape {X.shape} does not match attributions shape {A.shape}."
+            f"sensitive_feature_idx {index} is out of bounds for {data.shape[1]} features."
+        )
+    if counterfactual_explainer is not None and not callable(counterfactual_explainer):
+        raise TypeError("counterfactual_explainer must be callable.")
+
+    sensitive_values = np.unique(data[:, index])
+    if len(sensitive_values) != 2:
+        raise ValueError(
+            "Sensitive-attribution change requires exactly two observed sensitive "
+            "values; it cannot be computed for a one-group or ambiguous multi-group sample."
         )
 
-    groups = _partition_by_group(sf)
-    labels = list(groups.keys())
-
-    if len(labels) < 2:
-        return {"score": 0.0, "max_ratio": 0.0, "n_pairs_evaluated": 0}
-
-    # Build cross-group pairs
-    rng = np.random.RandomState(random_state)
-    cross_pairs: List[Tuple[int, int]] = []
-    for la, lb in combinations(labels, 2):
-        idx_a = groups[la]
-        idx_b = groups[lb]
-        for ia in idx_a:
-            for ib in idx_b:
-                cross_pairs.append((ia, ib))
-
-    if len(cross_pairs) == 0:
-        return {"score": 0.0, "max_ratio": 0.0, "n_pairs_evaluated": 0}
-
-    # Subsample if too many pairs
-    if len(cross_pairs) > n_pairs:
-        indices = rng.choice(len(cross_pairs), size=n_pairs, replace=False)
-        cross_pairs = [cross_pairs[i] for i in indices]
-
-    # Compute distances
-    feat_dists = np.array([
-        np.linalg.norm(X[i] - X[j]) for i, j in cross_pairs
-    ])
-    attr_dists = np.array([
-        np.linalg.norm(A[i] - A[j]) for i, j in cross_pairs
-    ])
-
-    # Determine threshold
-    if distance_threshold is None:
-        if len(feat_dists) > 0 and np.max(feat_dists) > 0:
-            distance_threshold = float(np.percentile(feat_dists, 25))
-        else:
-            distance_threshold = 1e10  # accept all
-
-    # Filter to "similar" pairs
-    mask = feat_dists <= distance_threshold
-    if not np.any(mask):
-        # No similar cross-group pairs — relax to all pairs
-        mask = np.ones(len(cross_pairs), dtype=bool)
-
-    filtered_feat = feat_dists[mask]
-    filtered_attr = attr_dists[mask]
-
-    # Compute Lipschitz ratios
-    eps = 1e-15
-    ratios = filtered_attr / (filtered_feat + eps)
+    per_instance: List[float] = []
+    match_distances: Optional[List[float]] = None
+    if counterfactual_explainer is not None:
+        if set(sensitive_values.tolist()) != {0.0, 1.0}:
+            raise ValueError(
+                "One-feature intervention currently requires binary values encoded as 0 and 1."
+            )
+        for row_index, row in enumerate(data):
+            intervened = row.copy()
+            intervened[index] = 1.0 - intervened[index]
+            try:
+                changed = np.asarray(counterfactual_explainer(intervened), dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"counterfactual_explainer returned invalid values for row {row_index}: {exc}"
+                ) from exc
+            if changed.shape != (attrs.shape[1],):
+                raise ValueError(
+                    "counterfactual_explainer must return one attribution vector of "
+                    f"shape {(attrs.shape[1],)}, got {changed.shape}."
+                )
+            if not np.all(np.isfinite(changed)):
+                raise ValueError("counterfactual_explainer returned non-finite attributions.")
+            per_instance.append(float(np.linalg.norm(attrs[row_index] - changed)))
+        method = "one_feature_intervention"
+    else:
+        non_sensitive = np.delete(data, index, axis=1)
+        match_distances = []
+        sensitive_column = data[:, index]
+        for row_index, value in enumerate(sensitive_column):
+            candidates = np.flatnonzero(sensitive_column != value)
+            distances = np.linalg.norm(non_sensitive[candidates] - non_sensitive[row_index], axis=1)
+            match_offset = int(np.argmin(distances))
+            match_index = int(candidates[match_offset])
+            match_distances.append(float(distances[match_offset]))
+            per_instance.append(float(np.linalg.norm(attrs[row_index] - attrs[match_index])))
+        method = "nearest_opposite_group_matching"
 
     return {
-        "score": float(np.mean(ratios)),
-        "max_ratio": float(np.max(ratios)),
-        "n_pairs_evaluated": int(np.sum(mask)),
+        "score": float(np.mean(per_instance)),
+        "per_instance_scores": per_instance,
+        "method": method,
+        "match_distances": match_distances,
+        "canonical_counterfactual_fairness": False,
+        "requires_structural_causal_model_for_counterfactual_claim": True,
+        "interpretation": "Attribution-change diagnostic; lower change is not proof of fairness.",
     }
 
-
-# =============================================================================
-# Metric 3: Counterfactual Explanation Fairness (Kusner et al., 2017; adapted)
-# =============================================================================
 
 def compute_counterfactual_fairness(
     inputs: Any,
@@ -720,531 +690,332 @@ def compute_counterfactual_fairness(
     sensitive_feature_idx: int,
     counterfactual_explainer: Optional[Callable[[np.ndarray], np.ndarray]] = None,
 ) -> Dict[str, Any]:
+    """Compatibility name for :func:`compute_sensitive_attribution_change`."""
+    return compute_sensitive_attribution_change(
+        inputs, attributions, sensitive_feature_idx, counterfactual_explainer
+    )
+
+
+def compute_fidelity_gap(
+    fidelity_scores: Any,
+    sensitive_features: Any,
+    *,
+    higher_is_better: bool = True,
+) -> Dict[str, Any]:
+    """Compute Balagopalan et al. fidelity gaps from per-instance scores.
+
+    ``max_gap_from_average`` implements Definition 3.3.  With
+    ``higher_is_better=True`` it is ``max(overall_mean - group_mean)``; for an
+    error/loss where lower is better the direction is reversed.
+    ``mean_group_gap`` implements Definition 3.4, the mean absolute difference
+    over unordered subgroup-mean pairs.
     """
-    Compute counterfactual explanation fairness.
+    if not isinstance(higher_is_better, (bool, np.bool_)):
+        raise TypeError("higher_is_better must be a boolean.")
+    raw_scores = np.asarray(fidelity_scores)
+    if raw_scores.ndim != 1:
+        raise ValueError(f"fidelity_scores must be 1D, got shape {raw_scores.shape}.")
+    scores = _validate_scores(raw_scores, len(raw_scores), "fidelity_scores")
+    labels = _validate_sensitive_features(sensitive_features, len(scores))
+    groups = _partition_by_group(labels)
+    _require_multiple_groups(groups, "Fidelity gap")
 
-    Measures whether explanations change when the protected attribute is
-    flipped (all else equal). If pre-computed attributions are constant
-    (don't depend on sensitive feature), score is 0.
-
-    When a ``counterfactual_explainer`` is provided, it is called for each
-    instance's counterfactual (sensitive feature flipped) to obtain the
-    counterfactual attribution. Otherwise, a simple within-dataset matching
-    strategy is used: for each instance, find the nearest instance with
-    the opposite sensitive-feature value and use its attribution.
-
-    Args:
-        inputs: 2D array (n_samples, n_features).
-        attributions: 2D array (n_samples, n_features) — pre-computed.
-        sensitive_feature_idx: Column index of the sensitive feature.
-        counterfactual_explainer: Optional callable that takes a 1D instance
-            (with sensitive feature already flipped) and returns a 1D
-            attribution vector.
-
-    Returns:
-        Dict with keys:
-            - "score": float — mean L2 distance between original and
-              counterfactual attributions. Lower = fairer.
-            - "per_instance_scores": list of float — per-instance distances.
-
-    References:
-        Kusner, M. J., et al. (2017). Counterfactual Fairness. NeurIPS.
-    """
-    X = np.asarray(inputs, dtype=np.float64)
-    A = np.asarray(attributions, dtype=np.float64)
-
-    if X.ndim != 2 or A.ndim != 2:
-        raise ValueError("inputs and attributions must be 2D arrays.")
-    if X.shape[0] != A.shape[0]:
-        raise ValueError(
-            f"inputs rows ({X.shape[0]}) != attributions rows ({A.shape[0]})."
-        )
-    if sensitive_feature_idx < 0 or sensitive_feature_idx >= X.shape[1]:
-        raise ValueError(
-            f"sensitive_feature_idx {sensitive_feature_idx} out of bounds "
-            f"for {X.shape[1]} features."
-        )
-
-    per_instance = []
-
-    if counterfactual_explainer is not None:
-        # Use the provided explainer to get counterfactual attributions
-        for i in range(X.shape[0]):
-            cf_input = X[i].copy()
-            # Flip the sensitive feature (binary: 0<->1)
-            cf_input[sensitive_feature_idx] = 1.0 - cf_input[sensitive_feature_idx]
-            cf_attr = counterfactual_explainer(cf_input)
-            dist = float(np.linalg.norm(A[i] - cf_attr))
-            per_instance.append(dist)
+    group_scores = {label: scores[indices] for label, indices in groups.items()}
+    group_means = {label: float(np.mean(values)) for label, values in group_scores.items()}
+    overall_mean = float(np.mean(scores))
+    if higher_is_better:
+        deficits = {label: overall_mean - mean for label, mean in group_means.items()}
     else:
-        # Matching strategy: for each instance, find nearest with opposite
-        # sensitive value and compare attributions
-        sens_vals = X[:, sensitive_feature_idx]
-        unique_vals = np.unique(sens_vals)
+        deficits = {label: mean - overall_mean for label, mean in group_means.items()}
+    max_gap_from_average = float(max(deficits.values()))
 
-        if len(unique_vals) < 2:
-            # All same sensitive value — can't compute counterfactual
-            return {
-                "score": 0.0,
-                "per_instance_scores": [0.0] * X.shape[0],
-            }
-
-        # Precompute feature distances excluding sensitive feature
-        non_sens_cols = [c for c in range(X.shape[1]) if c != sensitive_feature_idx]
-        X_non_sens = X[:, non_sens_cols]
-
-        for i in range(X.shape[0]):
-            my_val = sens_vals[i]
-            # Find indices with opposite sensitive value
-            opp_mask = sens_vals != my_val
-            opp_indices = np.where(opp_mask)[0]
-
-            if len(opp_indices) == 0:
-                per_instance.append(0.0)
-                continue
-
-            # Find nearest neighbour in non-sensitive features
-            dists = np.linalg.norm(
-                X_non_sens[opp_indices] - X_non_sens[i], axis=1
-            )
-            nearest = opp_indices[np.argmin(dists)]
-            dist = float(np.linalg.norm(A[i] - A[nearest]))
-            per_instance.append(dist)
+    pairwise_gaps: Dict[Tuple[Any, Any], float] = {}
+    pairwise_p_values: Dict[Tuple[Any, Any], Optional[float]] = {}
+    for left, right in combinations(groups, 2):
+        pair = (left, right)
+        pairwise_gaps[pair] = abs(group_means[left] - group_means[right])
+        pairwise_p_values[pair] = _mann_whitney_u(group_scores[left], group_scores[right])
+    mean_group_gap = float(np.mean(list(pairwise_gaps.values())))
 
     return {
-        "score": float(np.mean(per_instance)),
-        "per_instance_scores": per_instance,
+        "max_gap_from_average": max_gap_from_average,
+        "mean_group_gap": mean_group_gap,
+        # Backward-compatible keys now have the paper's exact meanings.
+        "max_gap": max_gap_from_average,
+        "mean_gap": mean_group_gap,
+        "overall_mean": overall_mean,
+        "group_means": group_means,
+        "group_deficits_from_average": deficits,
+        "pairwise_gaps": pairwise_gaps,
+        "pairwise_p_values": pairwise_p_values,
+        "p_value_unavailable_pairs": [
+            pair for pair, value in pairwise_p_values.items() if value is None
+        ],
+        "higher_is_better": bool(higher_is_better),
+        "canonical_definition": "Balagopalan et al. (2022), Definitions 3.3 and 3.4",
     }
 
-
-# =============================================================================
-# Metric 4: Fidelity Disparity (Balagopalan et al., 2022)
-# =============================================================================
 
 def compute_fidelity_disparity(
     attributions: Any,
     sensitive_features: Any,
-    inner_metric: Optional[Callable[[np.ndarray], float]] = None,
+    inner_metric: Optional[ScalarMetric] = None,
+    *,
+    higher_is_better: bool = True,
 ) -> Dict[str, Any]:
+    """Compatibility adapter requiring an explicit per-row fidelity metric.
+
+    Attributions alone do not determine fidelity.  ``inner_metric`` must return
+    a genuine fidelity/performance/error score for each row.  Prefer calling
+    :func:`compute_fidelity_gap` with already computed fidelity scores.
     """
-    Compute fidelity disparity: max and mean explanation-quality gaps.
-
-    Extends Group Fairness to report pairwise gaps for all subgroup pairs,
-    enabling multi-group worst-case analysis.
-
-    Args:
-        attributions: 2D array (n_samples, n_features).
-        sensitive_features: 1D group-label array.
-        inner_metric: Optional per-instance quality metric. Defaults to L1 norm.
-
-    Returns:
-        Dict with keys:
-            - "max_gap": float — maximum pairwise gap across groups.
-            - "mean_gap": float — mean pairwise gap across groups.
-            - "pairwise_gaps": dict — {(g_a, g_b): gap} for all pairs.
-            - "group_means": dict — {group: mean_score}.
-            - "pairwise_p_values": dict — {(g_a, g_b): p_value}.
-
-    References:
-        Balagopalan, A., et al. (2022). The Road to Explainability is
-        Paved with Bias. FAccT.
-    """
-    attrs = _validate_attributions(attributions)
-    sf = _validate_sensitive_features(sensitive_features, attrs.shape[0])
-
     if inner_metric is None:
-        inner_metric = _default_inner_metric
-
-    scores = np.array([inner_metric(attrs[i]) for i in range(attrs.shape[0])])
-    groups = _partition_by_group(sf)
-
-    group_means = {}
-    group_scores = {}
-    for label, indices in groups.items():
-        gs = scores[indices]
-        group_means[label] = float(np.mean(gs))
-        group_scores[label] = gs
-
-    if len(groups) < 2:
-        single_key = list(groups.keys())[0]
-        return {
-            "max_gap": 0.0,
-            "mean_gap": 0.0,
-            "pairwise_gaps": {},
-            "group_means": {single_key: group_means[single_key]},
-            "pairwise_p_values": {},
-        }
-
-    labels = sorted(groups.keys(), key=str)
-    pairwise_gaps = {}
-    pairwise_pvals = {}
-
-    for la, lb in combinations(labels, 2):
-        gap = abs(group_means[la] - group_means[lb])
-        pairwise_gaps[(la, lb)] = float(gap)
-        pairwise_pvals[(la, lb)] = _mann_whitney_u(
-            group_scores[la], group_scores[lb]
+        raise ValueError(
+            "inner_metric is required: attribution magnitude is not fidelity. "
+            "Prefer compute_fidelity_gap(per_instance_fidelity_scores, ...)."
         )
+    attrs = _validate_attributions(attributions)
+    scores = _score_rows(attrs, inner_metric)
+    result = compute_fidelity_gap(scores, sensitive_features, higher_is_better=higher_is_better)
+    result["fidelity_metric_name"] = getattr(inner_metric, "__name__", "custom_metric")
+    return result
 
-    gaps_list = list(pairwise_gaps.values())
 
+def compute_sensitive_attribution_gap(
+    attributions: Any,
+    sensitive_features: Any,
+    sensitive_feature_idx: int,
+) -> Dict[str, Any]:
+    """Compare signed sensitive-feature attribution means across groups."""
+    attrs = _validate_attributions(attributions)
+    labels = _validate_sensitive_features(sensitive_features, len(attrs))
+    if isinstance(sensitive_feature_idx, (bool, np.bool_)) or not isinstance(
+        sensitive_feature_idx, (int, np.integer)
+    ):
+        raise TypeError("sensitive_feature_idx must be an integer.")
+    index = int(sensitive_feature_idx)
+    if index < 0 or index >= attrs.shape[1]:
+        raise ValueError(
+            f"sensitive_feature_idx {index} is out of bounds for {attrs.shape[1]} features."
+        )
+    groups = _partition_by_group(labels)
+    _require_multiple_groups(groups, "Sensitive-attribution gap")
+    statistics = _group_statistics(attrs[:, index], groups)
     return {
-        "max_gap": float(max(gaps_list)),
-        "mean_gap": float(np.mean(gaps_list)),
-        "pairwise_gaps": pairwise_gaps,
-        "group_means": group_means,
-        "pairwise_p_values": pairwise_pvals,
+        "divergence": statistics["disparity"],
+        "group_sensitive_means": statistics["group_means"],
+        "pairwise_gaps": statistics["pairwise_gaps"],
+        "pairwise_p_values": statistics["pairwise_p_values"],
+        "p_value": statistics["p_value"],
+        "p_value_adjustment": statistics["p_value_adjustment"],
+        "canonical_fairness_metric": False,
+        "interpretation": (
+            "Between-group gap in signed attribution assigned to the selected feature; "
+            "zero gap is not proof of model or explanation fairness."
+        ),
     }
 
-
-# =============================================================================
-# Metric 5: Attribution Parity (novel synthesis)
-# =============================================================================
 
 def compute_attribution_parity(
     attributions: Any,
     sensitive_features: Any,
     sensitive_feature_idx: int,
 ) -> Dict[str, Any]:
-    """
-    Compute Attribution Parity: whether the protected feature itself receives
-    disproportionate attribution across groups.
+    """Compatibility name for :func:`compute_sensitive_attribution_gap`."""
+    return compute_sensitive_attribution_gap(
+        attributions, sensitive_features, sensitive_feature_idx
+    )
 
-    Extracts the attribution assigned to the sensitive feature column for each
-    instance, partitions by group, and computes the absolute difference in
-    group-mean attributions of that column plus a statistical divergence score.
 
-    A high divergence indicates that the explanation method attributes
-    importance to the sensitive feature differently depending on group
-    membership — a potential signal of "fairwashing" or hidden bias.
+def compute_prediction_conditioned_metric_disparity(
+    attributions: Any,
+    sensitive_features: Any,
+    predictions: Any,
+    inner_metric: Optional[ScalarMetric] = None,
+) -> Dict[str, Any]:
+    """Compare a scalar attribution property within prediction strata.
 
-    Args:
-        attributions: 2D array (n_samples, n_features).
-        sensitive_features: 1D group-label array.
-        sensitive_feature_idx: Column index of the sensitive feature in
-            the attribution matrix.
-
-    Returns:
-        Dict with keys:
-            - "divergence": float — max absolute difference in group-mean
-              attribution of the sensitive feature. 0 = fair.
-            - "group_sensitive_means": dict — {group: mean_attribution_of_sensitive}.
-            - "p_value": float — Mann-Whitney U p-value.
-
-    References:
-        Aïvodji, U., et al. (2019). Fairwashing: the risk of rationalization. ICML.
-        Dai, J., et al. (2022). Fairness via Explanation Quality. AIES.
+    Conditioning on model predictions is not Hardt et al. equality of
+    opportunity, which conditions error-rate comparisons on ground-truth
+    outcomes.  Strata containing fewer than two groups are reported as not
+    comparable and are not assigned a fabricated zero disparity.
     """
     attrs = _validate_attributions(attributions)
-    sf = _validate_sensitive_features(sensitive_features, attrs.shape[0])
+    labels = _validate_sensitive_features(sensitive_features, len(attrs))
+    prediction_labels = _validate_labels(predictions, len(attrs), "predictions")
+    supplied_metric = inner_metric is not None
+    metric: ScalarMetric = inner_metric if inner_metric is not None else _attribution_l1_magnitude
+    scores = _score_rows(attrs, metric)
 
-    if sensitive_feature_idx < 0 or sensitive_feature_idx >= attrs.shape[1]:
+    prediction_groups = _partition_by_group(prediction_labels)
+    per_class_disparity: Dict[Any, Optional[float]] = {}
+    per_class_group_means: Dict[Any, Dict[Any, float]] = {}
+    non_comparable_classes: List[Any] = []
+    comparable_values: List[float] = []
+    for prediction_class, indices in prediction_groups.items():
+        class_scores = scores[indices]
+        class_sensitive = labels[indices]
+        class_groups = _partition_by_group(class_sensitive)
+        means = {
+            group: float(np.mean(class_scores[group_indices]))
+            for group, group_indices in class_groups.items()
+        }
+        per_class_group_means[prediction_class] = means
+        if len(class_groups) < 2:
+            per_class_disparity[prediction_class] = None
+            non_comparable_classes.append(prediction_class)
+            continue
+        disparity = float(
+            max(abs(means[left] - means[right]) for left, right in combinations(means, 2))
+        )
+        per_class_disparity[prediction_class] = disparity
+        comparable_values.append(disparity)
+    if not comparable_values:
         raise ValueError(
-            f"sensitive_feature_idx {sensitive_feature_idx} out of bounds "
-            f"for {attrs.shape[1]} features."
+            "No prediction stratum contains at least two sensitive groups; a "
+            "prediction-conditioned disparity is not estimable."
         )
 
-    # Extract the column for the sensitive feature
-    sens_attr = attrs[:, sensitive_feature_idx]
-
-    groups = _partition_by_group(sf)
-    group_means: Dict[Any, float] = {}
-    group_vals: Dict[Any, np.ndarray] = {}
-
-    for label, indices in groups.items():
-        vals = sens_attr[indices]
-        group_means[label] = float(np.mean(vals))
-        group_vals[label] = vals
-
-    if len(groups) < 2:
-        single_key = list(groups.keys())[0]
-        return {
-            "divergence": 0.0,
-            "group_sensitive_means": {single_key: group_means[single_key]},
-            "p_value": 1.0,
-        }
-
-    # Max pairwise absolute difference of means
-    labels = list(groups.keys())
-    max_div = 0.0
-    min_p = 1.0
-
-    for la, lb in combinations(labels, 2):
-        div = abs(group_means[la] - group_means[lb])
-        if div > max_div:
-            max_div = div
-        p = _mann_whitney_u(group_vals[la], group_vals[lb])
-        if p < min_p:
-            min_p = p
-
     return {
-        "divergence": float(max_div),
-        "group_sensitive_means": group_means,
-        "p_value": float(min_p),
+        "disparity": float(max(comparable_values)),
+        "per_class_disparity": per_class_disparity,
+        "per_class_group_means": per_class_group_means,
+        "non_comparable_classes": non_comparable_classes,
+        "metric_name": (
+            getattr(metric, "__name__", "custom_metric")
+            if supplied_metric
+            else "attribution_l1_magnitude"
+        ),
+        "condition": "model_prediction",
+        "canonical_equal_opportunity": False,
+        "canonical_fairness_metric": False,
+        "interpretation": (
+            "Prediction-conditioned scalar-property disparity; not Hardt equality "
+            "of opportunity and not a standalone fairness verdict."
+        ),
     }
 
-
-# =============================================================================
-# Metric 6: Conditional Fairness (Hardt et al., 2016; adapted)
-# =============================================================================
 
 def compute_conditional_fairness(
     attributions: Any,
     sensitive_features: Any,
     predictions: Any,
-    inner_metric: Optional[Callable[[np.ndarray], float]] = None,
+    inner_metric: Optional[ScalarMetric] = None,
 ) -> Dict[str, Any]:
-    """
-    Compute Conditional Fairness (Equalized Explanation Quality).
+    """Compatibility name for prediction-conditioned metric disparity."""
+    return compute_prediction_conditioned_metric_disparity(
+        attributions, sensitive_features, predictions, inner_metric
+    )
 
-    Measures explanation quality disparity across groups *conditioned on the
-    model's prediction class*. This separates explanation fairness from
-    prediction fairness — a group might have worse explanations simply
-    because the model makes different predictions for them.
-
-    For each prediction class, computes group-level disparity, then
-    aggregates (max over classes).
-
-    Args:
-        attributions: 2D array (n_samples, n_features).
-        sensitive_features: 1D group-label array.
-        predictions: 1D array of predicted class labels (same length).
-        inner_metric: Optional per-instance quality metric. Defaults to L1 norm.
-
-    Returns:
-        Dict with keys:
-            - "disparity": float — maximum across-class disparity.
-            - "per_class_disparity": dict — {class_label: disparity_within_class}.
-            - "per_class_group_means": dict — {class_label: {group: mean}}.
-
-    References:
-        Hardt, M., Price, E., & Srebro, N. (2016). Equality of Opportunity
-        in Supervised Learning. NeurIPS.
-    """
-    attrs = _validate_attributions(attributions)
-    sf = _validate_sensitive_features(sensitive_features, attrs.shape[0])
-    preds = np.asarray(predictions)
-
-    if preds.ndim != 1 or len(preds) != attrs.shape[0]:
-        raise ValueError(
-            f"predictions length ({len(preds)}) must match "
-            f"attributions rows ({attrs.shape[0]})."
-        )
-
-    if inner_metric is None:
-        inner_metric = _default_inner_metric
-
-    # Per-instance scores
-    scores = np.array([inner_metric(attrs[i]) for i in range(attrs.shape[0])])
-
-    # Partition by prediction class
-    pred_classes = np.unique(preds)
-    per_class_disparity: Dict[Any, float] = {}
-    per_class_group_means: Dict[Any, Dict[Any, float]] = {}
-
-    for pc in pred_classes:
-        pc_key = pc.item() if hasattr(pc, 'item') else pc
-        class_mask = preds == pc
-        class_scores = scores[class_mask]
-        class_sf = sf[class_mask]
-
-        class_groups = _partition_by_group(class_sf)
-
-        if len(class_groups) < 2:
-            # Only one group in this prediction class — no disparity
-            per_class_disparity[pc_key] = 0.0
-            gm = {}
-            for label, indices in class_groups.items():
-                gm[label] = float(np.mean(class_scores[indices]))
-            per_class_group_means[pc_key] = gm
-            continue
-
-        # Compute per-group means within this class
-        gm = {}
-        for label, indices in class_groups.items():
-            gm[label] = float(np.mean(class_scores[indices]))
-        per_class_group_means[pc_key] = gm
-
-        # Max pairwise gap within this class
-        means_list = list(gm.values())
-        max_gap = 0.0
-        for i_m in range(len(means_list)):
-            for j_m in range(i_m + 1, len(means_list)):
-                gap = abs(means_list[i_m] - means_list[j_m])
-                if gap > max_gap:
-                    max_gap = gap
-        per_class_disparity[pc_key] = float(max_gap)
-
-    # Overall disparity: max across classes
-    if per_class_disparity:
-        overall = max(per_class_disparity.values())
-    else:
-        overall = 0.0
-
-    return {
-        "disparity": float(overall),
-        "per_class_disparity": per_class_disparity,
-        "per_class_group_means": per_class_group_means,
-    }
-
-
-# =============================================================================
-# Default Fairness Registry (lazy)
-# =============================================================================
 
 _default_fairness_registry: Optional[FairnessMetricRegistry] = None
 
 
 def _create_default_fairness_registry() -> FairnessMetricRegistry:
-    """Create and populate the default fairness metric registry."""
     registry = FairnessMetricRegistry()
-
     registry.register(
-        name="group_fairness",
-        metric_fn=compute_group_fairness,
-        meta=FairnessMetricMeta(
+        "group_fairness",
+        compute_group_fairness,
+        FairnessMetricMeta(
             level="group",
             composable=True,
-            description=(
-                "Group-based explanation quality disparity "
-                "(Dai et al., 2022, AIES)"
-            ),
-            paper_reference=(
-                "Dai, J., Upadhyay, S., Aïvodji, U., Bach, S. H., & "
-                "Lakkaraju, H. (2022). Fairness via Explanation Quality. AIES."
-            ),
+            description="Group scalar-property disparity diagnostic (Dai-inspired)",
+            paper_reference="Dai et al. (2022), AIES",
+            claim_scope="Only the caller-supplied scalar property is compared",
         ),
     )
 
-    # Individual fairness needs inputs as well, so we wrap it
-    def _individual_fairness_wrapper(attributions, sensitive_features, **kwargs):
-        inputs = kwargs.pop("inputs", attributions)
-        return compute_individual_fairness(
-            inputs=inputs,
-            attributions=attributions,
-            sensitive_features=sensitive_features,
-            **kwargs,
-        )
+    def individual_wrapper(attributions: Any, sensitive_features: Any, **kwargs: Any):
+        if "inputs" not in kwargs:
+            raise ValueError("individual_fairness registry evaluation requires inputs=...")
+        inputs = kwargs.pop("inputs")
+        return compute_individual_fairness(inputs, attributions, sensitive_features, **kwargs)
 
     registry.register(
-        name="individual_fairness",
-        metric_fn=_individual_fairness_wrapper,
-        meta=FairnessMetricMeta(
+        "individual_fairness",
+        individual_wrapper,
+        FairnessMetricMeta(
             level="individual",
-            composable=False,
-            description=(
-                "Individual-level explanation fairness via Lipschitz ratio "
-                "(Dwork et al., 2012, adapted)"
-            ),
-            paper_reference=(
-                "Dwork, C., Hardt, M., Pitassi, T., Reingold, O., & Zemel, R. "
-                "(2012). Fairness Through Awareness. ITCS."
-            ),
+            description="Scale-dependent cross-group Lipschitz diagnostic",
+            paper_reference="Dwork et al. (2012) motivates, but does not define, this diagnostic",
+            claim_scope="Diagnostic only; no task metric or fairness guarantee",
         ),
     )
 
-    def _counterfactual_wrapper(attributions, sensitive_features, **kwargs):
-        inputs = kwargs.pop("inputs", attributions)
-        sensitive_feature_idx = kwargs.pop("sensitive_feature_idx", 0)
-        return compute_counterfactual_fairness(
-            inputs=inputs,
-            attributions=attributions,
-            sensitive_feature_idx=sensitive_feature_idx,
-            **kwargs,
-        )
+    def intervention_wrapper(attributions: Any, sensitive_features: Any, **kwargs: Any):
+        del sensitive_features
+        if "inputs" not in kwargs or "sensitive_feature_idx" not in kwargs:
+            raise ValueError(
+                "counterfactual_fairness registry evaluation requires inputs=... "
+                "and sensitive_feature_idx=..."
+            )
+        inputs = kwargs.pop("inputs")
+        index = kwargs.pop("sensitive_feature_idx")
+        return compute_counterfactual_fairness(inputs, attributions, index, **kwargs)
 
     registry.register(
-        name="counterfactual_fairness",
-        metric_fn=_counterfactual_wrapper,
-        meta=FairnessMetricMeta(
+        "counterfactual_fairness",
+        intervention_wrapper,
+        FairnessMetricMeta(
             level="individual",
-            composable=False,
-            description=(
-                "Counterfactual explanation fairness — explanations should not "
-                "change when protected attribute is flipped "
-                "(Kusner et al., 2017, adapted)"
-            ),
-            paper_reference=(
-                "Kusner, M. J., Loftus, J., Russell, C., & Silva, R. (2017). "
-                "Counterfactual Fairness. NeurIPS."
-            ),
+            description="Sensitive-feature intervention or matched-group attribution change",
+            paper_reference="Not a Kusner et al. (2017) SCM counterfactual-fairness test",
+            claim_scope="Attribution-change diagnostic only",
         ),
     )
-
     registry.register(
-        name="fidelity_disparity",
-        metric_fn=compute_fidelity_disparity,
-        meta=FairnessMetricMeta(
+        "fidelity_disparity",
+        compute_fidelity_disparity,
+        FairnessMetricMeta(
             level="group",
             composable=True,
-            description=(
-                "Max/mean explanation quality gaps across subgroup pairs "
-                "(Balagopalan et al., 2022, FAccT)"
-            ),
-            paper_reference=(
-                "Balagopalan, A., Zhang, H., et al. (2022). The Road to "
-                "Explainability is Paved with Bias. FAccT."
-            ),
+            description="Maximum-from-average and mean subgroup fidelity gaps",
+            paper_reference="Balagopalan et al. (2022), Definitions 3.3 and 3.4",
+            canonical_claim=True,
+            claim_scope="Requires a genuine caller-supplied fidelity metric",
         ),
     )
 
-    def _attribution_parity_wrapper(attributions, sensitive_features, **kwargs):
-        sensitive_feature_idx = kwargs.pop("sensitive_feature_idx", 0)
-        return compute_attribution_parity(
-            attributions=attributions,
-            sensitive_features=sensitive_features,
-            sensitive_feature_idx=sensitive_feature_idx,
-        )
+    def attribution_wrapper(attributions: Any, sensitive_features: Any, **kwargs: Any):
+        if "sensitive_feature_idx" not in kwargs:
+            raise ValueError("attribution_parity requires sensitive_feature_idx=...")
+        index = kwargs.pop("sensitive_feature_idx")
+        if kwargs:
+            raise TypeError(f"Unexpected keyword arguments: {sorted(kwargs)}")
+        return compute_attribution_parity(attributions, sensitive_features, index)
 
     registry.register(
-        name="attribution_parity",
-        metric_fn=_attribution_parity_wrapper,
-        meta=FairnessMetricMeta(
+        "attribution_parity",
+        attribution_wrapper,
+        FairnessMetricMeta(
             level="group",
-            composable=False,
-            description=(
-                "Whether the protected feature receives disproportionate "
-                "attribution across groups (Aïvodji et al., 2019 + Dai et al., 2022)"
-            ),
-            paper_reference=(
-                "Aïvodji, U., et al. (2019). Fairwashing. ICML. "
-                "Dai, J., et al. (2022). Fairness via Explanation Quality. AIES."
-            ),
+            description="Signed sensitive-feature attribution gap diagnostic",
+            claim_scope="Novel diagnostic; zero is not proof of fairness",
         ),
     )
 
-    def _conditional_wrapper(attributions, sensitive_features, **kwargs):
-        predictions = kwargs.pop("predictions", np.zeros(len(sensitive_features), dtype=int))
-        inner_metric = kwargs.pop("inner_metric", None)
-        return compute_conditional_fairness(
-            attributions=attributions,
-            sensitive_features=sensitive_features,
-            predictions=predictions,
-            inner_metric=inner_metric,
-        )
+    def conditional_wrapper(attributions: Any, sensitive_features: Any, **kwargs: Any):
+        if "predictions" not in kwargs:
+            raise ValueError("conditional_fairness requires predictions=...")
+        predictions = kwargs.pop("predictions")
+        return compute_conditional_fairness(attributions, sensitive_features, predictions, **kwargs)
 
     registry.register(
-        name="conditional_fairness",
-        metric_fn=_conditional_wrapper,
-        meta=FairnessMetricMeta(
+        "conditional_fairness",
+        conditional_wrapper,
+        FairnessMetricMeta(
             level="conditional",
             composable=True,
-            description=(
-                "Equalized explanation quality conditioned on prediction class "
-                "(Hardt et al., 2016, adapted)"
-            ),
-            paper_reference=(
-                "Hardt, M., Price, E., & Srebro, N. (2016). Equality of "
-                "Opportunity in Supervised Learning. NeurIPS."
-            ),
+            description="Prediction-conditioned scalar-property disparity diagnostic",
+            paper_reference="Not Hardt et al. (2016) equality of opportunity",
+            claim_scope="Diagnostic only; conditions on predictions, not ground truth",
         ),
     )
-
     return registry
 
 
 def get_default_fairness_registry() -> FairnessMetricRegistry:
-    """Get the default global fairness metric registry (lazy initialization)."""
+    """Return the lazily constructed default diagnostic registry."""
     global _default_fairness_registry
     if _default_fairness_registry is None:
         _default_fairness_registry = _create_default_fairness_registry()

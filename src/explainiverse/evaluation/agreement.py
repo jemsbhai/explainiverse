@@ -1,6 +1,6 @@
 # src/explainiverse/evaluation/agreement.py
 """
-Pairwise agreement metrics for comparing explanations (Phase 2).
+Pairwise agreement metrics for comparing explanations.
 
 Implements:
 - Feature Agreement (Krishna et al., 2022) — top-k feature set overlap
@@ -22,22 +22,22 @@ Note:
     They do not require access to the underlying model.
 
 Reference:
-    Krishna, S., Han, T., Gu, A., Pombra, J., Jabbari, S., Wu, S.,
-    & Lakkaraju, H. (2022). The Disagreement Problem in Explainable
+    Krishna, S., Han, T., Gu, A., Wu, S., Jabbari, S., & Lakkaraju, H.
+    (2024). The Disagreement Problem in Explainable
     Machine Learning: A Practitioner's Perspective. Transactions on
     Machine Learning Research (TMLR).
     https://arxiv.org/abs/2202.01602
 """
-import warnings
+from typing import List, Union
+
 import numpy as np
-from typing import Union, List, Optional
 
 from explainiverse.core.explanation import Explanation
-
 
 # =============================================================================
 # Internal Helpers
 # =============================================================================
+
 
 def _extract_attribution_array(
     attributions: Union[np.ndarray, "Explanation"],
@@ -65,16 +65,70 @@ def _extract_attribution_array(
             raise ValueError("No feature attributions found in Explanation.")
         feature_names = getattr(attributions, "feature_names", None)
         if feature_names:
-            values = [attr_dict.get(fn, 0.0) for fn in feature_names]
+            feature_names = list(feature_names)
+            if len(feature_names) != len(set(feature_names)):
+                raise ValueError("Explanation feature_names must be unique.")
+            missing = [name for name in feature_names if name not in attr_dict]
+            unexpected = [name for name in attr_dict if name not in feature_names]
+            if missing or unexpected:
+                raise ValueError(
+                    "feature_attributions must match feature_names exactly; "
+                    f"missing={missing}, unexpected={unexpected}."
+                )
+            values = [attr_dict[name] for name in feature_names]
         else:
             values = list(attr_dict.values())
-        return np.array(values, dtype=np.float64)
+        result = np.asarray(values, dtype=np.float64)
 
-    if isinstance(attributions, np.ndarray):
-        return attributions.astype(np.float64).ravel()
+    elif isinstance(attributions, np.ndarray):
+        if attributions.ndim != 1:
+            raise ValueError(f"Attributions must be 1-D arrays, got shape {attributions.shape}.")
+        result = attributions.astype(np.float64)
 
-    raise TypeError(
-        f"Expected np.ndarray or Explanation, got {type(attributions).__name__}"
+    else:
+        raise TypeError(f"Expected np.ndarray or Explanation, got {type(attributions).__name__}")
+
+    if result.ndim != 1 or result.size == 0:
+        raise ValueError("Attribution vectors must be non-empty and one-dimensional.")
+    if not np.all(np.isfinite(result)):
+        raise ValueError("Attribution vectors must contain only finite values.")
+    return result
+
+
+def _explanation_mapping(explanation: Explanation) -> dict[str, float]:
+    """Return a strictly validated feature-name-to-attribution mapping."""
+    values = _extract_attribution_array(explanation)
+    attr_dict = explanation.explanation_data["feature_attributions"]
+    feature_names = getattr(explanation, "feature_names", None)
+    names = list(feature_names) if feature_names else list(attr_dict)
+    return dict(zip(names, values))
+
+
+def _extract_aligned_pair(
+    attributions_a: Union[np.ndarray, "Explanation"],
+    attributions_b: Union[np.ndarray, "Explanation"],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract a pair while aligning two Explanation objects by feature identity."""
+    if isinstance(attributions_a, Explanation) and isinstance(attributions_b, Explanation):
+        mapping_a = _explanation_mapping(attributions_a)
+        mapping_b = _explanation_mapping(attributions_b)
+        if set(mapping_a) != set(mapping_b):
+            raise ValueError(
+                "Explanation objects must describe the same feature-name set; "
+                f"only_a={sorted(set(mapping_a) - set(mapping_b))}, "
+                f"only_b={sorted(set(mapping_b) - set(mapping_a))}."
+            )
+        # Canonical name order makes identity alignment and tie handling
+        # symmetric even when the two Explanation objects store different order.
+        names = sorted(mapping_a)
+        return (
+            np.asarray([mapping_a[name] for name in names], dtype=np.float64),
+            np.asarray([mapping_b[name] for name in names], dtype=np.float64),
+        )
+
+    return (
+        _extract_attribution_array(attributions_a),
+        _extract_attribution_array(attributions_b),
     )
 
 
@@ -96,8 +150,7 @@ def _validate_pair(
     """
     if attr_a.ndim != 1 or attr_b.ndim != 1:
         raise ValueError(
-            f"Attributions must be 1-D arrays, got shapes "
-            f"{attr_a.shape} and {attr_b.shape}."
+            f"Attributions must be 1-D arrays, got shapes " f"{attr_a.shape} and {attr_b.shape}."
         )
     if attr_a.shape[0] != attr_b.shape[0]:
         raise ValueError(
@@ -107,21 +160,25 @@ def _validate_pair(
     n = attr_a.shape[0]
     if n == 0:
         raise ValueError("Attribution vectors must not be empty.")
-    if not isinstance(k, (int, np.integer)) or k < 1:
+    if not isinstance(k, (int, np.integer)) or isinstance(k, (bool, np.bool_)) or k < 1:
         raise ValueError(f"k must be a positive integer, got {k}.")
     if k > n:
-        raise ValueError(
-            f"k={k} exceeds number of features n={n}."
-        )
+        raise ValueError(f"k={k} exceeds number of features n={n}.")
 
 
-def _top_k_indices(attr: np.ndarray, k: int) -> np.ndarray:
+def _top_k_indices(
+    attr: np.ndarray,
+    k: int,
+    *,
+    require_strict_order: bool = False,
+) -> np.ndarray:
     """
     Return indices of top-k features by absolute attribution value.
 
-    Ties are broken by the order returned from np.argsort (last
-    occurrence for equal absolute values gets higher rank). The result
-    is sorted from rank 1 (most important) to rank k.
+    Stable index order breaks ties that do not make the requested result
+    ambiguous. A tie spanning the top-k boundary raises because the feature
+    set is undefined. When ``require_strict_order`` is true, ties within the
+    selected set also raise because rank positions are undefined.
 
     Args:
         attr: 1-D attribution vector.
@@ -131,14 +188,23 @@ def _top_k_indices(attr: np.ndarray, k: int) -> np.ndarray:
         1-D array of length k with feature indices, ordered from
         most important (rank 1) to k-th most important (rank k).
     """
-    # argsort ascending, take last k, reverse to descending
-    order = np.argsort(np.abs(attr))
-    return order[-k:][::-1]
+    magnitudes = np.abs(attr)
+    order = np.argsort(-magnitudes, kind="stable")
+    cutoff = magnitudes[order[k - 1]]
+    n_strictly_above = int(np.sum(magnitudes > cutoff))
+    n_at_cutoff = int(np.sum(magnitudes == cutoff))
+    if n_strictly_above < k < n_strictly_above + n_at_cutoff:
+        raise ValueError("top-k feature set is undefined because a tie spans the cutoff.")
+    selected = order[:k]
+    if require_strict_order and np.unique(magnitudes[selected]).size != k:
+        raise ValueError("rank agreement is undefined when selected features have tied magnitudes.")
+    return selected
 
 
 # =============================================================================
 # Feature Agreement
 # =============================================================================
+
 
 def compute_feature_agreement(
     attributions_a: Union[np.ndarray, "Explanation"],
@@ -179,12 +245,11 @@ def compute_feature_agreement(
         1.0  # Both identify features 3 and 0 as top-2
 
     Reference:
-        Krishna, S., Han, T., Gu, A., Pombra, J., Jabbari, S., Wu, S.,
-        & Lakkaraju, H. (2022). The Disagreement Problem in Explainable
+        Krishna, S., Han, T., Gu, A., Wu, S., Jabbari, S., & Lakkaraju, H.
+        (2024). The Disagreement Problem in Explainable
         Machine Learning: A Practitioner's Perspective. TMLR.
     """
-    attr_a = _extract_attribution_array(attributions_a)
-    attr_b = _extract_attribution_array(attributions_b)
+    attr_a, attr_b = _extract_aligned_pair(attributions_a, attributions_b)
     _validate_pair(attr_a, attr_b, k)
 
     top_a = set(_top_k_indices(attr_a, k))
@@ -216,6 +281,8 @@ def compute_batch_feature_agreement(
         ValueError: If batch sizes differ, or any individual pair fails
             validation.
     """
+    if len(attributions_a_batch) == 0 or len(attributions_b_batch) == 0:
+        raise ValueError("Attribution batches must not be empty.")
     if len(attributions_a_batch) != len(attributions_b_batch):
         raise ValueError(
             f"Batch sizes must match: got {len(attributions_a_batch)} "
@@ -230,6 +297,7 @@ def compute_batch_feature_agreement(
 # =============================================================================
 # Rank Agreement
 # =============================================================================
+
 
 def compute_rank_agreement(
     attributions_a: Union[np.ndarray, "Explanation"],
@@ -273,16 +341,15 @@ def compute_rank_agreement(
         0.5  # Both rank feature 3 first, but disagree on rank 2
 
     Reference:
-        Krishna, S., Han, T., Gu, A., Pombra, J., Jabbari, S., Wu, S.,
-        & Lakkaraju, H. (2022). The Disagreement Problem in Explainable
+        Krishna, S., Han, T., Gu, A., Wu, S., Jabbari, S., & Lakkaraju, H.
+        (2024). The Disagreement Problem in Explainable
         Machine Learning: A Practitioner's Perspective. TMLR.
     """
-    attr_a = _extract_attribution_array(attributions_a)
-    attr_b = _extract_attribution_array(attributions_b)
+    attr_a, attr_b = _extract_aligned_pair(attributions_a, attributions_b)
     _validate_pair(attr_a, attr_b, k)
 
-    ranking_a = _top_k_indices(attr_a, k)
-    ranking_b = _top_k_indices(attr_b, k)
+    ranking_a = _top_k_indices(attr_a, k, require_strict_order=True)
+    ranking_b = _top_k_indices(attr_b, k, require_strict_order=True)
 
     # Count rank positions where both place the same feature
     matches = np.sum(ranking_a == ranking_b)
@@ -313,6 +380,8 @@ def compute_batch_rank_agreement(
         ValueError: If batch sizes differ, or any individual pair fails
             validation.
     """
+    if len(attributions_a_batch) == 0 or len(attributions_b_batch) == 0:
+        raise ValueError("Attribution batches must not be empty.")
     if len(attributions_a_batch) != len(attributions_b_batch):
         raise ValueError(
             f"Batch sizes must match: got {len(attributions_a_batch)} "

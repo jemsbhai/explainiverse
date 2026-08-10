@@ -18,17 +18,15 @@ Reference:
 
 import warnings
 
-import pytest
 import numpy as np
-from unittest.mock import MagicMock
+import pytest
 
 from explainiverse.core.explanation import Explanation
-from explainiverse.core.explainer import BaseExplainer
-
 
 # =============================================================================
 # Fixtures & Mock Classes
 # =============================================================================
+
 
 @pytest.fixture
 def feature_names():
@@ -52,14 +50,14 @@ class _DeterministicExplainer:
     Returns attributions proportional to the input.
     Small input changes → small explanation changes → low instability.
     """
+
     def __init__(self, feature_names, scale=1.0):
         self.feature_names = feature_names
         self.scale = scale
 
     def explain(self, instance):
         instance = np.asarray(instance).flatten()
-        attrs = {fn: float(self.scale * instance[i])
-                 for i, fn in enumerate(self.feature_names)}
+        attrs = {fn: float(self.scale * instance[i]) for i, fn in enumerate(self.feature_names)}
         exp = Explanation(
             explainer_name="deterministic",
             target_class="class_0",
@@ -74,13 +72,13 @@ class _ConstantExplainer:
     Always returns the same attributions regardless of input.
     Zero explanation change → numerator = 0 → score = 0.
     """
+
     def __init__(self, feature_names, values=None):
         self.feature_names = feature_names
         self.values = values or [1.0] * len(feature_names)
 
     def explain(self, instance):
-        attrs = {fn: float(self.values[i])
-                 for i, fn in enumerate(self.feature_names)}
+        attrs = {fn: float(self.values[i]) for i, fn in enumerate(self.feature_names)}
         exp = Explanation(
             explainer_name="constant",
             target_class="class_0",
@@ -94,13 +92,13 @@ class _RandomExplainer:
     """
     Returns random attributions — high instability.
     """
+
     def __init__(self, feature_names, seed=None):
         self.feature_names = feature_names
         self.rng = np.random.default_rng(seed)
 
     def explain(self, instance):
-        attrs = {fn: float(self.rng.standard_normal())
-                 for fn in self.feature_names}
+        attrs = {fn: float(self.rng.standard_normal()) for fn in self.feature_names}
         exp = Explanation(
             explainer_name="random",
             target_class="class_0",
@@ -112,6 +110,7 @@ class _RandomExplainer:
 
 class _ConstantClassModel:
     """Always predicts the same class. All perturbations pass class filter."""
+
     def __init__(self, predicted_class=0, n_classes=2):
         self.predicted_class = predicted_class
         self.n_classes = n_classes
@@ -133,6 +132,7 @@ class _ConstantClassModel:
 class _ThresholdModel:
     """Predicts class based on feature 0 > threshold. Some perturbations
     will cross the boundary and be filtered out."""
+
     def __init__(self, threshold=0.0):
         self.threshold = threshold
 
@@ -197,6 +197,7 @@ def _constant_logit_fn(X):
 # Relative Input Stability (RIS) — Equation 2
 # =============================================================================
 
+
 class TestRelativeInputStability:
     """Tests for compute_relative_input_stability (Agarwal et al., 2022, Eq 2)."""
 
@@ -207,8 +208,11 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=10,
+            seed=42,
         )
         assert isinstance(score, float)
 
@@ -219,8 +223,12 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=10, seed=42, return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=10,
+            seed=42,
+            return_details=True,
         )
         assert isinstance(result, dict)
         assert "score" in result
@@ -238,8 +246,11 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
         )
         assert score >= 0.0
 
@@ -250,8 +261,11 @@ class TestRelativeInputStability:
         explainer = _ConstantExplainer(feature_names, values=[3.0, 2.0, 1.0, 0.5])
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
         )
         assert score == pytest.approx(0.0, abs=1e-10)
 
@@ -264,12 +278,18 @@ class TestRelativeInputStability:
         model = _ConstantClassModel()
 
         det_score = compute_relative_input_stability(
-            det, model, single_instance,
-            n_perturbations=30, seed=42,
+            det,
+            model,
+            single_instance,
+            n_perturbations=30,
+            seed=42,
         )
         rng_score = compute_relative_input_stability(
-            rng, model, single_instance,
-            n_perturbations=30, seed=42,
+            rng,
+            model,
+            single_instance,
+            n_perturbations=30,
+            seed=42,
         )
         assert rng_score > det_score
 
@@ -280,12 +300,18 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         s1 = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
         )
         s2 = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
         )
         assert s1 == pytest.approx(s2, rel=1e-10)
 
@@ -296,9 +322,13 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
-            aggregation="max", return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
+            aggregation="max",
+            return_details=True,
         )
         assert result["score"] == pytest.approx(result["max"], rel=1e-10)
 
@@ -309,9 +339,13 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
-            aggregation="mean", return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
+            aggregation="mean",
+            return_details=True,
         )
         assert result["score"] == pytest.approx(result["mean"], rel=1e-10)
 
@@ -322,9 +356,13 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
-            aggregation="median", return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
+            aggregation="median",
+            return_details=True,
         )
         assert result["score"] == pytest.approx(result["median"], rel=1e-10)
 
@@ -336,8 +374,11 @@ class TestRelativeInputStability:
         model = _ConstantClassModel()
         with pytest.raises(ValueError, match="aggregation"):
             compute_relative_input_stability(
-                explainer, model, single_instance,
-                aggregation="invalid", seed=42,
+                explainer,
+                model,
+                single_instance,
+                aggregation="invalid",
+                seed=42,
             )
 
     def test_max_geq_mean_geq_zero(self, feature_names, single_instance):
@@ -347,8 +388,12 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=30, seed=42, return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=30,
+            seed=42,
+            return_details=True,
         )
         assert result["max"] >= result["mean"] - 1e-10
         assert result["mean"] >= 0.0
@@ -360,8 +405,12 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42, return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
+            return_details=True,
         )
         assert result["n_valid"] <= result["n_total"]
         assert result["n_total"] == 20
@@ -373,8 +422,12 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42, return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
+            return_details=True,
         )
         assert result["n_valid"] == 20
 
@@ -387,8 +440,12 @@ class TestRelativeInputStability:
         instance = np.array([0.05, 1.0, 0.5, -0.5])
         model = _ThresholdModel(threshold=0.0)
         result = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=50, noise_scale=0.1, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=50,
+            noise_scale=0.1,
+            seed=42,
             return_details=True,
         )
         # Some should be filtered (not all 50 valid)
@@ -404,8 +461,10 @@ class TestRelativeInputStability:
         class _FlipAllModel:
             """Original instance → class 0; everything else → class 1.
             This guarantees that no perturbation passes the same-class filter."""
+
             def __init__(self, original):
                 self._original = np.asarray(original, dtype=np.float64).flatten()
+
             def predict(self, X):
                 X = np.asarray(X, dtype=np.float64)
                 if X.ndim == 1:
@@ -421,8 +480,11 @@ class TestRelativeInputStability:
         instance = np.array([1.0, 2.0, 3.0, 4.0])
         model = _FlipAllModel(instance)
         score = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isnan(score)
 
@@ -433,8 +495,12 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            norm_ord=1, n_perturbations=10, seed=42,
+            explainer,
+            model,
+            single_instance,
+            norm_ord=1,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
@@ -445,26 +511,37 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            norm_ord=np.inf, n_perturbations=10, seed=42,
+            explainer,
+            model,
+            single_instance,
+            norm_ord=np.inf,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
-    def test_different_noise_scales(self, feature_names, single_instance):
-        """Different noise scales produce different results."""
+    def test_multiple_noise_scales_return_finite_results(self, feature_names, single_instance):
+        """Two positive noise scales each return a finite result."""
         from explainiverse.evaluation import compute_relative_input_stability
 
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         s_small = compute_relative_input_stability(
-            explainer, model, single_instance,
-            noise_scale=0.01, n_perturbations=30, seed=42,
+            explainer,
+            model,
+            single_instance,
+            noise_scale=0.01,
+            n_perturbations=30,
+            seed=42,
         )
         s_large = compute_relative_input_stability(
-            explainer, model, single_instance,
-            noise_scale=0.5, n_perturbations=30, seed=42,
+            explainer,
+            model,
+            single_instance,
+            noise_scale=0.5,
+            n_perturbations=30,
+            seed=42,
         )
-        # Both finite, and likely different
         assert np.isfinite(s_small)
         assert np.isfinite(s_large)
 
@@ -475,8 +552,12 @@ class TestRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=15, seed=42, return_details=True,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=15,
+            seed=42,
+            return_details=True,
         )
         assert len(result["perturbation_scores"]) == result["n_valid"]
 
@@ -496,8 +577,12 @@ class TestRelativeInputStability:
         # Use instance far from zero to avoid division issues
         instance = np.array([5.0, 3.0, 4.0, 2.0])
         result = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=50, noise_scale=0.01, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=50,
+            noise_scale=0.01,
+            seed=42,
             return_details=True,
         )
         # For E(x)=x, percent change ratio should be ≈ 1.0
@@ -514,8 +599,12 @@ class TestBatchRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_input_stability(
-            explainer, model, sample_data,
-            n_perturbations=5, max_instances=5, seed=42,
+            explainer,
+            model,
+            sample_data,
+            n_perturbations=5,
+            max_instances=5,
+            seed=42,
         )
         assert isinstance(result, dict)
         assert "mean" in result
@@ -532,8 +621,12 @@ class TestBatchRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_input_stability(
-            explainer, model, sample_data,
-            n_perturbations=5, max_instances=3, seed=42,
+            explainer,
+            model,
+            sample_data,
+            n_perturbations=5,
+            max_instances=3,
+            seed=42,
         )
         assert result["n_evaluated"] == 3
 
@@ -544,8 +637,12 @@ class TestBatchRelativeInputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_input_stability(
-            explainer, model, sample_data,
-            n_perturbations=5, max_instances=5, seed=42,
+            explainer,
+            model,
+            sample_data,
+            n_perturbations=5,
+            max_instances=5,
+            seed=42,
         )
         assert result["min"] <= result["mean"] <= result["max"]
 
@@ -553,6 +650,7 @@ class TestBatchRelativeInputStability:
 # =============================================================================
 # Relative Representation Stability (RRS) — Equation 3
 # =============================================================================
+
 
 class TestRelativeRepresentationStability:
     """Tests for compute_relative_representation_stability (Eq 3)."""
@@ -564,9 +662,12 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert isinstance(score, float)
 
@@ -577,9 +678,13 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=10, seed=42, return_details=True,
+            n_perturbations=10,
+            seed=42,
+            return_details=True,
         )
         assert isinstance(result, dict)
         assert "score" in result
@@ -593,9 +698,12 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert score >= 0.0
 
@@ -606,9 +714,12 @@ class TestRelativeRepresentationStability:
         explainer = _ConstantExplainer(feature_names, values=[3.0, 2.0, 1.0, 0.5])
         model = _ConstantClassModel()
         score = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert score == pytest.approx(0.0, abs=1e-10)
 
@@ -621,14 +732,20 @@ class TestRelativeRepresentationStability:
         model = _ConstantClassModel()
 
         det_score = compute_relative_representation_stability(
-            det, model, single_instance,
+            det,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=30, seed=42,
+            n_perturbations=30,
+            seed=42,
         )
         rng_score = compute_relative_representation_stability(
-            rng, model, single_instance,
+            rng,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=30, seed=42,
+            n_perturbations=30,
+            seed=42,
         )
         assert rng_score > det_score
 
@@ -639,14 +756,20 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         s1 = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         s2 = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert s1 == pytest.approx(s2, rel=1e-10)
 
@@ -658,24 +781,31 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_constant_representation_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         # Score should be finite (ε_min prevents div-by-zero) and large
         assert np.isfinite(score)
 
     def test_aggregation_max(self, feature_names, single_instance):
-        """aggregation='max' is the paper default."""
+        """aggregation='max' implements the maximum in Equation 3."""
         from explainiverse.evaluation import compute_relative_representation_stability
 
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=20, seed=42,
-            aggregation="max", return_details=True,
+            n_perturbations=20,
+            seed=42,
+            aggregation="max",
+            return_details=True,
         )
         assert result["score"] == pytest.approx(result["max"], rel=1e-10)
 
@@ -686,10 +816,14 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=20, seed=42,
-            aggregation="mean", return_details=True,
+            n_perturbations=20,
+            seed=42,
+            aggregation="mean",
+            return_details=True,
         )
         assert result["score"] == pytest.approx(result["mean"], rel=1e-10)
 
@@ -701,9 +835,13 @@ class TestRelativeRepresentationStability:
         model = _ConstantClassModel()
         for norm in [1, 2, np.inf]:
             score = compute_relative_representation_stability(
-                explainer, model, single_instance,
+                explainer,
+                model,
+                single_instance,
                 representation_fn=_linear_representation_fn,
-                norm_ord=norm, n_perturbations=10, seed=42,
+                norm_ord=norm,
+                n_perturbations=10,
+                seed=42,
             )
             assert np.isfinite(score), f"Non-finite for norm_ord={norm}"
 
@@ -712,6 +850,7 @@ class TestRelativeRepresentationStability:
         from explainiverse.evaluation import compute_relative_representation_stability
 
         call_log = []
+
         def _tracking_repr_fn(X):
             X = np.asarray(X, dtype=np.float64)
             if X.ndim == 1:
@@ -722,9 +861,12 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_tracking_repr_fn,
-            n_perturbations=5, seed=42,
+            n_perturbations=5,
+            seed=42,
         )
         # Should be called at least for original + perturbations
         assert len(call_log) >= 2
@@ -736,9 +878,13 @@ class TestRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_representation_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=15, seed=42, return_details=True,
+            n_perturbations=15,
+            seed=42,
+            return_details=True,
         )
         assert result["n_total"] == 15
         assert result["n_valid"] == 15  # Constant class model, all pass
@@ -754,9 +900,13 @@ class TestBatchRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_representation_stability(
-            explainer, model, sample_data,
+            explainer,
+            model,
+            sample_data,
             representation_fn=_linear_representation_fn,
-            n_perturbations=5, max_instances=5, seed=42,
+            n_perturbations=5,
+            max_instances=5,
+            seed=42,
         )
         assert "mean" in result
         assert "std" in result
@@ -770,9 +920,13 @@ class TestBatchRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_representation_stability(
-            explainer, model, sample_data,
+            explainer,
+            model,
+            sample_data,
             representation_fn=_linear_representation_fn,
-            n_perturbations=5, max_instances=4, seed=42,
+            n_perturbations=5,
+            max_instances=4,
+            seed=42,
         )
         assert result["n_evaluated"] == 4
 
@@ -783,9 +937,13 @@ class TestBatchRelativeRepresentationStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_representation_stability(
-            explainer, model, sample_data,
+            explainer,
+            model,
+            sample_data,
             representation_fn=_linear_representation_fn,
-            n_perturbations=5, max_instances=5, seed=42,
+            n_perturbations=5,
+            max_instances=5,
+            seed=42,
         )
         assert result["min"] <= result["mean"] <= result["max"]
 
@@ -793,6 +951,7 @@ class TestBatchRelativeRepresentationStability:
 # =============================================================================
 # Relative Output Stability (ROS) — Equation 5
 # =============================================================================
+
 
 class TestRelativeOutputStability:
     """Tests for compute_relative_output_stability (Eq 5)."""
@@ -804,9 +963,12 @@ class TestRelativeOutputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_output_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert isinstance(score, float)
 
@@ -817,9 +979,13 @@ class TestRelativeOutputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_output_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=10, seed=42, return_details=True,
+            n_perturbations=10,
+            seed=42,
+            return_details=True,
         )
         assert isinstance(result, dict)
         assert "score" in result
@@ -832,9 +998,12 @@ class TestRelativeOutputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_output_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert score >= 0.0
 
@@ -845,9 +1014,12 @@ class TestRelativeOutputStability:
         explainer = _ConstantExplainer(feature_names, values=[3.0, 2.0, 1.0, 0.5])
         model = _ConstantClassModel()
         score = compute_relative_output_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert score == pytest.approx(0.0, abs=1e-10)
 
@@ -860,14 +1032,20 @@ class TestRelativeOutputStability:
         model = _ConstantClassModel()
 
         det_score = compute_relative_output_stability(
-            det, model, single_instance,
+            det,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=30, seed=42,
+            n_perturbations=30,
+            seed=42,
         )
         rng_score = compute_relative_output_stability(
-            rng, model, single_instance,
+            rng,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=30, seed=42,
+            n_perturbations=30,
+            seed=42,
         )
         assert rng_score > det_score
 
@@ -878,14 +1056,20 @@ class TestRelativeOutputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         s1 = compute_relative_output_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         s2 = compute_relative_output_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert s1 == pytest.approx(s2, rel=1e-10)
 
@@ -896,9 +1080,12 @@ class TestRelativeOutputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_output_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_constant_logit_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
@@ -914,9 +1101,13 @@ class TestRelativeOutputStability:
         # Instance with known logit output
         instance = np.array([5.0, 3.0, 4.0, 2.0])
         result = compute_relative_output_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, noise_scale=0.01, seed=42,
+            n_perturbations=20,
+            noise_scale=0.01,
+            seed=42,
             return_details=True,
         )
         # Should be finite and well-defined
@@ -931,9 +1122,13 @@ class TestRelativeOutputStability:
         model = _ConstantClassModel()
         for agg in ["max", "mean", "median"]:
             score = compute_relative_output_stability(
-                explainer, model, single_instance,
+                explainer,
+                model,
+                single_instance,
                 logit_fn=_linear_logit_fn,
-                n_perturbations=10, seed=42, aggregation=agg,
+                n_perturbations=10,
+                seed=42,
+                aggregation=agg,
             )
             assert np.isfinite(score)
 
@@ -948,9 +1143,13 @@ class TestBatchRelativeOutputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_output_stability(
-            explainer, model, sample_data,
+            explainer,
+            model,
+            sample_data,
             logit_fn=_linear_logit_fn,
-            n_perturbations=5, max_instances=5, seed=42,
+            n_perturbations=5,
+            max_instances=5,
+            seed=42,
         )
         assert "mean" in result
         assert "scores" in result
@@ -963,9 +1162,13 @@ class TestBatchRelativeOutputStability:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_output_stability(
-            explainer, model, sample_data,
+            explainer,
+            model,
+            sample_data,
             logit_fn=_linear_logit_fn,
-            n_perturbations=5, max_instances=3, seed=42,
+            n_perturbations=5,
+            max_instances=3,
+            seed=42,
         )
         assert result["n_evaluated"] == 3
 
@@ -973,6 +1176,7 @@ class TestBatchRelativeOutputStability:
 # =============================================================================
 # Relative Stability (all-in-one convenience)
 # =============================================================================
+
 
 class TestRelativeStabilityConvenience:
     """Tests for compute_relative_stability (all three in one pass)."""
@@ -984,10 +1188,13 @@ class TestRelativeStabilityConvenience:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert isinstance(result, dict)
         assert "ris" in result
@@ -1001,8 +1208,11 @@ class TestRelativeStabilityConvenience:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=10,
+            seed=42,
         )
         assert "ris" in result
         assert result["rrs"] is None
@@ -1015,9 +1225,12 @@ class TestRelativeStabilityConvenience:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert result["rrs"] is not None
         assert isinstance(result["rrs"], float)
@@ -1029,9 +1242,12 @@ class TestRelativeStabilityConvenience:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             logit_fn=_linear_logit_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert result["ros"] is not None
         assert isinstance(result["ros"], float)
@@ -1039,10 +1255,10 @@ class TestRelativeStabilityConvenience:
     def test_shared_computation_matches_individual(self, feature_names, single_instance):
         """All-in-one results match individual function calls."""
         from explainiverse.evaluation import (
-            compute_relative_stability,
             compute_relative_input_stability,
-            compute_relative_representation_stability,
             compute_relative_output_stability,
+            compute_relative_representation_stability,
+            compute_relative_stability,
         )
 
         explainer = _DeterministicExplainer(feature_names)
@@ -1050,21 +1266,32 @@ class TestRelativeStabilityConvenience:
         kwargs = dict(n_perturbations=20, noise_scale=0.05, seed=42)
 
         combined = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
             **kwargs,
         )
         ris_solo = compute_relative_input_stability(
-            explainer, model, single_instance, **kwargs,
+            explainer,
+            model,
+            single_instance,
+            **kwargs,
         )
         rrs_solo = compute_relative_representation_stability(
-            explainer, model, single_instance,
-            representation_fn=_linear_representation_fn, **kwargs,
+            explainer,
+            model,
+            single_instance,
+            representation_fn=_linear_representation_fn,
+            **kwargs,
         )
         ros_solo = compute_relative_output_stability(
-            explainer, model, single_instance,
-            logit_fn=_linear_logit_fn, **kwargs,
+            explainer,
+            model,
+            single_instance,
+            logit_fn=_linear_logit_fn,
+            **kwargs,
         )
         assert combined["ris"] == pytest.approx(ris_solo, rel=1e-10)
         assert combined["rrs"] == pytest.approx(rrs_solo, rel=1e-10)
@@ -1077,10 +1304,13 @@ class TestRelativeStabilityConvenience:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
             return_details=True,
         )
         # Each sub-result should be a dict with diagnostics
@@ -1096,10 +1326,13 @@ class TestRelativeStabilityConvenience:
         explainer = _ConstantExplainer(feature_names, values=[3.0, 2.0, 1.0, 0.5])
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert result["ris"] == pytest.approx(0.0, abs=1e-10)
         assert result["rrs"] == pytest.approx(0.0, abs=1e-10)
@@ -1116,10 +1349,14 @@ class TestBatchRelativeStabilityConvenience:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_stability(
-            explainer, model, sample_data,
+            explainer,
+            model,
+            sample_data,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=5, max_instances=5, seed=42,
+            n_perturbations=5,
+            max_instances=5,
+            seed=42,
         )
         assert "ris" in result
         assert "rrs" in result
@@ -1132,10 +1369,14 @@ class TestBatchRelativeStabilityConvenience:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_batch_relative_stability(
-            explainer, model, sample_data,
+            explainer,
+            model,
+            sample_data,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=5, max_instances=5, seed=42,
+            n_perturbations=5,
+            max_instances=5,
+            seed=42,
         )
         for key in ["ris", "rrs", "ros"]:
             assert "mean" in result[key]
@@ -1145,6 +1386,7 @@ class TestBatchRelativeStabilityConvenience:
 # =============================================================================
 # Discrete Feature Support
 # =============================================================================
+
 
 class TestDiscreteFeatureSupport:
     """Tests for discrete (binary) feature perturbation support."""
@@ -1159,9 +1401,12 @@ class TestDiscreteFeatureSupport:
         feature_types = np.array(["discrete", "discrete", "discrete", "discrete"])
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             feature_types=feature_types,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert isinstance(score, float)
         assert np.isfinite(score)
@@ -1176,15 +1421,18 @@ class TestDiscreteFeatureSupport:
         feature_types = np.array(["continuous", "discrete", "continuous", "discrete"])
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             feature_types=feature_types,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert isinstance(score, float)
         assert np.isfinite(score)
 
-    def test_discrete_perturbations_are_flips(self, feature_names):
-        """Discrete features are perturbed by flipping, not Gaussian noise."""
+    def test_discrete_perturbations_are_bernoulli_draws(self, feature_names):
+        """Discrete features use Bernoulli replacement, not Gaussian noise."""
         from explainiverse.evaluation import compute_relative_input_stability
 
         explainer = _DeterministicExplainer(feature_names)
@@ -1193,18 +1441,20 @@ class TestDiscreteFeatureSupport:
         feature_types = np.array(["discrete", "discrete", "discrete", "discrete"])
 
         result = compute_relative_input_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             feature_types=feature_types,
-            discrete_flip_prob=0.5,  # High flip rate for testability
-            n_perturbations=20, seed=42,
+            discrete_flip_prob=0.5,
+            n_perturbations=20,
+            seed=42,
             return_details=True,
         )
         # Should produce valid results
         assert result["n_valid"] > 0
 
-    def test_discrete_flip_prob_zero_no_change(self, feature_names):
-        """With flip_prob=0, discrete features never change → score ≈ 0
-        for a deterministic explainer (if all features are discrete)."""
+    def test_discrete_bernoulli_zero_replaces_with_zero(self, feature_names):
+        """Appendix B uses Bernoulli replacement, not an XOR flip."""
         from explainiverse.evaluation import compute_relative_input_stability
 
         explainer = _DeterministicExplainer(feature_names)
@@ -1213,13 +1463,17 @@ class TestDiscreteFeatureSupport:
         feature_types = np.array(["discrete", "discrete", "discrete", "discrete"])
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             feature_types=feature_types,
             discrete_flip_prob=0.0,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
-        # No perturbation → no explanation change → score ≈ 0
-        assert score == pytest.approx(0.0, abs=1e-10)
+        # p=0 replaces every binary dimension by zero. For E(x)=x here,
+        # numerator and denominator percent-change norms are equal.
+        assert score == pytest.approx(1.0, abs=1e-10)
 
     def test_default_feature_types_is_continuous(self, feature_names, single_instance):
         """feature_types=None defaults to all continuous (backward compat)."""
@@ -1229,13 +1483,19 @@ class TestDiscreteFeatureSupport:
         model = _ConstantClassModel()
 
         score_default = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
         )
         score_explicit = compute_relative_input_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             feature_types=np.array(["continuous"] * 4),
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert score_default == pytest.approx(score_explicit, rel=1e-10)
 
@@ -1249,10 +1509,13 @@ class TestDiscreteFeatureSupport:
         feature_types = np.array(["discrete", "discrete", "continuous", "continuous"])
 
         score = compute_relative_representation_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             representation_fn=_linear_representation_fn,
             feature_types=feature_types,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert isinstance(score, float)
         assert np.isfinite(score)
@@ -1267,10 +1530,13 @@ class TestDiscreteFeatureSupport:
         feature_types = np.array(["discrete", "discrete", "continuous", "continuous"])
 
         score = compute_relative_output_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             logit_fn=_linear_logit_fn,
             feature_types=feature_types,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert isinstance(score, float)
         assert np.isfinite(score)
@@ -1285,11 +1551,14 @@ class TestDiscreteFeatureSupport:
         feature_types = np.array(["discrete", "discrete", "continuous", "continuous"])
 
         result = compute_relative_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
             feature_types=feature_types,
-            n_perturbations=10, seed=42,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(result["ris"])
         assert np.isfinite(result["rrs"])
@@ -1297,44 +1566,49 @@ class TestDiscreteFeatureSupport:
 
 
 # =============================================================================
-# Theoretical Bound (Equation 4): RIS < λ₁·L₁ × RRS
+# Sampled Equation 4 RHS diagnostic
 # =============================================================================
 
-class TestTheoreticalBound:
-    """Tests for optional theoretical bound computation."""
+
+class TestEquationFourDiagnostic:
+    """Tests that a sampled RHS is not presented as a certified bound."""
 
     def test_bound_included_when_repr_fn_given(self, feature_names, single_instance):
-        """When representation_fn is given, RIS details include theoretical bound."""
+        """A representation function enables the sampled RHS diagnostic."""
         from explainiverse.evaluation import compute_relative_input_stability
 
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
             return_details=True,
             representation_fn=_linear_representation_fn,
         )
-        assert "theoretical_bound" in result
+        assert result["empirical_bound_estimate"] is not None
+        assert result["theoretical_bound"] is None
 
     def test_bound_not_included_without_repr_fn(self, feature_names, single_instance):
-        """Without representation_fn, no theoretical bound."""
+        """Without representation_fn, no Equation 4 RHS can be estimated."""
         from explainiverse.evaluation import compute_relative_input_stability
 
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_input_stability(
-            explainer, model, single_instance,
-            n_perturbations=20, seed=42,
+            explainer,
+            model,
+            single_instance,
+            n_perturbations=20,
+            seed=42,
             return_details=True,
         )
         assert result.get("theoretical_bound") is None
 
-    def test_ris_bounded_by_theory(self, feature_names):
-        """
-        Eq 4: RIS < λ₁ · L₁ × RRS, where λ₁ = ||h₁(x)||_p / ||x||_p.
-        The empirical RIS should not exceed the theoretical upper bound.
-        """
+    def test_sampled_rhs_is_not_labeled_theoretical(self, feature_names):
+        """Finite sampled maxima do not certify a global Lipschitz bound."""
         from explainiverse.evaluation import compute_relative_input_stability
 
         explainer = _DeterministicExplainer(feature_names)
@@ -1342,19 +1616,23 @@ class TestTheoreticalBound:
         instance = np.array([3.0, 2.0, 1.0, 0.5])
 
         result = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=50, noise_scale=0.05, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=50,
+            noise_scale=0.05,
+            seed=42,
             return_details=True,
             representation_fn=_linear_representation_fn,
         )
-        # The theoretical bound should be >= the empirical RIS score
-        if result["theoretical_bound"] is not None and np.isfinite(result["theoretical_bound"]):
-            assert result["score"] <= result["theoretical_bound"] + 1e-6
+        assert np.isfinite(result["empirical_bound_estimate"])
+        assert result["theoretical_bound"] is None
 
 
 # =============================================================================
 # Edge Cases
 # =============================================================================
+
 
 class TestRelativeStabilityEdgeCases:
     """Edge cases for all three Relative Stability metrics."""
@@ -1369,8 +1647,11 @@ class TestRelativeStabilityEdgeCases:
         instance = np.array([2.0])
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
@@ -1384,8 +1665,11 @@ class TestRelativeStabilityEdgeCases:
         instance = np.random.default_rng(42).standard_normal(50)
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
@@ -1403,8 +1687,11 @@ class TestRelativeStabilityEdgeCases:
         instance = np.array([1.0, 2.0, 3.0, 4.0])
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=10,
+            seed=42,
         )
         # Should be finite (epsilon prevents NaN/Inf)
         assert np.isfinite(score) or score == pytest.approx(0.0, abs=1e-10)
@@ -1418,8 +1705,11 @@ class TestRelativeStabilityEdgeCases:
         instance = np.array([1.0, 2.0, 3.0, 4.0])
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=10,
+            seed=42,
         )
         assert score == pytest.approx(0.0, abs=1e-10)
 
@@ -1430,8 +1720,12 @@ class TestRelativeStabilityEdgeCases:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            noise_scale=1e-10, n_perturbations=10, seed=42,
+            explainer,
+            model,
+            single_instance,
+            noise_scale=1e-10,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
@@ -1442,14 +1736,19 @@ class TestRelativeStabilityEdgeCases:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            noise_scale=10.0, n_perturbations=10, seed=42,
+            explainer,
+            model,
+            single_instance,
+            noise_scale=10.0,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
     def test_instance_near_zero(self):
         """Instance near zero: percent change in input has large denominator
-        elements. Should still be finite due to epsilon floor."""
+        elements. Nonzero entries remain mathematically finite; epsilon is
+        used only for exact zeros."""
         from explainiverse.evaluation import compute_relative_input_stability
 
         fnames = ["f0", "f1", "f2"]
@@ -1458,8 +1757,11 @@ class TestRelativeStabilityEdgeCases:
         instance = np.array([1e-12, 1e-12, 1e-12])
 
         score = compute_relative_input_stability(
-            explainer, model, instance,
-            n_perturbations=10, seed=42,
+            explainer,
+            model,
+            instance,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
@@ -1473,9 +1775,13 @@ class TestRelativeStabilityEdgeCases:
         model = _ThresholdModel(threshold=0.0)
 
         result = compute_relative_representation_stability(
-            explainer, model, instance,
+            explainer,
+            model,
+            instance,
             representation_fn=_linear_representation_fn,
-            n_perturbations=50, noise_scale=0.5, seed=42,
+            n_perturbations=50,
+            noise_scale=0.5,
+            seed=42,
             return_details=True,
         )
         if result["n_valid"] >= 1:
@@ -1488,8 +1794,12 @@ class TestRelativeStabilityEdgeCases:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         score = compute_relative_input_stability(
-            explainer, model, single_instance,
-            epsilon_min=1e-5, n_perturbations=10, seed=42,
+            explainer,
+            model,
+            single_instance,
+            epsilon_min=1e-5,
+            n_perturbations=10,
+            seed=42,
         )
         assert np.isfinite(score)
 
@@ -1497,6 +1807,7 @@ class TestRelativeStabilityEdgeCases:
 # =============================================================================
 # Cross-Metric Relationships
 # =============================================================================
+
 
 class TestCrossMetricRelationships:
     """Tests verifying relationships between the three metrics."""
@@ -1508,10 +1819,13 @@ class TestCrossMetricRelationships:
         explainer = _DeterministicExplainer(feature_names)
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert result["ris"] >= 0.0
         assert result["rrs"] >= 0.0
@@ -1524,10 +1838,13 @@ class TestCrossMetricRelationships:
         explainer = _ConstantExplainer(feature_names, values=[3.0, 2.0, 1.0, 0.5])
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         assert result["ris"] == pytest.approx(0.0, abs=1e-10)
         assert result["rrs"] == pytest.approx(0.0, abs=1e-10)
@@ -1542,16 +1859,22 @@ class TestCrossMetricRelationships:
         model = _ConstantClassModel()
 
         det_result = compute_relative_stability(
-            det, model, single_instance,
+            det,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=30, seed=42,
+            n_perturbations=30,
+            seed=42,
         )
         rng_result = compute_relative_stability(
-            rng, model, single_instance,
+            rng,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=30, seed=42,
+            n_perturbations=30,
+            seed=42,
         )
         assert rng_result["ris"] > det_result["ris"]
         assert rng_result["rrs"] > det_result["rrs"]
@@ -1569,10 +1892,13 @@ class TestCrossMetricRelationships:
         explainer = _ConstantExplainer(feature_names, values=[5.0, 3.0, 1.0, 0.5])
         model = _ConstantClassModel()
         result = compute_relative_stability(
-            explainer, model, single_instance,
+            explainer,
+            model,
+            single_instance,
             representation_fn=_linear_representation_fn,
             logit_fn=_linear_logit_fn,
-            n_perturbations=20, seed=42,
+            n_perturbations=20,
+            seed=42,
         )
         # All zero because shared numerator = 0
         assert result["ris"] == pytest.approx(0.0, abs=1e-10)
@@ -1584,39 +1910,48 @@ class TestCrossMetricRelationships:
 # Import Tests
 # =============================================================================
 
+
 class TestRelativeStabilityImports:
     """Verify all new functions are importable from evaluation package."""
 
     def test_import_relative_input_stability(self):
         from explainiverse.evaluation import compute_relative_input_stability
+
         assert callable(compute_relative_input_stability)
 
     def test_import_batch_relative_input_stability(self):
         from explainiverse.evaluation import compute_batch_relative_input_stability
+
         assert callable(compute_batch_relative_input_stability)
 
     def test_import_relative_representation_stability(self):
         from explainiverse.evaluation import compute_relative_representation_stability
+
         assert callable(compute_relative_representation_stability)
 
     def test_import_batch_relative_representation_stability(self):
         from explainiverse.evaluation import compute_batch_relative_representation_stability
+
         assert callable(compute_batch_relative_representation_stability)
 
     def test_import_relative_output_stability(self):
         from explainiverse.evaluation import compute_relative_output_stability
+
         assert callable(compute_relative_output_stability)
 
     def test_import_batch_relative_output_stability(self):
         from explainiverse.evaluation import compute_batch_relative_output_stability
+
         assert callable(compute_batch_relative_output_stability)
 
     def test_import_relative_stability(self):
         from explainiverse.evaluation import compute_relative_stability
+
         assert callable(compute_relative_stability)
 
     def test_import_batch_relative_stability(self):
         from explainiverse.evaluation import compute_batch_relative_stability
+
         assert callable(compute_batch_relative_stability)
 
 
@@ -1624,26 +1959,25 @@ class TestRelativeStabilityImports:
 # Integration with Real sklearn Model
 # =============================================================================
 
+
 @pytest.fixture
 def trained_model_and_explainer(feature_names):
     """Train a real sklearn model and create a LIME explainer."""
-    from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.datasets import make_classification
+    from sklearn.ensemble import GradientBoostingClassifier
+
     from explainiverse.adapters import SklearnAdapter
     from explainiverse.explainers.attribution.lime_wrapper import LimeExplainer
 
     X, y = make_classification(
-        n_samples=100, n_features=4, n_informative=3,
-        n_redundant=0, n_classes=2, random_state=42
+        n_samples=100, n_features=4, n_informative=3, n_redundant=0, n_classes=2, random_state=42
     )
     X = X.astype(np.float32)
 
     clf = GradientBoostingClassifier(n_estimators=20, random_state=42)
     clf.fit(X, y)
 
-    adapter = SklearnAdapter(
-        clf, feature_names=feature_names, class_names=["class_0", "class_1"]
-    )
+    adapter = SklearnAdapter(clf, feature_names=feature_names, class_names=["class_0", "class_1"])
     explainer = LimeExplainer(
         model=adapter,
         training_data=X,
@@ -1662,8 +1996,11 @@ class TestIntegrationRealModel:
 
         model, explainer, X = trained_model_and_explainer
         score = compute_relative_input_stability(
-            explainer, model, X[0],
-            n_perturbations=5, seed=42,
+            explainer,
+            model,
+            X[0],
+            n_perturbations=5,
+            seed=42,
         )
         assert isinstance(score, float)
         assert np.isfinite(score)
@@ -1683,9 +2020,12 @@ class TestIntegrationRealModel:
             return model.predict(X_in)
 
         score = compute_relative_output_stability(
-            explainer, model, X[0],
+            explainer,
+            model,
+            X[0],
             logit_fn=_sklearn_logit_fn,
-            n_perturbations=5, seed=42,
+            n_perturbations=5,
+            seed=42,
         )
         assert isinstance(score, float)
         assert np.isfinite(score)
@@ -1697,8 +2037,12 @@ class TestIntegrationRealModel:
 
         model, explainer, X = trained_model_and_explainer
         result = compute_batch_relative_input_stability(
-            explainer, model, X,
-            n_perturbations=3, max_instances=3, seed=42,
+            explainer,
+            model,
+            X,
+            n_perturbations=3,
+            max_instances=3,
+            seed=42,
         )
         assert result["n_evaluated"] == 3
         assert np.isfinite(result["mean"])
@@ -1708,19 +2052,18 @@ class TestIntegrationRealModel:
 # Low-Validity Warning Tests
 # =============================================================================
 
+
 class TestLowValidityWarnings:
     """Verify warnings.warn fires when n_valid < 5 for all Relative Stability functions."""
 
     def _make_mock_explainer(self):
         """Create a mock explainer that returns deterministic attributions."""
+
         class MockExplainer:
             def explain(self, instance, **kwargs):
                 instance = np.asarray(instance, dtype=np.float64).flatten()
                 n = len(instance)
-                attrs = {
-                    f"feature_{i}": float(instance[i] * (i + 1))
-                    for i in range(n)
-                }
+                attrs = {f"feature_{i}": float(instance[i] * (i + 1)) for i in range(n)}
                 exp = Explanation(
                     explainer_name="mock",
                     target_class="class_0",
@@ -1728,10 +2071,12 @@ class TestLowValidityWarnings:
                 )
                 exp.feature_names = [f"feature_{i}" for i in range(n)]
                 return exp
+
         return MockExplainer()
 
     def _make_mock_model(self):
         """Create a mock model that always predicts class 0 (all perturbations pass same-class filter)."""
+
         class MockModel:
             def predict_proba(self, X):
                 X = np.asarray(X)
@@ -1741,7 +2086,10 @@ class TestLowValidityWarnings:
                 return np.column_stack([np.ones(len(X)) * 0.9, np.ones(len(X)) * 0.1])
 
             def predict(self, X):
-                return np.zeros(len(np.asarray(X).reshape(-1, X.shape[-1] if np.asarray(X).ndim > 1 else 1)))
+                return np.zeros(
+                    len(np.asarray(X).reshape(-1, X.shape[-1] if np.asarray(X).ndim > 1 else 1))
+                )
+
         return MockModel()
 
     def test_ris_low_validity_warning(self):
@@ -1753,10 +2101,13 @@ class TestLowValidityWarnings:
         instance = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
 
         # n_perturbations=3 → n_valid will be 3 (< 5), triggering the warning
-        with pytest.warns(UserWarning, match="RIS score may be statistically unreliable"):
+        with pytest.warns(UserWarning, match="RIS has fewer than five valid draws"):
             compute_relative_input_stability(
-                explainer, model, instance,
-                n_perturbations=3, seed=42,
+                explainer,
+                model,
+                instance,
+                n_perturbations=3,
+                seed=42,
             )
 
     def test_rrs_low_validity_warning(self):
@@ -1771,11 +2122,14 @@ class TestLowValidityWarnings:
             x = np.asarray(x, dtype=np.float64).flatten()
             return x[:3] * 2.0  # Simple linear representation
 
-        with pytest.warns(UserWarning, match="RRS score may be statistically unreliable"):
+        with pytest.warns(UserWarning, match="RRS has fewer than five valid draws"):
             compute_relative_representation_stability(
-                explainer, model, instance,
+                explainer,
+                model,
+                instance,
                 representation_fn=representation_fn,
-                n_perturbations=3, seed=42,
+                n_perturbations=3,
+                seed=42,
             )
 
     def test_ros_low_validity_warning(self):
@@ -1790,11 +2144,14 @@ class TestLowValidityWarnings:
             x = np.asarray(x, dtype=np.float64).flatten()
             return np.array([np.sum(x), -np.sum(x)])
 
-        with pytest.warns(UserWarning, match="ROS score may be statistically unreliable"):
+        with pytest.warns(UserWarning, match="ROS has fewer than five valid draws"):
             compute_relative_output_stability(
-                explainer, model, instance,
+                explainer,
+                model,
+                instance,
                 logit_fn=logit_fn,
-                n_perturbations=3, seed=42,
+                n_perturbations=3,
+                seed=42,
             )
 
     def test_combined_low_validity_warning(self):
@@ -1813,12 +2170,15 @@ class TestLowValidityWarnings:
             x = np.asarray(x, dtype=np.float64).flatten()
             return np.array([np.sum(x), -np.sum(x)])
 
-        with pytest.warns(UserWarning, match="Relative stability scores may be statistically unreliable"):
+        with pytest.warns(UserWarning, match="Relative stability has fewer than five valid"):
             compute_relative_stability(
-                explainer, model, instance,
+                explainer,
+                model,
+                instance,
                 representation_fn=representation_fn,
                 logit_fn=logit_fn,
-                n_perturbations=3, seed=42,
+                n_perturbations=3,
+                seed=42,
             )
 
     def test_ris_no_warning_with_sufficient_perturbations(self):
@@ -1833,8 +2193,11 @@ class TestLowValidityWarnings:
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # Turn warnings into errors
             score = compute_relative_input_stability(
-                explainer, model, instance,
-                n_perturbations=10, seed=42,
+                explainer,
+                model,
+                instance,
+                n_perturbations=10,
+                seed=42,
             )
             assert isinstance(score, float)
             assert np.isfinite(score)
@@ -1871,8 +2234,11 @@ class TestLowValidityWarnings:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             score = compute_relative_input_stability(
-                explainer, model, instance,
-                n_perturbations=5, seed=42,
+                explainer,
+                model,
+                instance,
+                n_perturbations=5,
+                seed=42,
             )
             assert np.isnan(score)
 
@@ -1884,10 +2250,13 @@ class TestLowValidityWarnings:
         model = self._make_mock_model()
         instance = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
 
-        with pytest.warns(UserWarning, match="RIS score may be statistically unreliable"):
+        with pytest.warns(UserWarning, match="RIS has fewer than five valid draws"):
             result = compute_relative_input_stability(
-                explainer, model, instance,
-                n_perturbations=3, seed=42,
+                explainer,
+                model,
+                instance,
+                n_perturbations=3,
+                seed=42,
                 return_details=True,
             )
 

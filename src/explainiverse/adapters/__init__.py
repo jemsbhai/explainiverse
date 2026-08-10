@@ -1,9 +1,9 @@
 # src/explainiverse/adapters/__init__.py
 """
-Model adapters - wrappers that provide a consistent interface for different ML frameworks.
+Model adapters with framework-specific prediction contracts.
 
 Available adapters:
-- SklearnAdapter: For scikit-learn models (always available)
+- SklearnAdapter: For supported scikit-learn estimator contracts (always available)
 - PyTorchAdapter: For PyTorch nn.Module models (requires torch)
 """
 
@@ -12,7 +12,8 @@ from explainiverse.adapters.sklearn_adapter import SklearnAdapter
 
 # Conditionally import PyTorchAdapter if torch is available
 try:
-    from explainiverse.adapters.pytorch_adapter import PyTorchAdapter, TORCH_AVAILABLE
+    from explainiverse.adapters.pytorch_adapter import TORCH_AVAILABLE, PyTorchAdapter
+
     __all__ = ["BaseModelAdapter", "SklearnAdapter", "PyTorchAdapter", "TORCH_AVAILABLE"]
 except ImportError:
     TORCH_AVAILABLE = False

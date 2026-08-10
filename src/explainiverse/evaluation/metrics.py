@@ -1,314 +1,970 @@
-# src/explainiverse/evaluation/metrics.py
-"""
-Legacy evaluation metrics: AOPC and ROAR.
+"""Verified perturbation and remove-and-retrain evaluation metrics.
 
-For comprehensive evaluation, prefer the metrics in faithfulness.py
-and stability.py which have better edge case handling.
+The AOPC implementation follows Equation 12 of Samek et al. (2017):
+
+    AOPC = (1 / (L + 1)) * sum_{k=0}^L [f(x) - f(x^(k))]
+
+For classification, ``f`` is one fixed output identified by explicit or
+mappable explanation metadata. An unknown multi-output target fails; model
+argmax is never substituted for explanation identity or reselected after a
+perturbation.
+
+The ROAR implementation follows the core protocol in Hooker et al. (2019): an
+importance ranking is required for every input in both the training and held-out
+test sets; each row is masked by its own ranking; a fresh model is trained on the
+masked training set and evaluated on the correspondingly masked test set.
+
+References
+----------
+Samek et al., "Evaluating the Visualization of What a Deep Neural Network Has
+Learned", IEEE TNNLS 28(11), 2017. DOI: 10.1109/TNNLS.2016.2599820.
+
+Hooker et al., "A Benchmark for Interpretability Methods in Deep Neural
+Networks", NeurIPS 2019.
 """
+
+from __future__ import annotations
+
+import re
+from numbers import Integral, Real
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union, cast
 
 import numpy as np
-import re
-from typing import List, Dict, Optional, Union, Callable
+from sklearn.base import clone, is_classifier, is_regressor
+from sklearn.metrics import accuracy_score, r2_score
+
 from explainiverse.core.explanation import Explanation
-from sklearn.metrics import accuracy_score
-import copy
+
+Baseline = Union[str, float, np.ndarray, Callable[[np.ndarray], np.ndarray]]
+Target = Optional[Union[int, float, str]]
 
 
 def _extract_feature_index(
     feature_name: str,
     feature_names: Optional[List[str]] = None,
-    fallback_index: int = 0
-) -> int:
+    fallback_index: Optional[int] = 0,
+) -> Optional[int]:
+    """Resolve an attribution key to a feature index.
+
+    ``fallback_index`` remains for backwards compatibility with callers of this
+    helper.  Metric implementations pass ``None`` and therefore fail rather
+    than silently assigning an unknown attribution to an unrelated feature.
     """
-    Extract feature index from a feature name string.
-    
-    Handles various naming conventions including LIME-style conditions
-    like "feature_0 <= 5.0".
-    
-    Args:
-        feature_name: Feature name (possibly with conditions)
-        feature_names: Optional list of canonical feature names
-        fallback_index: Index to return if extraction fails
-        
-    Returns:
-        Feature index
-    """
-    # Try exact match first
+    if not isinstance(feature_name, str):
+        return fallback_index
+
+    key = feature_name.strip()
     if feature_names is not None:
-        if feature_name in feature_names:
-            return feature_names.index(feature_name)
-        
-        # Extract base name (remove LIME-style conditions)
-        base_name = re.sub(r'\s*[<>=!]+\s*[\d.\-]+$', '', feature_name).strip()
+        if key in feature_names:
+            return feature_names.index(key)
+
+        # LIME conditions commonly look like ``age <= 30``.  Only strip a
+        # trailing numeric comparison; substring matching is intentionally not
+        # used because names such as ``age`` and ``age_squared`` are ambiguous.
+        base_name = re.sub(
+            r"\s*(?:<=|>=|==|=|!=|<|>)\s*" r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*$",
+            "",
+            key,
+        ).strip()
         if base_name in feature_names:
             return feature_names.index(base_name)
-        
-        # Try partial match (feature name contained in key)
-        for i, fname in enumerate(feature_names):
-            if fname in feature_name:
-                return i
-    
-    # Try extracting index from patterns like "feature_2", "f2", "x2"
-    patterns = [
-        r'feature[_\s]*(\d+)',
-        r'feat[_\s]*(\d+)',
-        r'^f(\d+)$',
-        r'^x(\d+)$',
-    ]
+
+    patterns = (
+        r"^feature[_\s]*(\d+)$",
+        r"^feat[_\s]*(\d+)$",
+        r"^f(\d+)$",
+        r"^x(\d+)$",
+    )
     for pattern in patterns:
-        match = re.search(pattern, feature_name, re.IGNORECASE)
+        match = re.fullmatch(pattern, key, re.IGNORECASE)
         if match:
             return int(match.group(1))
-    
+
     return fallback_index
 
 
+def _validate_task(task: Optional[str]) -> Optional[str]:
+    if task not in {None, "classification", "regression"}:
+        raise ValueError("task must be 'classification', 'regression', or None")
+    return task
+
+
+def _wrapped_model(model: Any) -> Any:
+    return getattr(model, "model", model)
+
+
+def _infer_model_task(model: Any, task: Optional[str] = None) -> Optional[str]:
+    task = _validate_task(task)
+    if task is not None:
+        return task
+
+    for candidate in (model, _wrapped_model(model)):
+        candidate_task = getattr(candidate, "task", None)
+        if candidate_task in {"classification", "regression"}:
+            return candidate_task
+        estimator_type = getattr(candidate, "_estimator_type", None)
+        if estimator_type == "classifier":
+            return "classification"
+        if estimator_type == "regressor":
+            return "regression"
+        if hasattr(candidate, "classes_") or hasattr(candidate, "predict_proba"):
+            return "classification"
+
+    return None
+
+
+def _model_class_label_sequences(model: Any) -> list[list[Any]]:
+    """Return label sequences while preserving each sequence's output indices."""
+    sequences: list[list[Any]] = []
+    for candidate in (model, _wrapped_model(model)):
+        for attribute in ("class_names", "classes_"):
+            values = getattr(candidate, attribute, None)
+            if values is not None:
+                labels = np.asarray(values, dtype=object).reshape(-1).tolist()
+                if labels and labels not in sequences:
+                    sequences.append(labels)
+    return sequences
+
+
+def _raw_predictions(model: Any, X: np.ndarray, task: str) -> tuple[np.ndarray, str]:
+    """Return a numerical ``(samples, outputs)`` matrix and its output space."""
+    raw_model = _wrapped_model(model)
+    if task == "classification" and hasattr(model, "predict_proba"):
+        predictions = model.predict_proba(X)
+    elif task == "classification" and model is raw_model and hasattr(raw_model, "predict_proba"):
+        predictions = raw_model.predict_proba(X)
+    else:
+        if not hasattr(model, "predict"):
+            raise TypeError("model must expose predict or predict_proba")
+        predictions = model.predict(X)
+
+    predictions = np.asarray(predictions)
+    if predictions.ndim == 0:
+        predictions = predictions.reshape(1, 1)
+    elif predictions.ndim == 1:
+        if predictions.shape[0] != X.shape[0]:
+            # A single sample may be returned as an output vector.
+            if X.shape[0] == 1:
+                predictions = predictions.reshape(1, -1)
+            else:
+                raise ValueError("model returned the wrong number of predictions")
+        else:
+            predictions = predictions.reshape(-1, 1)
+    elif predictions.ndim != 2:
+        raise ValueError("model predictions must be one- or two-dimensional")
+
+    if predictions.shape[0] != X.shape[0]:
+        raise ValueError("model returned the wrong number of predictions")
+
+    if task == "regression":
+        try:
+            values = predictions.astype(float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("regression predictions must be numerical") from exc
+        if not np.all(np.isfinite(values)):
+            raise ValueError("model returned non-finite regression predictions")
+        return values, "regression_output"
+
+    # A predict-only classifier can expose labels rather than scores.  Convert
+    # them to fixed one-hot indicators when classes_ is available, and disclose
+    # that coarse output space in return_details.
+    has_probability_api = hasattr(model, "predict_proba") or (
+        model is raw_model and hasattr(raw_model, "predict_proba")
+    )
+    classes = getattr(raw_model, "classes_", getattr(model, "classes_", None))
+    if predictions.shape[1] == 1 and classes is not None and not has_probability_api:
+        labels = predictions[:, 0]
+        classes = np.asarray(classes)
+        matches = labels[:, None] == classes[None, :]
+        if not np.all(matches.sum(axis=1) == 1):
+            raise ValueError("classifier predicted a label not present in classes_")
+        return matches.astype(float), "hard_label_indicator"
+
+    try:
+        values = predictions.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("classification outputs must be numerical scores") from exc
+    if not np.all(np.isfinite(values)):
+        raise ValueError("model returned non-finite classification outputs")
+
+    if values.shape[1] == 1:
+        if not np.all((0.0 <= values) & (values <= 1.0)):
+            raise ValueError("one-column classification output must contain P(class 1) in [0, 1]")
+        positive = values[:, 0]
+        values = np.column_stack([1.0 - positive, positive])
+
+    is_probability = np.all((0.0 <= values) & (values <= 1.0)) and np.allclose(
+        values.sum(axis=1), 1.0, rtol=1e-6, atol=1e-8
+    )
+    return values, "probability" if is_probability else "class_score"
+
+
+def _predict_outputs(model: Any, X: np.ndarray, task: Optional[str]) -> tuple[np.ndarray, str, str]:
+    resolved_task = _infer_model_task(model, task)
+    if resolved_task is not None:
+        outputs, output_space = _raw_predictions(model, X, resolved_task)
+        return outputs, output_space, resolved_task
+
+    # For an untagged object, a multi-column output is a classification score
+    # matrix.  A scalar/one-column output is treated as regression; callers can
+    # override this with task='classification' for a sigmoid model.
+    if not hasattr(model, "predict"):
+        raise TypeError("model must expose a predict method")
+    probe = np.asarray(model.predict(X))
+    inferred = "classification" if probe.ndim == 2 and probe.shape[1] > 1 else "regression"
+    outputs, output_space = _raw_predictions(model, X, inferred)
+    return outputs, output_space, inferred
+
+
+def _resolve_target_index(
+    model: Any,
+    explanation: Explanation,
+    original_outputs: np.ndarray,
+    task: str,
+    explicit_target: Target,
+) -> tuple[int, str]:
+    n_outputs = original_outputs.shape[1]
+
+    index_metadata_sources = {
+        "metadata.class_index",
+        "metadata.target_class_index",
+        "metadata.output_index",
+    }
+
+    def resolve_candidate(candidate: Target, source: str) -> Optional[int]:
+        if isinstance(candidate, bool):
+            raise TypeError(f"{source} must be an output index or class label, not bool")
+
+        # These metadata fields explicitly promise an index.  All other target
+        # sources are labels first, including integer labels such as classes_
+        # == [1, 2].  Falling back to an integer index keeps index-only model
+        # APIs usable when the model exposes no label vocabulary.
+        if source in index_metadata_sources:
+            if not isinstance(candidate, Integral):
+                raise TypeError(f"{source} must be an integer output index")
+            return int(candidate)
+
+        matching_indices: set[int] = set()
+        for labels in _model_class_label_sequences(model):
+            for index, label in enumerate(labels):
+                try:
+                    exact_match = bool(candidate == label)
+                except (TypeError, ValueError):
+                    exact_match = False
+                string_match = isinstance(candidate, str) and candidate == str(label)
+                if exact_match or string_match:
+                    matching_indices.add(index)
+        if len(matching_indices) > 1:
+            raise ValueError(
+                f"{source}={candidate!r} maps to conflicting model output indices "
+                f"{sorted(matching_indices)}"
+            )
+        if matching_indices:
+            return next(iter(matching_indices))
+
+        if isinstance(candidate, Integral):
+            return int(candidate)
+        if not isinstance(candidate, (str, Real)):
+            raise TypeError(f"{source} must be an output index or scalar class label")
+        if not isinstance(candidate, str):
+            return None
+        parsed = re.fullmatch(r"(?:class|output)[_\s]*(\d+)", candidate, re.IGNORECASE)
+        if parsed:
+            return int(parsed.group(1))
+        if task == "regression" and n_outputs == 1:
+            return 0
+        return None
+
+    candidates: list[tuple[str, Target]] = []
+    if explicit_target is not None:
+        candidates.append(("argument", explicit_target))
+    for key in ("class_index", "target_class_index", "output_index"):
+        if key in explanation.metadata:
+            candidates.append((f"metadata.{key}", explanation.metadata[key]))
+
+    label = getattr(explanation, "target_class", None)
+    informative_label = label is not None and not (
+        isinstance(label, str) and label in {"", "output", "regression"}
+    )
+    resolved: list[tuple[str, int]] = []
+    for source, candidate in candidates:
+        index = resolve_candidate(candidate, source)
+        if index is None:
+            raise ValueError(f"Cannot map {source}={candidate!r} to a model output")
+        resolved.append((source, index))
+
+    if informative_label:
+        label_index = resolve_candidate(label, "explanation.target_class")
+        if label_index is not None:
+            resolved.append(("explanation.target_class", label_index))
+        elif not resolved:
+            raise ValueError(f"Cannot map target_class={label!r} to a model output")
+
+    if resolved:
+        unique_indices = {index for _, index in resolved}
+        if len(unique_indices) != 1:
+            details = ", ".join(f"{source}={index}" for source, index in resolved)
+            raise ValueError(f"conflicting target output metadata: {details}")
+        index = resolved[0][1]
+        source = "+".join(source for source, _ in resolved)
+    else:
+        if n_outputs != 1:
+            descriptor = "multi-output regression" if task == "regression" else "multi-output"
+            raise ValueError(
+                f"{descriptor} evaluation requires an explicit or mappable explanation target"
+            )
+        index = 0
+        source = "single_output"
+
+    if index < 0 or index >= n_outputs:
+        raise ValueError(f"target output index {index} is invalid for {n_outputs} model output(s)")
+    return index, source
+
+
+def _baseline_values(
+    baseline_value: Baseline,
+    n_features: int,
+    background_data: Optional[np.ndarray],
+) -> np.ndarray:
+    if isinstance(baseline_value, str):
+        if baseline_value not in {"mean", "median"}:
+            raise ValueError("baseline_value string must be 'mean' or 'median'")
+        if background_data is None:
+            raise ValueError(f"background_data is required for baseline_value={baseline_value!r}")
+        background = np.asarray(background_data)
+        if background.ndim != 2 or background.shape[1] != n_features:
+            raise ValueError("background_data must have one column per feature")
+        if background.shape[0] == 0:
+            raise ValueError("background_data must contain at least one row")
+        reducer = np.mean if baseline_value == "mean" else np.median
+        values = reducer(background, axis=0)
+    elif callable(baseline_value):
+        if background_data is None:
+            raise ValueError("background_data is required for a callable baseline_value")
+        # A baseline callback is not authorized to mutate the caller's training
+        # or background data as a side effect.
+        values = baseline_value(np.asarray(background_data).copy())
+    elif isinstance(baseline_value, np.ndarray):
+        values = baseline_value
+    elif isinstance(baseline_value, Real) and not isinstance(baseline_value, bool):
+        values = np.full(n_features, float(baseline_value))
+    else:
+        raise TypeError(
+            "baseline_value must be a scalar, per-feature array, 'mean', 'median', or callable"
+        )
+
+    values = np.asarray(values)
+    if values.ndim != 1 or values.shape[0] != n_features:
+        raise ValueError("baseline_value must provide exactly one value per feature")
+    try:
+        values = values.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("baseline values must be numerical") from exc
+    if not np.all(np.isfinite(values)):
+        raise ValueError("baseline values must be finite")
+    return values
+
+
+def _validate_ranking(ranking: str) -> str:
+    if ranking not in {"descending", "absolute"}:
+        raise ValueError("ranking must be 'descending' or 'absolute'")
+    return ranking
+
+
+def _sorted_feature_indices(
+    explanation: Explanation,
+    n_features: int,
+    ranking: str = "descending",
+) -> list[int]:
+    if not isinstance(explanation, Explanation):
+        raise TypeError("each explanation must be an Explanation instance")
+    ranking = _validate_ranking(ranking)
+    attributions = explanation.explanation_data.get("feature_attributions", {})
+    if not isinstance(attributions, dict) or not attributions:
+        raise ValueError("No feature attributions found in explanation.")
+
+    feature_names = getattr(explanation, "feature_names", None)
+    if feature_names is not None:
+        feature_names = list(feature_names)
+        if len(feature_names) != n_features:
+            raise ValueError("explanation.feature_names must contain one name per feature")
+        if len(set(feature_names)) != len(feature_names):
+            raise ValueError("explanation.feature_names must be unique")
+
+    validated: list[tuple[str, float]] = []
+    for name, value in attributions.items():
+        if not isinstance(name, str):
+            raise TypeError("feature attribution keys must be strings")
+        if not isinstance(value, Real) or isinstance(value, bool):
+            raise ValueError(f"attribution for {name!r} must be a finite number")
+        numeric_value = float(value)
+        if not np.isfinite(numeric_value):
+            raise ValueError(f"attribution for {name!r} must be a finite number")
+        validated.append((name, numeric_value))
+
+    if ranking == "absolute":
+        validated.sort(key=lambda item: abs(item[1]), reverse=True)
+    else:
+        validated.sort(key=lambda item: item[1], reverse=True)
+    indices: list[int] = []
+    for name, _ in validated:
+        index = _extract_feature_index(name, feature_names, fallback_index=None)
+        if index is None:
+            raise ValueError(f"Cannot map attribution key {name!r} to a feature index")
+        if index < 0 or index >= n_features:
+            raise ValueError(f"Attribution key {name!r} maps to out-of-range feature index {index}")
+        if index in indices:
+            raise ValueError(f"Multiple attribution keys map to the same feature index {index}")
+        indices.append(index)
+    return indices
+
+
+def _validate_positive_steps(value: int, name: str) -> int:
+    if not isinstance(value, Integral) or isinstance(value, bool) or int(value) <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
+
+
 def compute_aopc(
-    model,
+    model: Any,
     instance: np.ndarray,
     explanation: Explanation,
     num_steps: int = 10,
-    baseline_value: float = 0.0
-) -> float:
+    baseline_value: Baseline = 0.0,
+    *,
+    target_class: Target = None,
+    background_data: Optional[np.ndarray] = None,
+    task: Optional[str] = None,
+    ranking: str = "descending",
+    return_details: bool = False,
+) -> Union[float, Dict[str, Any]]:
+    """Compute a generalized feature-wise MoRF AOPC contribution.
+
+    The aggregation follows Samek et al.'s Equation 12, while the intervention
+    is deterministic per-feature baseline replacement rather than the paper's
+    image-region perturbation generator. Features are cumulatively replaced
+    most-relevant-first. By default the
+    estimator's descending relevance order is preserved; use
+    ``ranking='absolute'`` only when magnitude is the intended importance
+    definition.  The returned value is a *signed* output drop, so a
+    perturbation that raises the fixed explained output can produce a negative
+    AOPC.
+
+    For the paper's dataset-level quantity, use :func:`compute_batch_aopc`,
+    which averages these per-input contributions.
     """
-    Compute Area Over the Perturbation Curve (AOPC).
-    
-    AOPC measures explanation faithfulness by iteratively removing
-    the most important features and measuring prediction change.
+    instance = np.asarray(instance)
+    if instance.ndim != 1 or instance.size == 0:
+        raise ValueError("instance must be a non-empty one-dimensional array")
+    try:
+        instance = instance.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("instance must be numerical") from exc
+    if not np.all(np.isfinite(instance)):
+        raise ValueError("instance must contain only finite values")
 
-    Args:
-        model: Model adapter with .predict() method
-        instance: Input sample (1D array)
-        explanation: Explanation object with feature_attributions
-        num_steps: Number of top features to remove
-        baseline_value: Value to replace removed features with
+    num_steps = _validate_positive_steps(num_steps, "num_steps")
+    ranking = _validate_ranking(ranking)
+    n_features = instance.size
+    feature_order = _sorted_feature_indices(explanation, n_features, ranking)
+    effective_steps = min(num_steps, n_features)
+    if len(feature_order) < effective_steps:
+        raise ValueError(
+            f"explanation provides {len(feature_order)} unique features, but "
+            f"AOPC requires {effective_steps} for this input and num_steps"
+        )
 
-    Returns:
-        AOPC score (higher = more faithful explanation)
-    """
-    instance = np.asarray(instance).flatten()
-    n_features = len(instance)
-    
-    base_pred = model.predict(instance.reshape(1, -1))[0]
-    if hasattr(base_pred, '__len__') and len(base_pred) > 1:
-        base_pred = float(np.max(base_pred))
-    else:
-        base_pred = float(base_pred)
-    
-    attributions = explanation.explanation_data.get("feature_attributions", {})
-    if not attributions:
-        raise ValueError("No feature attributions found in explanation.")
-
-    # Sort features by absolute importance (most important first)
-    sorted_features = sorted(
-        attributions.items(),
-        key=lambda x: abs(x[1]),
-        reverse=True
+    baseline = _baseline_values(baseline_value, n_features, background_data)
+    original_matrix, output_space, resolved_task = _predict_outputs(
+        model, instance.reshape(1, -1), task
     )
+    target_index, target_source = _resolve_target_index(
+        model, explanation, original_matrix, resolved_task, target_class
+    )
+    original_value = float(original_matrix[0, target_index])
 
-    # Get feature_names from explanation (may be None)
-    feature_names = getattr(explanation, 'feature_names', None)
-    
-    # Map feature names to indices
-    feature_indices = []
-    for i, (fname, _) in enumerate(sorted_features):
-        idx = _extract_feature_index(fname, feature_names, fallback_index=i)
-        if 0 <= idx < n_features:
-            feature_indices.append(idx)
-
-    deltas = []
+    prediction_values = [original_value]
+    prediction_drops = [0.0]
     modified = instance.copy()
+    for index in feature_order[:effective_steps]:
+        modified[index] = baseline[index]
+        matrix, perturbed_space, perturbed_task = _predict_outputs(
+            model, modified.reshape(1, -1), resolved_task
+        )
+        if perturbed_task != resolved_task or perturbed_space != output_space:
+            raise ValueError("model output contract changed after perturbation")
+        if target_index >= matrix.shape[1]:
+            raise ValueError("model output count changed after perturbation")
+        value = float(matrix[0, target_index])
+        prediction_values.append(value)
+        prediction_drops.append(original_value - value)
 
-    for i in range(min(num_steps, len(feature_indices))):
-        idx = feature_indices[i]
-        modified[idx] = baseline_value
-        
-        new_pred = model.predict(modified.reshape(1, -1))[0]
-        if hasattr(new_pred, '__len__') and len(new_pred) > 1:
-            new_pred = float(np.max(new_pred))
-        else:
-            new_pred = float(new_pred)
-        
-        delta = abs(base_pred - new_pred)
-        deltas.append(delta)
+    # Equation 12 includes k=0.  Its drop is zero but it contributes to the
+    # L+1 denominator; np.mean over [0, drop_1, ..., drop_L] is exact.
+    aopc = float(np.mean(prediction_drops))
+    if not return_details:
+        return aopc
 
-    return float(np.mean(deltas)) if deltas else 0.0
+    return {
+        "aopc": aopc,
+        "formula": "sum_k=0^L(f(x)-f(x_k))/(L+1)",
+        "aggregation": "signed_mean_including_k_zero",
+        "ranking": ranking,
+        "ranking_transformation_applied": ranking == "absolute",
+        "task": resolved_task,
+        "output_space": output_space,
+        "target_index": target_index,
+        "target_source": target_source,
+        "original_value": original_value,
+        "prediction_values": prediction_values,
+        "prediction_drops": prediction_drops,
+        "feature_order": feature_order[:effective_steps],
+        "requested_steps": num_steps,
+        "effective_steps": effective_steps,
+        "baseline_values": baseline.tolist(),
+        "perturbation_protocol": "deterministic_per_feature_baseline_replacement",
+        "paper_random_perturbation_protocol_used": False,
+        "canonical_samek_output_contract": (
+            resolved_task == "classification" and output_space in {"probability", "class_score"}
+        ),
+        "samek_formula_contract_met": True,
+        "samek_region_perturbation_contract_met": False,
+        "random_order_control_included": False,
+        "claim_scope": "generalized_feature_morf_aopc",
+    }
 
 
 def compute_batch_aopc(
-    model,
+    model: Any,
     X: np.ndarray,
     explanations: Dict[str, List[Explanation]],
     num_steps: int = 10,
-    baseline_value: float = 0.0
+    baseline_value: Baseline = 0.0,
+    *,
+    background_data: Optional[np.ndarray] = None,
+    task: Optional[str] = None,
+    ranking: str = "descending",
 ) -> Dict[str, float]:
+    """Average verified per-input AOPC contributions for each explainer.
+
+    Every method must provide exactly one valid explanation per row.  Errors are
+    surfaced rather than silently skipped, because skipping difficult rows makes
+    scores between explainers incomparable.
     """
-    Compute average AOPC across multiple explainers and instances.
+    X = np.asarray(X)
+    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
+        raise ValueError("X must be a non-empty two-dimensional array")
+    if not isinstance(explanations, dict) or not explanations:
+        raise ValueError("explanations must map at least one explainer to a list")
 
-    Args:
-        model: Model adapter
-        X: 2D input array (n_samples, n_features)
-        explanations: Dict mapping explainer names to lists of Explanation objects
-        num_steps: Number of top features to remove
-        baseline_value: Value to replace features with
-
-    Returns:
-        Dict mapping explainer names to mean AOPC scores
-    """
-    results = {}
-
-    for explainer_name, expl_list in explanations.items():
-        scores = []
-        for i, exp in enumerate(expl_list):
-            if i >= len(X):
-                break
-            try:
-                score = compute_aopc(model, X[i], exp, num_steps, baseline_value)
-                scores.append(score)
-            except Exception:
-                continue
-        results[explainer_name] = float(np.mean(scores)) if scores else 0.0
-
+    results: Dict[str, float] = {}
+    for explainer_name, explainer_explanations in explanations.items():
+        if len(explainer_explanations) != len(X):
+            raise ValueError(
+                f"{explainer_name!r} must provide the same number of explanations as X rows"
+            )
+        scores = [
+            cast(
+                float,
+                compute_aopc(
+                    model,
+                    X[row],
+                    explainer_explanations[row],
+                    num_steps=num_steps,
+                    baseline_value=baseline_value,
+                    background_data=background_data,
+                    task=task,
+                    ranking=ranking,
+                ),
+            )
+            for row in range(len(X))
+        ]
+        results[explainer_name] = float(np.mean(scores))
     return results
 
 
+def _validate_roar_arrays(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    X_train = np.asarray(X_train)
+    X_test = np.asarray(X_test)
+    y_train = np.asarray(y_train)
+    y_test = np.asarray(y_test)
+    if X_train.ndim != 2 or X_test.ndim != 2:
+        raise ValueError("X_train and X_test must be two-dimensional")
+    if X_train.shape[0] == 0 or X_test.shape[0] == 0 or X_train.shape[1] == 0:
+        raise ValueError("training and test data must be non-empty")
+    if X_train.shape[1] != X_test.shape[1]:
+        raise ValueError("X_train and X_test must have the same number of features")
+    if y_train.ndim == 0 or y_test.ndim == 0:
+        raise ValueError("y_train and y_test must retain a sample dimension")
+    if len(y_train) != len(X_train) or len(y_test) != len(X_test):
+        raise ValueError("X and y sample counts must match within each split")
+    if X_train.shape == X_test.shape and np.array_equal(X_train, X_test):
+        raise ValueError("ROAR requires a held-out test split; X_test is identical to X_train")
+    try:
+        X_train = X_train.astype(float)
+        X_test = X_test.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ROAR currently supports numerical feature matrices") from exc
+    if not np.all(np.isfinite(X_train)) or not np.all(np.isfinite(X_test)):
+        raise ValueError("ROAR feature matrices must contain only finite values")
+    return X_train, y_train, X_test, y_test
+
+
+def _resolve_top_k(top_k: Union[int, float], n_features: int) -> int:
+    if isinstance(top_k, Integral) and not isinstance(top_k, bool):
+        count = int(top_k)
+        if count <= 0 or count > n_features:
+            raise ValueError(f"top_k must be between 1 and {n_features}")
+        return count
+    if isinstance(top_k, Real) and not isinstance(top_k, bool):
+        fraction = float(top_k)
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError("fractional top_k must be in (0, 1]")
+        return min(n_features, int(np.ceil(fraction * n_features)))
+    raise TypeError("top_k must be a positive feature count or fraction in (0, 1]")
+
+
+def _validate_explanation_alignment(
+    explanations: Sequence[Explanation],
+    n_rows: int,
+    split_name: str,
+) -> None:
+    if len(explanations) != n_rows:
+        raise ValueError(
+            f"explanations must align with all {split_name} rows: expected {n_rows}, "
+            f"received {len(explanations)}"
+        )
+
+
+def _mask_dataset(
+    X: np.ndarray,
+    explanations: Sequence[Explanation],
+    top_k: int,
+    baseline: np.ndarray,
+    ranking: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    dtype = np.result_type(X.dtype, baseline.dtype)
+    masked = np.asarray(X, dtype=dtype).copy()
+    masks = np.zeros(X.shape, dtype=bool)
+    for row, explanation in enumerate(explanations):
+        order = _sorted_feature_indices(explanation, X.shape[1], ranking)
+        if len(order) < top_k:
+            raise ValueError(
+                f"explanation at row {row} provides {len(order)} unique features, "
+                f"but top_k={top_k}"
+            )
+        indices = np.asarray(order[:top_k], dtype=int)
+        masked[row, indices] = baseline[indices]
+        masks[row, indices] = True
+    return masked, masks
+
+
+def _new_estimator(model_spec: Any, model_kwargs: Dict[str, Any]) -> Any:
+    if isinstance(model_spec, type):
+        return model_spec(**model_kwargs)
+    if hasattr(model_spec, "fit"):
+        if model_kwargs:
+            estimator = clone(model_spec)
+            estimator.set_params(**model_kwargs)
+            return estimator
+        return clone(model_spec)
+    if callable(model_spec):
+        return model_spec(**model_kwargs)
+    raise TypeError("model_class must be an estimator class, factory, or sklearn estimator")
+
+
+def _estimator_task(estimator: Any, explicit_task: Optional[str]) -> str:
+    explicit_task = _validate_task(explicit_task)
+    if explicit_task is not None:
+        return explicit_task
+    if is_classifier(estimator) or getattr(estimator, "_estimator_type", None) == "classifier":
+        return "classification"
+    if is_regressor(estimator) or getattr(estimator, "_estimator_type", None) == "regressor":
+        return "regression"
+    raise ValueError("Cannot infer estimator task; pass task='classification' or task='regression'")
+
+
+def _set_random_state_if_supported(estimator: Any, seed: Optional[int]) -> Any:
+    if seed is None or not hasattr(estimator, "get_params"):
+        return estimator
+    params = estimator.get_params(deep=True)
+    random_state_names = sorted(
+        name for name in params if name == "random_state" or name.endswith("__random_state")
+    )
+    if random_state_names:
+        estimator.set_params(**{name: seed for name in random_state_names})
+    return estimator
+
+
+def _random_state_parameter_names(estimator: Any) -> list[str]:
+    if not hasattr(estimator, "get_params"):
+        return []
+    params = estimator.get_params(deep=True)
+    return sorted(
+        name for name in params if name == "random_state" or name.endswith("__random_state")
+    )
+
+
+def _score_predictions(
+    y_true: np.ndarray,
+    predictions: np.ndarray,
+    task: str,
+    scoring: Optional[Union[str, Callable[[np.ndarray, np.ndarray], float]]],
+    scoring_greater_is_better: Optional[bool],
+) -> tuple[float, str, bool]:
+    if callable(scoring):
+        if not isinstance(scoring_greater_is_better, bool):
+            raise ValueError(
+                "scoring_greater_is_better must be explicitly True or False for callable scoring"
+            )
+        value = scoring(y_true, predictions)
+        name = getattr(scoring, "__name__", "callable")
+        greater_is_better = scoring_greater_is_better
+    else:
+        if scoring_greater_is_better not in {None, True}:
+            raise ValueError("built-in accuracy and r2 scorers are greater-is-better")
+        name = scoring or ("accuracy" if task == "classification" else "r2")
+        if name == "accuracy":
+            if task != "classification":
+                raise ValueError("accuracy scoring is only valid for classification")
+            value = accuracy_score(y_true, predictions)
+        elif name == "r2":
+            if task != "regression":
+                raise ValueError("r2 scoring is only valid for regression")
+            value = r2_score(y_true, predictions)
+        else:
+            raise ValueError("scoring must be None, 'accuracy', 'r2', or a callable")
+        greater_is_better = True
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"scoring function {name!r} returned a non-finite value")
+    return value, str(name), greater_is_better
+
+
 def compute_roar(
-    model_class,
+    model_class: Any,
     X_train: np.ndarray,
     y_train: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
     explanations: List[Explanation],
-    top_k: int = 3,
-    baseline_value: Union[str, float, np.ndarray, Callable] = 0.0,
-    model_kwargs: Optional[Dict] = None
-) -> float:
-    """
-    Compute ROAR (Remove And Retrain) score.
-    
-    ROAR retrains the model after removing top-k important features
-    and measures the accuracy drop.
+    top_k: Union[int, float] = 0.1,
+    baseline_value: Baseline = "mean",
+    model_kwargs: Optional[Dict[str, Any]] = None,
+    *,
+    test_explanations: Optional[List[Explanation]] = None,
+    n_repeats: int = 5,
+    random_state: Optional[int] = 0,
+    task: Optional[str] = None,
+    scoring: Optional[Union[str, Callable[[np.ndarray, np.ndarray], float]]] = None,
+    scoring_greater_is_better: Optional[bool] = None,
+    ranking: str = "descending",
+    return_details: bool = False,
+) -> Union[float, Dict[str, Any]]:
+    """Compute one threshold of the per-sample ROAR retraining protocol.
 
-    Args:
-        model_class: Uninstantiated model class (e.g., LogisticRegression)
-        X_train: Training features
-        y_train: Training labels
-        X_test: Test features
-        y_test: Test labels
-        explanations: List of Explanation objects (one per training instance)
-        top_k: Number of top features to remove
-        baseline_value: Replacement value for removed features:
-            - float/int: constant value
-            - "mean": per-feature mean from X_train
-            - "median": per-feature median from X_train
-            - np.ndarray: per-feature values
-            - callable: function(X_train) -> per-feature values
-        model_kwargs: Optional kwargs for model_class
+    ``test_explanations`` is required because Hooker et al. compute an
+    importance estimate for every input in both splits.  The former global
+    vote over a partial training explanation set has been removed: it was a
+    global feature-ablation diagnostic, not ROAR.
 
-    Returns:
-        Accuracy drop (baseline_acc - retrained_acc)
+    The scalar return value is a positive-oriented paired performance drop.
+    For a lower-is-better callable loss, set
+    ``scoring_greater_is_better=False``; the subtraction is then reversed.
+    For the paper's full benchmark, use several removal fractions, at least
+    five independent retraining runs, and compare against a random-ranking
+    control.  ``return_details=True`` exposes whether those contracts were met.
     """
-    model_kwargs = model_kwargs or {}
+    X_train, y_train, X_test, y_test = _validate_roar_arrays(X_train, y_train, X_test, y_test)
+    if test_explanations is None:
+        raise ValueError(
+            "test_explanations is required for ROAR because test rows need their own rankings"
+        )
+    _validate_explanation_alignment(explanations, len(X_train), "training")
+    _validate_explanation_alignment(test_explanations, len(X_test), "test")
+
     n_features = X_train.shape[1]
+    top_k_count = _resolve_top_k(top_k, n_features)
+    ranking = _validate_ranking(ranking)
+    n_repeats = _validate_positive_steps(n_repeats, "n_repeats")
+    if random_state is not None:
+        if (
+            not isinstance(random_state, Integral)
+            or isinstance(random_state, bool)
+            or int(random_state) < 0
+        ):
+            raise ValueError("random_state must be a non-negative integer or None")
+        random_state = int(random_state)
 
-    # Train baseline model
-    baseline_model = model_class(**model_kwargs)
-    baseline_model.fit(X_train, y_train)
-    baseline_acc = accuracy_score(y_test, baseline_model.predict(X_test))
+    # Statistical/callable replacement values are derived from training data
+    # only.  This avoids test-statistic leakage into the modified datasets.
+    baseline = _baseline_values(baseline_value, n_features, X_train)
+    X_train_masked, train_mask = _mask_dataset(
+        X_train, explanations, top_k_count, baseline, ranking
+    )
+    X_test_masked, test_mask = _mask_dataset(
+        X_test, test_explanations, top_k_count, baseline, ranking
+    )
 
-    # Collect top-k feature indices via voting across explanations
-    feature_votes: Dict[int, int] = {}
-    
-    for exp in explanations:
-        attributions = exp.explanation_data.get("feature_attributions", {})
-        if not attributions:
-            continue
-        
-        # Get feature_names from explanation
-        feature_names = getattr(exp, 'feature_names', None)
-        
-        # Get top-k features by absolute importance
-        sorted_attrs = sorted(
-            attributions.items(),
-            key=lambda x: abs(x[1]),
-            reverse=True
-        )[:top_k]
-        
-        for i, (fname, _) in enumerate(sorted_attrs):
-            idx = _extract_feature_index(fname, feature_names, fallback_index=i)
-            if 0 <= idx < n_features:
-                feature_votes[idx] = feature_votes.get(idx, 0) + 1
+    model_kwargs = dict(model_kwargs or {})
+    probe_estimator = _new_estimator(model_class, model_kwargs)
+    resolved_task = _estimator_task(probe_estimator, task)
+    random_state_parameters = _random_state_parameter_names(probe_estimator)
+    nested_random_state_parameters = [name for name in random_state_parameters if "__" in name]
+    baseline_scores: list[float] = []
+    retrained_scores: list[float] = []
+    scoring_name: Optional[str] = None
+    scoring_direction: Optional[bool] = None
 
-    # Select most voted features
-    top_features = sorted(feature_votes.items(), key=lambda x: x[1], reverse=True)[:top_k]
-    top_indices = [idx for idx, _ in top_features]
-    
-    if not top_indices:
-        return 0.0
+    for repeat in range(n_repeats):
+        seed = None if random_state is None else random_state + repeat
+        clean_model = _set_random_state_if_supported(
+            _new_estimator(model_class, model_kwargs), seed
+        )
+        masked_model = _set_random_state_if_supported(
+            _new_estimator(model_class, model_kwargs), seed
+        )
 
-    # Compute baseline values
-    if isinstance(baseline_value, str):
-        if baseline_value == "mean":
-            feature_baseline = np.mean(X_train, axis=0)
-        elif baseline_value == "median":
-            feature_baseline = np.median(X_train, axis=0)
-        else:
-            raise ValueError(f"Unsupported baseline: {baseline_value}")
-    elif callable(baseline_value):
-        feature_baseline = baseline_value(X_train)
-    elif isinstance(baseline_value, np.ndarray):
-        feature_baseline = baseline_value
-    else:
-        feature_baseline = np.full(n_features, float(baseline_value))
+        try:
+            clean_model.fit(X_train, y_train)
+            clean_predictions = clean_model.predict(X_test)
+        except Exception as exc:
+            raise RuntimeError(f"clean ROAR fit/evaluation failed on repeat {repeat}") from exc
+        try:
+            masked_model.fit(X_train_masked, y_train)
+            masked_predictions = masked_model.predict(X_test_masked)
+        except Exception as exc:
+            raise RuntimeError(f"masked ROAR fit/evaluation failed on repeat {repeat}") from exc
 
-    # Remove features
-    X_train_mod = X_train.copy()
-    X_test_mod = X_test.copy()
-    
-    for idx in top_indices:
-        X_train_mod[:, idx] = feature_baseline[idx]
-        X_test_mod[:, idx] = feature_baseline[idx]
+        clean_score, current_name, current_direction = _score_predictions(
+            y_test, clean_predictions, resolved_task, scoring, scoring_greater_is_better
+        )
+        masked_score, masked_name, masked_direction = _score_predictions(
+            y_test, masked_predictions, resolved_task, scoring, scoring_greater_is_better
+        )
+        if current_name != masked_name or current_direction != masked_direction:
+            raise RuntimeError("clean and masked models used different scoring contracts")
+        scoring_name = current_name
+        scoring_direction = current_direction
+        baseline_scores.append(clean_score)
+        retrained_scores.append(masked_score)
 
-    # Retrain and evaluate
-    retrained_model = model_class(**model_kwargs)
-    retrained_model.fit(X_train_mod, y_train)
-    retrained_acc = accuracy_score(y_test, retrained_model.predict(X_test_mod))
+    baseline_mean = float(np.mean(baseline_scores))
+    retrained_mean = float(np.mean(retrained_scores))
+    if scoring_direction is None:  # Defensive: n_repeats is validated positive.
+        raise RuntimeError("ROAR scoring direction was not resolved")
+    score_drop = (
+        baseline_mean - retrained_mean if scoring_direction else retrained_mean - baseline_mean
+    )
+    if not return_details:
+        return float(score_drop)
 
-    return float(baseline_acc - retrained_acc)
+    return {
+        "score_drop": float(score_drop),
+        "baseline_score": baseline_mean,
+        "retrained_score": retrained_mean,
+        "baseline_scores": baseline_scores,
+        "retrained_scores": retrained_scores,
+        "baseline_score_std": float(np.std(baseline_scores)),
+        "retrained_score_std": float(np.std(retrained_scores)),
+        "scoring": scoring_name,
+        "scoring_greater_is_better": scoring_direction,
+        "score_drop_semantics": "positive_means_masking_hurt_performance",
+        "task": resolved_task,
+        "protocol": "per_sample_remove_and_retrain",
+        "ranking": ranking,
+        "ranking_transformation_applied": ranking == "absolute",
+        "top_k": top_k_count,
+        "fraction_removed": top_k_count / n_features,
+        "baseline_values": baseline.tolist(),
+        "train_rows": len(X_train),
+        "test_rows": len(X_test),
+        "n_repeats": n_repeats,
+        "random_state": random_state,
+        "per_row_train_masks": bool(np.all(train_mask.sum(axis=1) == top_k_count)),
+        "per_row_test_masks": bool(np.all(test_mask.sum(axis=1) == top_k_count)),
+        "canonical_core_contract": resolved_task == "classification" and scoring_name == "accuracy",
+        "repeat_seeds": (
+            None if random_state is None else [random_state + repeat for repeat in range(n_repeats)]
+        ),
+        "random_state_parameters": random_state_parameters,
+        "random_state_parameters_controlled": (
+            random_state is not None and bool(random_state_parameters)
+        ),
+        "nested_random_state_parameters": nested_random_state_parameters,
+        "nested_random_state_parameters_controlled": (
+            random_state is not None and bool(nested_random_state_parameters)
+        ),
+        "paired_clean_masked_initialisation": (
+            random_state is not None and bool(random_state_parameters)
+        ),
+        "independent_repeat_initialisations_controlled": (
+            random_state is not None and bool(random_state_parameters) and n_repeats > 1
+        ),
+        "paper_repetition_count_met": n_repeats >= 5,
+        "paper_repetition_contract_met": (
+            n_repeats >= 5 and random_state is not None and bool(random_state_parameters)
+        ),
+        "random_ranking_control_included": False,
+        "requires_control_comparison_for_method_quality_claim": True,
+    }
 
 
 def compute_roar_curve(
-    model_class,
+    model_class: Any,
     X_train: np.ndarray,
     y_train: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
     explanations: List[Explanation],
     max_k: int = 5,
-    baseline_value: Union[str, float, np.ndarray, Callable] = "mean",
-    model_kwargs: Optional[Dict] = None
+    baseline_value: Baseline = "mean",
+    model_kwargs: Optional[Dict[str, Any]] = None,
+    *,
+    test_explanations: Optional[List[Explanation]] = None,
+    n_repeats: int = 5,
+    random_state: Optional[int] = 0,
+    task: Optional[str] = None,
+    scoring: Optional[Union[str, Callable[[np.ndarray, np.ndarray], float]]] = None,
+    scoring_greater_is_better: Optional[bool] = None,
+    ranking: str = "descending",
 ) -> Dict[int, float]:
-    """
-    Compute ROAR scores for k=1 to max_k.
+    """Compute verified ROAR score drops for feature counts 1 through ``max_k``."""
+    X_train_array = np.asarray(X_train)
+    if X_train_array.ndim != 2:
+        raise ValueError("X_train must be two-dimensional")
+    max_k = _validate_positive_steps(max_k, "max_k")
+    if max_k > X_train_array.shape[1]:
+        raise ValueError("max_k cannot exceed the feature count")
 
-    Returns:
-        Dict mapping k to accuracy drop
-    """
-    model_kwargs = model_kwargs or {}
-    curve = {}
-
-    for k in range(1, max_k + 1):
-        acc_drop = compute_roar(
-            model_class=model_class,
-            X_train=X_train.copy(),
-            y_train=y_train.copy(),
-            X_test=X_test.copy(),
-            y_test=y_test.copy(),
-            explanations=explanations,
-            top_k=k,
-            baseline_value=baseline_value,
-            model_kwargs=model_kwargs
+    return {
+        k: float(
+            cast(
+                float,
+                compute_roar(
+                    model_class=model_class,
+                    X_train=X_train,
+                    y_train=y_train,
+                    X_test=X_test,
+                    y_test=y_test,
+                    explanations=explanations,
+                    top_k=k,
+                    baseline_value=baseline_value,
+                    model_kwargs=model_kwargs,
+                    test_explanations=test_explanations,
+                    n_repeats=n_repeats,
+                    random_state=random_state,
+                    task=task,
+                    scoring=scoring,
+                    scoring_greater_is_better=scoring_greater_is_better,
+                    ranking=ranking,
+                ),
+            )
         )
-        curve[k] = acc_drop
-
-    return curve
+        for k in range(1, max_k + 1)
+    }
