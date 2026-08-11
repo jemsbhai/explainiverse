@@ -6,11 +6,74 @@ software; their mitigation is disclosure, sensitivity analysis, and refusal to m
 claim.
 
 The B01-B11 audit began from clean commit
-`dd76815c79076c43d88568ae10f43be7bb546d9c` and was refreshed through the authorized rehearsal
-of predecessor head `9408f5c63c8accab2611658422b768990ead42d5` on 2026-08-11. It is tracked in
+`dd76815c79076c43d88568ae10f43be7bb546d9c`, was refreshed through predecessor head
+`9408f5c63c8accab2611658422b768990ead42d5`, and now includes the authorized 2026-08-11 PR merges,
+live B02 control mutations, hosted `push` evidence, and B04 provisioning attempt. It is tracked in
 [`RELEASE_BLOCKER_CLOSURE_MATRIX.md`](RELEASE_BLOCKER_CLOSURE_MATRIX.md). That ledger supersedes
 older observation timestamps and counts below when deciding whether a stable release is
 supportable; the answer remains **no** until its applicable executable stable-gate rows are green.
+
+## Current continuation snapshot
+
+- PR #2 merge `e0e42cfbf99fdb80bcb0d4f9a4e281b736ee7506` has parents
+  `49e962c090e90e62f315837067e5adc3e3f04d1c` and
+  `9408f5c63c8accab2611658422b768990ead42d5`. Reconciliation commit
+  `64e9255409b450e407aa9f77a75092cadbe1d9e9` has parents
+  `8d96a5b8fab6beac3eaf70876dc16f9aebddb3a3` and `e0e42cfbf99fdb80bcb0d4f9a4e281b736ee7506`.
+  PR #3 merge/current `main` `a9789d009f6ec5134bc53b9d2f6a8b59726e75c7` has parents
+  `e0e42cfbf99fdb80bcb0d4f9a4e281b736ee7506` and
+  `64e9255409b450e407aa9f77a75092cadbe1d9e9`; both latter commits share tree
+  `707a10435c7f257663b50729009c9639d4a082e0`.
+- Strict `main` protection now contains all 23 exact required contexts, each bound to GitHub
+  Actions app ID `15368`, and immutable Releases is enabled. Capture
+  `4833e9f245c4d30f3753fd9976e8b540057e8ffbb187cbdccae9b9b7611b34e5` at
+  `2026-08-11T18:39:00.267775+00:00`, against policy
+  `e6d8e4de111f5efdcecfef726e9c4f4a526eebd0d16520c426d9405aca03a443`, is rejected with exactly
+  two violations: the genuine CUDA minimum/latest contexts failed. The other 21 exact-`main`
+  contexts succeeded.
+- Exact-`main` `push` runs Python `31520989339`, dependency `31520989552`, JavaScript
+  `31520989433`, and artifact reproducibility `31520989403` succeeded. Playwright artifact
+  `9113076913` has digest
+  `sha256:0aa14ffc98ad0a3cff6c3bd261d6f822b757c3a2cb4712797230564e4290ae9f`.
+  Artifact comparator `93877997328` retained report artifact `9113035037`, digest
+  `sha256:f0cf538830cde7bab7504ca7bec0c1eff218fdb806b98cbe142826d65913c0f2`; wheel SHA-256 is
+  `972080a133134f4497c83b9069fde95379b171aefa9c756036ef505d30474011` and sdist SHA-256 is
+  `aa234f7b20d53a4ace957df08f164c34b3729af4f3a6840768c58dce1a2f1105`.
+- Security commit `9ad738a2dc62777ae199b03a3348b24b45006da2` remains in unmerged PR #4 (parent
+  `a9789d009f6ec5134bc53b9d2f6a8b59726e75c7`). It prevents `pull_request`/`push` code from routing
+  onto self-hosted GPU runners. Its 21 non-CUDA contexts are green; the two CUDA contexts fail
+  closed by design until an approved owner `workflow_dispatch` runs on genuine hardware. Artifact
+  run `31522899822` encountered hosted-image drift on attempt 1, then the whole run succeeded on
+  attempt 2; comparator job `93884787455`. PR #4 must not be admin-bypassed or merged by weakening
+  either required CUDA gate.
+- Dedicated billed GCP project `explainiverse-release-ci-26` (number `305968033598`) has zero VMs,
+  no registered GitHub runner, and no runner variables. Its default network was removed; custom
+  VPC `explainiverse-runner` uses subnet `runner-us-central1` (`10.61.0.0/28`, private Google
+  access), Cloud Router/NAT, and only IAP-source TCP/22 ingress. Its default Compute Engine service
+  account is disabled. These isolation preparations are not GPU evidence.
+- Every requested quota change was denied. Dedicated-project traces are: global GPU 3/0
+  `f489e693-6d95-456d-b4e5-ca81645734df`; standard T4 3/1
+  `56f86983-a7b9-4025-8c8d-8939dc20505c`; minimum global retry 2/0
+  `0209f3c3-4940-4adf-bc5f-b9e867766a5e`; minimum standard T4 retry 2/1
+  `e7dfb49c-7be9-4654-a16b-a022bf5ce68b`; preemptible T4 2/1
+  `781fe031-a0c1-4b6d-8c87-ec45915a59a7`; preemptible L4 2/1
+  `1e125e5c-0f3a-467d-8bce-b9b457644a10`. Owner-only fallback
+  `deepstation-freshfridge` (`605561044196`) was audited but not provisioned because it has
+  unrelated enabled services: global 2/0 `35d45aee-27a4-4097-8a8f-5e925cae725a`; standard T4 2/1
+  `5474ff04-daac-430a-9eed-b74c715e2903`; preemptible T4 2/1
+  `4d81c462-10ea-427e-b45f-718e10dd6d6f`; preemptible L4 2/1
+  `bf7d71d5-c999-4c5d-8963-5720c205caa8`. All reported state detail `Quota request denied`.
+- PyPI 0.15.0 and tag `v0.15.0` remain absent. The exact Trusted Publisher still lacks an
+  authenticated owner capture. Local-only SSH tag signing was proved with Ed25519 fingerprint
+  `SHA256:84G7/ewIxErnHPmIrtaW52+1qy+2MlQqzbmCOW6tGc0`, but GitHub registration remains blocked at
+  live sudo/2FA and no GitHub-verified signature is claimed. No tag, publication, GitHub Release,
+  actual governance record, or recovery drill exists. Strict typing and physical NVDA/VoiceOver
+  evidence remain explicitly unclaimed; `scikit-image<1.0` and B11's private/CommonJS/unpublished
+  quarantine remain unchanged.
+
+The dependency cascade is B04 capacity → genuine PR #4 CUDA dispatch → PR #4 merge → final-main
+reruns → zero-violation B02 capture → authenticated B01 setup/publication → B08 release record and
+B03 downstream-only recovery. Green non-CUDA runs do not bypass that order.
 
 ## Priority and release policy
 
@@ -36,7 +99,8 @@ demo may remain explicitly AT-uncertified.
 
 This matrix gives every row below a stable identifier so that release review cannot silently
 omit one. It records the repository and live-service audit performed on 2026-08-11 from task
-base `dd76815c79076c43d88568ae10f43be7bb546d9c`, including the later draft-PR rehearsals.
+base `dd76815c79076c43d88568ae10f43be7bb546d9c`, including the later PR rehearsals and live
+continuation.
 `RETIRED` means the repository-side falsifiable gate is green; it does not stand
 in for a required hosted-platform run. `ACCEPTED — permanent` means the mitigation gate is green
 but the underlying scientific boundary cannot honestly be eliminated. `BLOCKED` names evidence
@@ -45,23 +109,23 @@ detailed row remains the source of the acceptance criterion.
 
 | ID | Priority | Tracked limitation | Status / evidence |
 |---|---|---|---|
-| ENG-P0-01 | P0 | PyPI Trusted Publisher registration | **BLOCKED — external.** The workflow is OIDC-only, token-free, version-absence guarded, and policy-bound. PyPI has no public settings read API; no authenticated owner capture or successful authorized OIDC publication exists. See blocker B01. |
-| ENG-P0-02 | P0 | Live GitHub branch/tag/environment controls | **BLOCKED — live controls.** Authenticated snapshot `e2f704a4…c9121fc1e` has `repository_controls_accepted=false`: live protection has 10 contexts versus the policy's 23, 16 provider-bound exact-candidate checks are absent, and repository-level immutable Releases are disabled. Draft PR #2 registered all 23 names under the expected Actions app. Its 21 non-CUDA successes are not the required `push`/`main` evidence; its two CUDA failures require successful `workflow_dispatch`/`main` hardware evidence. See B02 and the fresh closure matrix. |
+| ENG-P0-01 | P0 | PyPI Trusted Publisher registration | **BLOCKED — authenticated external setup.** The workflow is OIDC-only, token-free, version-absence guarded, and policy-bound, but PyPI has no public settings read API and no authenticated owner capture exists. PyPI 0.15.0/tag `v0.15.0` remain absent. Local SSH signing preflight succeeded, but GitHub key registration still requires live sudo/2FA; no GitHub-verified tag or OIDC publication exists. See B01. |
+| ENG-P0-02 | P0 | Live GitHub branch/tag/environment controls | **BLOCKED — settings configured; CUDA acceptance missing.** Live strict protection now has all 23 exact contexts provider-bound to Actions app ID `15368`, and immutable Releases is enabled. Capture `4833e9f2…1b34e5` against current `main` `a9789d0…` has 21 successes and exactly two violations: CUDA minimum/latest failed. `repository_controls_accepted=false` remains correct until genuine hardware evidence succeeds on the final candidate. See B02. |
 | ENG-P0-03 | P0 | Non-atomic PyPI/GitHub release recovery | **BLOCKED — authorized drill.** Downstream-only recovery, all-attempt exactly-once inspection, immutable-tag execution binding, cross-service hash equality, retained evidence, and no-republish guards are implemented and tested. No real staged post-PyPI failure/recovery exists; legacy `0.14.0` lacks the required attested source run. See B03. |
-| ENG-P0-04 | P0 | Real CUDA and multi-GPU coverage | **BLOCKED — hosted hardware.** The min/latest one- and two-GPU workflow, exact topology-specific custom runner labels, exact 15-node manifest, exact-commit attestation, exact visible-device topology, and zero-skip hook exist. Live Actions variables and registered runners are both zero. PR run `31513520981` failed at routing before checkout/install/hardware/tests, proving the guard without producing or representing GPU evidence. See B04. |
-| ENG-P0-05 | P0 | Dependency resolver/version matrix | **BLOCKED — accepted push/live-main evidence; hosted PR rehearsal green.** PR run `31513520975` passed all six direct-floor/latest, Captum, and SHAP/XGBoost jobs; Python run `31513521028` passed full-quality, minimum-direct, and every supported-platform job. These runs were associated with head `9408f5c…` and executed merge checkout `0d5ca699…`. The workflows are not landed or required on `origin/main`, so policy-bound `push` evidence remains required. See B05. |
-| ENG-P0-06 | P0 | Quantus versus pandas-floor separation | **BLOCKED — accepted push/live-main evidence; hosted PR rehearsal green.** The exact marker manifest, minimum-lane exclusion audit, explicit Quantus import, and zero-skip reference job are implemented. PR run `31513521028` imported Quantus 0.6.0 and passed exactly 9/9 comparisons; the required landed `push` context remains absent. See B05. |
+| ENG-P0-04 | P0 | Real CUDA and multi-GPU coverage | **BLOCKED — external quota/hardware.** Dedicated billed/isolation-prepared GCP project `explainiverse-release-ci-26` has zero VMs/runners and its default service account is disabled. Global GPU, standard T4, and preemptible T4/L4 increases, including the same minimum requests in an audited unused fallback, were denied; neither audited project can supply the required two-GPU lane. PR #4 correctly prevents PR/push self-hosted routing. No hardware test or approval is represented. See B04 and the current snapshot. |
+| ENG-P0-05 | P0 | Dependency resolver/version matrix | **BLOCKED — final-candidate rerun; current-main push green.** Python `31520989339` and dependency `31520989552` succeeded on exact `main` `a9789d0…` across every selected platform and dependency edge. PR #4 security commit `9ad738a…` also has those contexts green, but cannot merge until B04 supplies genuine CUDA evidence; the eventual final-main SHA must be rerun. See B05. |
+| ENG-P0-06 | P0 | Quantus versus pandas-floor separation | **BLOCKED — final-candidate rerun; current-main push green.** The exact marker manifest, minimum-lane exclusion audit, explicit Quantus import, and zero-skip reference job are implemented. Python `push` run `31520989339` passed Quantus 9/9 on `a9789d0…`; the security commit awaiting B04 means this is not yet final-candidate evidence. See B05. |
 | ENG-P1-01 | P1 | Model-state ownership and extra RNG/state | **RETIRED — declared repository contract; residual boundary permanent.** Adversarial gates cover registered-state traversal, default/injected RNG, callbacks, protocol/fingerprint state, success/error restoration, and serialized adapter operations. Python/NumPy RNG, processes, distributed workers, external mutation, and nondeterministic kernels remain explicitly outside the claim. |
 | ENG-P1-02 | P1 | Shared explainer-instance mutation | **RETIRED — repository gate.** All built-in public explainer operations use per-instance re-entrant synchronization; barrier tests cover IG atomic shape commit, DeepSHAP background mutation, TCAV concept mutation, success, and failure. |
-| ENG-P1-03 | P1 | Hashed release tools and artifact reproducibility | **BLOCKED — accepted push-event/publish binding; hosted PR rehearsal green.** PR run `31513521096` attempt 2 built merge checkout `0d5ca6996e548e6ffb4d89e83aac7fc524ba5dbd` on two distinct clean Ubuntu jobs with matching image identity and byte-identical wheel/sdist; comparator report artifact `9110345374` with digest `sha256:ae02222d908d820ca12e5aac0c765fe51a0e267cca70fca4befae01e81ab183e` was retained. The reviewed policy requires a landed `push` run, and a future clean-checkout publish distribution must still match that exact accepted run before upload. See B06 and the gate ledger. |
+| ENG-P1-03 | P1 | Hashed release tools and artifact reproducibility | **BLOCKED — final-candidate/publish binding; current-main push green.** Exact-main `push` run `31520989403` retained report `9113035037` (`sha256:f0cf538830cde7bab7504ca7bec0c1eff218fdb806b98cbe142826d65913c0f2`) and byte-identical wheel/sdist SHA-256 values `972080a1…4011`/`aa234f7b…1105`. PR #4 attempt 2 also passed after attempt 1 exposed hosted-image drift. The final-main rerun and clean-tag publish-byte binding remain required. See B06 and the gate ledger. |
 | ENG-P1-04 | P1 | bfloat16 tensor result path | **RETIRED — repository gate.** Owned tensor and DLPack endpoints preserve bfloat16 dtype/values and lifetime; NumPy widening remains explicit and unchanged. |
 | ENG-P1-05 | P1 | Failed custom `nn.Module.to()` rollback | **RETIRED — fail-closed repository gate.** Meta moves/models reject before mutation. Standard inherited rollback is tested; failed custom `to`, `_apply`, traversal, or registered-state semantics poison/fail before every later public adapter operation even when rollback returns. No universal atomicity claim remains. |
 | ENG-P1-06 | P1 | Explicit image layout/channel axis | **RETIRED — repository gate.** `hw/chw/hwc/nchw/nhwc`, NHW batching, custom channels, metadata, and pre-model rank errors are covered without size heuristics. |
 | ENG-P1-07 | P1 | Reused target-layer occurrence selection | **RETIRED — repository gate.** Immutable per-call traces, first/middle/last analytical oracles, dynamic/out-of-range rejection, cleanup, TCAV occurrence identity, and shared-adapter CAM races are covered. Legacy `last_layer_*` fields are compatibility state, not result evidence. |
-| ENG-P1-08 | P1 | Captum operator/graph/version support | **RETIRED — declared surface; accepted push binding blocked.** The support matrix, canonical per-call graph-integrity checks, direct unsupported/dynamic-graph rejection, DeepLIFT reused-nonlinear rejection, LRP shared-module rejection, private-rule dependency, and five-file parity suite are explicit. PR run `31513520975` explicitly imported Captum 0.8.0 and 0.9.0 and passed each exact 306-test surface with zero skips; the required landed `push` contexts remain open. See B07. |
-| ENG-P1-09 | P1 | Versioned Python/JavaScript wire schema | **RETIRED — repository gate; accepted push contexts pending.** The separate v1 finite-JSON API, shared accept/reject fixtures, true Python→Node→Python bridge, target/safe-number parity, and 88-test JS suite are green. PR run `31513521103` passed exact Node 20.11.0 and Node 22, React 18, and browser jobs; the reviewed `push` event/live-main binding is not yet satisfied. |
+| ENG-P1-08 | P1 | Captum operator/graph/version support | **RETIRED — declared surface; final-candidate binding blocked.** The support matrix, graph-integrity checks, rejection boundaries, private-rule dependency, and five-file parity suite are explicit. Dependency `push` run `31520989552` passed Captum minimum/current on `a9789d0…`; predecessor exact surfaces were 306/306 with zero skips. PR #4 is green here, but its unmerged security commit requires a later final-main rerun. See B07. |
+| ENG-P1-09 | P1 | Versioned Python/JavaScript wire schema | **RETIRED — repository gate; final-candidate binding pending.** The v1 finite-JSON API, fixtures, Python→Node→Python bridge, target/safe-number parity, and JS suite are green. JS `push` run `31520989433` passed Node 20/22, React 18, and browser jobs on `a9789d0…`; Playwright artifact `9113076913` has digest `sha256:0aa14ffc98ad0a3cff6c3bd261d6f822b757c3a2cb4712797230564e4290ae9f`. PR #4 must merge and final `main` rerun. |
 | ENG-P1-10 | P1 | Single-operator release approval | **BLOCKED — external governance.** The live environment has only reviewer `jemsbhai` and permits self-review. The publish/recovery paths now generate and retain a validated single-operator governance disclosure with the attested preflight, but neither two-principal approval nor an actual future release record exists. See B08. |
-| ENG-P1-11 | P1 | macOS ARM, typing, browser, and accessibility certification | **MIXED — hosted PR rehearsal green; accepted push/claim evidence open.** PR Python run `31513521028` passed macOS 15 ARM64/OpenMP, 3,630 tests with four owned skips, and `pip check`; PR JS run `31513521103` passed React 18 and zero-retry Playwright 9/9 on three engines. Those are not the required landed `push` contexts. Typing remains **BLOCKED** at 1,375 strict-mypy errors in 44 files and 0% Pyright completeness; physical NVDA/VoiceOver evidence remains **BLOCKED — external/manual**. See B09. |
+| ENG-P1-11 | P1 | macOS ARM, typing, browser, and accessibility certification | **MIXED — selected current-main contexts green; final-candidate/claim evidence open.** Python `31520989339` and JS `31520989433` passed macOS ARM/OpenMP, Node/React, and zero-retry Playwright 9/9 on `a9789d0…`; PR #4 is green on those contexts but unmerged. Final-main reruns remain required. Strict typing remains unready and explicitly unclaimed; physical NVDA/VoiceOver evidence is absent and explicitly unclaimed. See B09. |
 | ENG-P1-12 | P1 | scikit-image next-major compatibility | **BLOCKED FOR WIDENING — upstream/hosted.** The `<1.0` cap remains. Discovery archives exact PyPI metadata and fails while no real non-yanked 1.x prerelease exists; only a separate, explicitly source-only candidate job can produce localisation/LIME/package/tutorial evidence without misrepresenting the capped wheel or a dependency-only graph as 1.x distribution support. See B10. |
 | NUM-PERM-01 | Permanent | Finite-real and representability boundary | **ACCEPTED — permanent.** Exact/high-precision near-max, subnormal, cancellation, safe-conversion, and true-out-of-range gates preserve every owned representable case and reject unrepresentable values; the finite-real boundary is not retired. |
 | NUM-P1-01 | P1 | Extreme-value CAM variant numerics | **RETIRED — numerical gate only.** LayerCAM, GradCAMElementWise, and EigenGradCAM ordinary/extreme paths match independent high-precision amplitude/projection oracles and reject true overflow without NaN/infinity. CAP-P2-03 remains quarantined. |
@@ -88,11 +152,28 @@ detailed row remains the source of the acceptance criterion.
 | CAP-P2-09 | P2 | Experimental JavaScript package | **BLOCKED — publication.** Wire/Node/React/CJS/demo/browser/bundle/private-scope security gates are implemented, but library ESM/browser support, manual AT evidence, npm publication threat/provenance/recovery, and algorithm parity are absent. `private=true`, CommonJS, experimental, and non-parity metadata remain. See B11. |
 | CAP-P2-10 | P2 | Tutorial curriculum | **RETIRED — prior three-notebook limitation; ongoing P2 boundary accepted.** Four notebooks now have deterministic offline execution and source/runner/lock provenance; tutorial 04 covers finite-estimator uncertainty and intervention sensitivity. Planned topics remain non-capabilities. |
 
-### Final local and draft-PR gate ledger
+### Final local, PR, and live-main gate ledger
 
-The final repository snapshot (after every audit correction) produced the following evidence.
-Expected skips are owned by the repository's allowlist. The dedicated CUDA workflow is guarded
-by an exact node manifest and zero-skip policy, but no hardware result is represented here.
+The predecessor repository snapshot and PR rehearsals below remain historical evidence. Current
+`main` `a9789d009f6ec5134bc53b9d2f6a8b59726e75c7` additionally produced the following `push`
+evidence. Expected skips are owned by the repository's allowlist. The dedicated CUDA workflow is
+guarded by an exact node manifest and zero-skip policy, but no hardware result is represented.
+
+- Python run `31520989339`, dependency run `31520989552`, JavaScript run `31520989433`, and
+  artifact run `31520989403` all completed successfully on exact `main`. Together they supplied
+  21/23 provider-bound required successes, including supported Python platforms, dependency
+  edges, Quantus 9/9, Captum minimum/current, Node 20/22, React 18, and Playwright 9/9.
+- JavaScript run `31520989433` retained Playwright artifact `9113076913`, digest
+  `sha256:0aa14ffc98ad0a3cff6c3bd261d6f822b757c3a2cb4712797230564e4290ae9f`.
+  Artifact run `31520989403` comparator job `93877997328` retained report `9113035037`, digest
+  `sha256:f0cf538830cde7bab7504ca7bec0c1eff218fdb806b98cbe142826d65913c0f2`.
+  Its 377,159-byte wheel SHA-256 is
+  `972080a133134f4497c83b9069fde95379b171aefa9c756036ef505d30474011`; its 335,212-byte sdist
+  SHA-256 is `aa234f7b20d53a4ace957df08f164c34b3729af4f3a6840768c58dce1a2f1105`.
+- CUDA run `31520989476` failed closed and produced no GPU evidence. PR #4 security commit `9ad738a…` later
+  settled with the same 21 non-CUDA required contexts green; only CUDA minimum/latest failed.
+  Its artifact run `31522899822` succeeded on whole-run attempt 2 after attempt 1 detected hosted
+  image drift; comparator job `93884787455`.
 
 - Python 3.12.2/Torch 2.10/Captum 0.9: 3,630 passed, four owned CPU CUDA skips, and
   82.16% branch coverage against the 81% threshold. The configured `mypy src scripts` gate,
@@ -115,40 +196,49 @@ by an exact node manifest and zero-skip policy, but no hardware result is repres
   workflow/policy file. Focused release/security/adversarial suites passed. Structural CUDA
   tests proved manifest, topology, class-agnostic EigenCAM, and
   fail-closed collection contracts without claiming hardware acceptance.
-- Draft-PR artifact run `31513521096` attempt 2 used two distinct clean Ubuntu jobs with matching image
+- Predecessor draft-PR artifact run `31513521096` attempt 2 used two distinct clean Ubuntu jobs with matching image
   identity to build merge checkout `0d5ca6996e548e6ffb4d89e83aac7fc524ba5dbd`, producing
   byte-identical distributions. The wheel is 377,159 bytes, SHA-256
   `56bd9d021b19ddc0ec4a49cdea67c142ace4b2faaa9df7213d9e94009a7b8746`; the sdist is
   335,201 bytes, SHA-256
   `5e51f2f1bf59bfea28a3f3b84a910709e673dcef34e66a42bb8fffdc1ca850a3`.
-  The required landed `push` event and later publish-byte binding remain B06.
+  Current-main run `31520989403` now supplies landed `push` evidence for `a9789d0…`; a rerun on
+  the eventual final candidate and the later publish-byte binding remain B06.
 
 ### Live evidence and blocker ledger
 
-The latest authenticated read-only capture was made as repository administrator `jemsbhai` at
-`2026-08-11T17:16:13.612560+00:00` against `origin/main`
-`49e962c090e90e62f315837067e5adc3e3f04d1c`. Its JSON SHA-256 is
-`e2f704a4996056de8dda2c7977f55c4dd55135c7054b6ecbf0ac721c9121fc1e`; its reviewed-policy
+The latest authenticated capture was made as repository administrator `jemsbhai` at
+`2026-08-11T18:39:00.267775+00:00` against `origin/main`
+`a9789d009f6ec5134bc53b9d2f6a8b59726e75c7`. Its JSON SHA-256 is
+`4833e9f245c4d30f3753fd9976e8b540057e8ffbb187cbdccae9b9b7611b34e5`; its reviewed-policy
 SHA-256 is `e6d8e4de111f5efdcecfef726e9c4f4a526eebd0d16520c426d9405aca03a443`.
-It reports 19 violations: live protection has 10 contexts versus the reviewed policy's 23,
-16 required provider-bound exact-commit check runs are missing, and repository-level immutable
-Releases are disabled. All 10 live branch contexts are bound to GitHub Actions app ID 15368.
-Repository and `pypi`-environment secret-name inventories are empty. The branch/tag/environment
-controls not implicated by those violations match the policy.
+Strict protection has all 23 contexts bound to GitHub Actions app ID `15368`, and immutable
+Releases is enabled. The capture reports exactly two violations because CUDA minimum/latest were
+completed failures rather than successes; `repository_controls_accepted=false` remains correct.
 
-Separate authenticated read-only API observations at `2026-08-11T17:17:51.9860715Z` report
-Actions variables `total_count: 0`, registered runners `total_count: 0`, and six active
-repository-level workflow registrations. Only the original three workflow files are present in
-the `main` tree; PR execution registered the three additional files.
+For history, the predecessor capture at `2026-08-11T17:16:13.612560+00:00` against
+`49e962c090e90e62f315837067e5adc3e3f04d1c` had JSON SHA-256
+`e2f704a4996056de8dda2c7977f55c4dd55135c7054b6ecbf0ac721c9121fc1e` and reported 19
+violations: 10/23 contexts, 16 missing provider-bound exact-commit checks, and immutable Releases
+disabled. The B02 mutations reduced that exact gap to the two genuine CUDA results without
+weakening the policy. Repository and `pypi`-environment secret-name inventories remain empty.
 
-Explicitly authorized branch pushes and draft-PR creation/updates produced these rehearsals. The
-runs were associated with head `9408f5c63c8accab2611658422b768990ead42d5` and executed merge checkout
-`0d5ca6996e548e6ffb4d89e83aac7fc524ba5dbd`. All 21 non-CUDA policy names completed
-successfully, but their reviewed acceptance event is `push` on `main`. CUDA run `31513520981`
-terminated both required CUDA contexts in failure before checkout because the runner variables
-are absent; their reviewed acceptance requires `workflow_dispatch` on `main` and approved
-hardware. No merge, external settings mutation, tag, publication, release, recovery drill, or
-manual/GPU evidence action was performed.
+Historical authenticated read-only API observations at `2026-08-11T17:17:51.9860715Z` reported
+Actions variables `total_count: 0`, registered runners `total_count: 0`, and six repository-level
+workflow registrations while only the original three workflow files were present on `main`.
+After the reviewed PR chain landed, ten workflows are active and the release workflows are in the
+`main` tree; variables and runners remain zero, and external-contributor workflow approval is now
+`all_external_contributors`.
+
+The reviewed PR chain is now landed with the ancestry recorded in the current snapshot. PR #4
+contains security commit `9ad738a2dc62777ae199b03a3348b24b45006da2` and remains open because its public-repository security
+boundary deliberately prevents PR/push execution on self-hosted GPU runners and genuine owner
+dispatch capacity is unavailable. Live Actions variables and registered runners remain zero.
+Dedicated GCP project `explainiverse-release-ci-26`/`305968033598` is billed and
+isolation-prepared but has zero VMs; all quota requests listed in the current snapshot were
+denied. This B04 external failure blocks PR #4, final-main reruns, accepted B02 capture, and all
+publication-dependent steps. No tag, publication, release, recovery drill, or manual/GPU evidence
+exists.
 
 PyPI `0.14.0` is legacy incident evidence, not a recovery proof: its wheel SHA-256 is
 `b1b98dfdfc0acbc8dc2113d8db87d40ae9cec2f958ed25b00bc6e30d43db41d4`, its sdist SHA-256 is
@@ -158,15 +248,22 @@ PyPI `0.14.0` is legacy incident evidence, not a recovery proof: its wheel SHA-2
 Release endpoint returns 404. There is no retained build/attestation/OIDC source run from which
 the new recovery workflow could truthfully reconstruct provenance.
 
+Fresh absence checks at `2026-08-11T18:42:57.9011768Z` found PyPI 0.15.0 absent and the GitHub
+`refs/tags/v0.15.0` endpoint returned 404. The exact PyPI Trusted Publisher still lacks an
+authenticated owner capture. A local SSH annotated-tag preflight succeeded with Ed25519 public
+key fingerprint `SHA256:84G7/ewIxErnHPmIrtaW52+1qy+2MlQqzbmCOW6tGc0`; the test tag was deleted,
+and GitHub key registration remains blocked at live sudo/2FA, so no verified signature is claimed.
+No actual governance record or recovery evidence exists.
+
 | Blocker | Rows | Owner | Required authority/action | Reproducible acceptance procedure |
 |---|---|---|---|---|
-| B01 | ENG-P0-01 | PyPI project owner `jemsbhai` | Register and archive the exact owner/repository/workflow/environment Trusted Publisher; separately authorize the next release. | Capture the authenticated PyPI Publishing settings for `jemsbhai/explainiverse`, `publish-pypi.yml`, environment `pypi`; then require a token-free OIDC upload whose per-file Integrity records and cryptographic verification prove the exact DSSE subjects/digests and Trusted Publisher identity. Repository/environment secret inventories must remain empty. |
-| B02 | ENG-P0-02 | GitHub repository administrator | Land the workflows, enable immutable Releases, run the exact candidate, and replace live branch protection with all 23 names and GitHub Actions app binding in `.github/release-control-policy.json`. | Run the documented admin capture, dispatch `release-preflight.yml` on exact `origin/main`, bind within 30 minutes with actor and triggering actor both equal to the authenticated capture principal, and verify the retained run attempt/triggering actor against the Actions API immediately before tag creation. Acceptance is `repository_controls_accepted=true`, immutable Releases enabled, no violations, exact policy/snapshot digests, and every required provider-bound check successful on that SHA. |
+| B01 | ENG-P0-01 | PyPI project owner `jemsbhai` | Authentically register/archive the exact owner/repository/workflow/environment Trusted Publisher and GitHub-verifiable signing key; then use the already-authorized sole OIDC release only after upstream gates pass. | Capture the authenticated PyPI Publishing settings for `jemsbhai/explainiverse`, `publish-pypi.yml`, environment `pypi`; then require a token-free OIDC upload whose per-file Integrity records and cryptographic verification prove the exact DSSE subjects/digests and Trusted Publisher identity. Repository/environment secret inventories must remain empty. Local-only signing preflight is insufficient. |
+| B02 | ENG-P0-02 | GitHub repository administrator | Preserve immutable Releases and all 23 exact provider-bound contexts; obtain genuine CUDA success on final `main`, then repeat the capture. | Run the documented admin capture, dispatch `release-preflight.yml` on exact `origin/main`, bind within 30 minutes with actor and triggering actor both equal to the authenticated capture principal, and verify the retained run attempt/triggering actor against the Actions API immediately before tag creation. Acceptance is `repository_controls_accepted=true`, immutable Releases enabled, no violations, exact policy/snapshot digests, and every required provider-bound check successful on that SHA. Current capture has exactly two CUDA violations. |
 | B03 | ENG-P0-03 | Separately authorized release operator | Exercise a staged failure only on a future build-attest-OIDC source run; do not reuse `0.14.0`. | Dispatch with `stage_recovery_drill=true`, then run `recover-github-release.yml` from the immutable release tag and original run ID with `require_staged_drill=true`. Archive source-run/all-attempt job JSON, PyPI JSON, inventories, and hashes; require exact tag/SHA execution, the failed stage step, exactly one successful upload execution, and byte-identical original/PyPI/GitHub artifacts. |
-| B04 | ENG-P0-04 | Repository administrator and GPU-infrastructure owner | Register approved isolated Linux GPU capacity with custom labels `explainiverse-cuda-single` and `explainiverse-cuda-two`, and define `CUDA_SINGLE_RUNNER` and `CUDA_TWO_RUNNER` to those exact labels. | Dispatch `cuda-ci.yml` on the exact candidate and retain all four named min/latest one-/two-GPU jobs. Each must carry its topology label, match and execute the exact 15-node manifest with the exact declared visible-device count, zero skips, exact-commit identity, and exactly one successful attempt; bind that run into preflight and retain the infrastructure isolation approval. |
-| B05 | ENG-P0-05, ENG-P0-06 | CI/merge authority | Land and execute the Python/dependency workflows; make their exact contexts required. | Require exact-candidate green Python 3.10–3.13, direct-floor, SHAP/XGBoost edge, Captum 0.8/current, complete non-Quantus minimum partition, and explicit-import Quantus reference partition with zero skips. |
-| B06 | ENG-P1-03 | Release-CI owner | Run the byte-reproducibility workflow on two clean Linux/Python-3.12 hosted jobs and require its context. | Both jobs install the same hash-locked tool graph and record matching source, Python and pip versions, platform family/architecture, tool, lock, run, attempt, image, OS, and architecture fields with distinct matrix slots, job indexes, and build identities. Retain full `platform.platform()` strings and runner display names as diagnostic evidence but do not require them to be equal. The comparator must prove byte-identical wheel/sdist and retain both manifests; publication must obtain that exact accepted run and prove its clean-tag-checkout distribution byte-identical to both builds before attestation or upload. |
-| B07 | ENG-P1-08, CAP-P2-05, CAP-P2-08 | Captum/CI owner | Run the documented mandatory five-file suite after every graph-integrity change on exact Captum 0.8/current, locally and hosted. | Explicitly import Captum, execute the command in `docs/CAPTUM_SUPPORT_MATRIX.md`, and require zero skips plus analytical/parity/fail-closed graph gates before changing any supported surface. |
+| B04 | ENG-P0-04 | Repository administrator, GCP quota authority, and GPU-infrastructure owner | Obtain approved two-GPU Linux capacity after the archived quota denials; register exact labels `explainiverse-cuda-single`/`explainiverse-cuda-two` and variables, then owner-dispatch PR #4 and final `main`. | Dispatch `cuda-ci.yml` on each exact head and retain all four named min/latest one-/two-GPU jobs. Each must carry its topology label, match and execute the exact 15-node manifest with the exact declared visible-device count, zero skips, exact-commit identity, and exactly one successful attempt; bind the final-main run into preflight and retain infrastructure isolation approval. No present VM/runner result satisfies this. |
+| B05 | ENG-P0-05, ENG-P0-06 | CI/merge authority | After B04 permits PR #4 to merge, repeat the currently green Python/dependency `push` workflows on final `main`. | Require exact-final-candidate green Python 3.10–3.13, direct-floor, SHAP/XGBoost edge, Captum 0.8/current, complete non-Quantus minimum partition, and explicit-import Quantus reference partition with zero skips. |
+| B06 | ENG-P1-03 | Release-CI owner | Repeat byte reproducibility on final `main`, then bind clean-tag publish bytes to that exact accepted run. | Both jobs install the same hash-locked tool graph and record matching source, Python and pip versions, platform family/architecture, tool, lock, run, attempt, image, OS, and architecture fields with distinct matrix slots, job indexes, and build identities. The comparator must prove byte-identical wheel/sdist and retain both manifests; publication must prove its distribution byte-identical to both builds before upload. |
+| B07 | ENG-P1-08, CAP-P2-05, CAP-P2-08 | Captum/CI owner | Repeat the currently green exact Captum 0.8/current five-file surface on final `main` after PR #4 merges and after every graph-integrity change. | Explicitly import Captum, execute the command in `docs/CAPTUM_SUPPORT_MATRIX.md`, and require zero skips plus analytical/parity/fail-closed graph gates before changing any supported surface. |
 | B08 | ENG-P1-10 | Project governance/release manager | Add a second trusted principal or retain explicit single-operator disclosure. | Either record two distinct approver/executor identities, or publish a release record whose validated governance section states single-operator approval and binds the actor, reviewer/self-review setting, tag/commit, preflight run, and archived external-control policy/snapshot digests. |
 | B09 | ENG-P1-11 | Platform, typing, JS, and independent accessibility owners | Run the policy-required macOS ARM/Node/browser contexts. Complete typing before `py.typed`; collect physical AT evidence before an AT-support claim. | Stable-release contexts require exact-candidate macOS ARM and Node/React/browser success. The separate typed claim requires strict mypy zero, Pyright 100%, and strict clean installed-wheel consumers. The separate AT claim requires both policy profiles (Windows 11/Edge/NVDA and Apple-Silicon macOS/Safari/VoiceOver), every scenario passing, exact commit/deployment/build hash, HTTPS transcript/recording URIs with SHA-256, age at most 180 days, validator/workflow success, and human hash review. |
 | B10 | ENG-P1-12 | Dependency maintainer; upstream supplies the candidate | Keep `<1.0` until a non-yanked scikit-image 1.x prerelease exists. | Let the scheduled discovery job archive PyPI metadata/hash/serial and choose the candidate. Absence fails the monitor and leaves the source probe non-green. A real candidate must pass the dependencies-only graph check, localisation, LIME, capped-wheel boundary audit, and all four source-only tutorials with retained environment/test/artifact evidence. That probe explicitly records `full_distribution_graph_verified=false`; a separate reviewed bound-change wheel must then install with the candidate and pass full `pip check` before widening. |
