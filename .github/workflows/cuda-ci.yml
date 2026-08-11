@@ -27,6 +27,36 @@ jobs:
     timeout-minutes: 2
 
     steps:
+      - name: Reject untrusted CUDA runner execution contexts
+        run: |
+          python3 - <<'PY'
+          import os
+
+          repository = os.environ.get("GITHUB_REPOSITORY")
+          repository_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+          actor = os.environ.get("GITHUB_ACTOR")
+          triggering_actor = os.environ.get("GITHUB_TRIGGERING_ACTOR")
+          event_name = os.environ.get("GITHUB_EVENT_NAME")
+          ref = os.environ.get("GITHUB_REF")
+
+          trusted_repository = (
+              repository == "jemsbhai/explainiverse"
+              and repository_owner == "jemsbhai"
+          )
+          trusted_trigger = (
+              actor == repository_owner
+              and triggering_actor == repository_owner
+          )
+          approved_event = event_name == "workflow_dispatch" or (
+              event_name == "schedule" and ref == "refs/heads/main"
+          )
+          if not (trusted_repository and trusted_trigger and approved_event):
+              raise SystemExit(
+                  "custom CUDA runners require an owner-triggered dispatch "
+                  "or the owner-controlled main schedule"
+              )
+          PY
+
       - name: Require exact reviewed CUDA runner labels
         env:
           CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
@@ -36,11 +66,9 @@ jobs:
             echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
             exit 1
           fi
-          if [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ "$CUDA_TWO_RUNNER" != "explainiverse-cuda-two" ]]; then
-              echo "CUDA_TWO_RUNNER must be exactly explainiverse-cuda-two" >&2
-              exit 1
-            fi
+          if [[ "$CUDA_TWO_RUNNER" != "explainiverse-cuda-two" ]]; then
+            echo "CUDA_TWO_RUNNER must be exactly explainiverse-cuda-two" >&2
+            exit 1
           fi
 
   single-gpu:

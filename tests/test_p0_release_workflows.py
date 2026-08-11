@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -14,6 +18,36 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 def _read(name):
     return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def _cuda_routing_guard_script(workflow):
+    routing = workflow.split("  cuda-runner-routing:", 1)[1].split("\n  single-gpu:", 1)[0]
+    script = routing.split("          python3 - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+    return textwrap.dedent(script)
+
+
+def _run_cuda_routing_guard(workflow, **overrides):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GITHUB_REPOSITORY": "jemsbhai/explainiverse",
+            "GITHUB_REPOSITORY_OWNER": "jemsbhai",
+            "GITHUB_ACTOR": "jemsbhai",
+            "GITHUB_TRIGGERING_ACTOR": "jemsbhai",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF": "refs/heads/codex/reviewed-cuda-candidate",
+            "CUDA_SINGLE_RUNNER": "explainiverse-cuda-single",
+            "CUDA_TWO_RUNNER": "explainiverse-cuda-two",
+            **overrides,
+        }
+    )
+    return subprocess.run(
+        [sys.executable, "-c", _cuda_routing_guard_script(workflow)],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
 
 
 def _assert_cuda_runner_routing_contract(workflow, publish):
@@ -29,13 +63,29 @@ def _assert_cuda_runner_routing_contract(workflow, publish):
     routing = workflow.split("  cuda-runner-routing:", 1)[1].split("\n  single-gpu:", 1)[0]
     single = workflow.split("  single-gpu:", 1)[1].split("\n  two-gpu:", 1)[0]
     two = workflow.split("  two-gpu:", 1)[1]
+    authorization = routing.split(
+        "      - name: Reject untrusted CUDA runner execution contexts", 1
+    )[1].split("\n      - name: Require exact reviewed CUDA runner labels", 1)[0]
+    guard_script = _cuda_routing_guard_script(workflow)
     assert workflow.index("  cuda-runner-routing:") < workflow.index("  single-gpu:")
     assert "runs-on: ubuntu-latest" in routing
+    assert "python3 - <<'PY'" in authorization
+    assert 'repository == "jemsbhai/explainiverse"' in authorization
+    assert 'repository_owner == "jemsbhai"' in authorization
+    assert "\n    actor == repository_owner\n" in guard_script
+    assert "\n    and triggering_actor == repository_owner\n" in guard_script
+    assert 'event_name == "workflow_dispatch"' in authorization
+    assert 'event_name == "schedule" and ref == "refs/heads/main"' in authorization
+    assert "if not (trusted_repository and trusted_trigger and approved_event)" in authorization
+    assert "raise SystemExit(" in authorization
+    assert 'event_name == "pull_request"' not in authorization
+    assert 'event_name == "push"' not in authorization
+    assert "continue-on-error" not in authorization
+    assert "Checkout" not in routing
     assert "CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}" in routing
     assert "CUDA_TWO_RUNNER: ${{ vars.CUDA_TWO_RUNNER }}" in routing
     assert f'[[ "$CUDA_SINGLE_RUNNER" != "{single_label}" ]]' in routing
     assert f'[[ "$CUDA_TWO_RUNNER" != "{two_label}" ]]' in routing
-    assert '"schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch"' in routing
     assert routing.count("exit 1") == 2
     assert "continue-on-error" not in routing
     assert "needs: cuda-runner-routing" in single
@@ -353,6 +403,80 @@ def test_cuda_workflows_route_only_through_exact_reviewed_labels():
     _assert_cuda_runner_routing_contract(_read("cuda-ci.yml"), _read("publish-pypi.yml"))
 
 
+@pytest.mark.parametrize(
+    ("overrides", "authorized"),
+    (
+        pytest.param({}, True, id="owner-dispatch-reviewed-branch"),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/main"},
+            True,
+            id="owner-controlled-main-schedule",
+        ),
+        pytest.param(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_REF": "refs/pull/17/merge",
+            },
+            False,
+            id="pull-request-with-exact-runner-variables",
+        ),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"},
+            False,
+            id="push-with-exact-runner-variables",
+        ),
+        pytest.param(
+            {"GITHUB_ACTOR": "write-collaborator"},
+            False,
+            id="non-owner-dispatch",
+        ),
+        pytest.param(
+            {"GITHUB_TRIGGERING_ACTOR": "write-collaborator"},
+            False,
+            id="non-owner-rerun",
+        ),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/develop"},
+            False,
+            id="schedule-outside-main",
+        ),
+        pytest.param(
+            {
+                "GITHUB_REPOSITORY": "attacker/explainiverse",
+                "GITHUB_REPOSITORY_OWNER": "attacker",
+                "GITHUB_ACTOR": "attacker",
+                "GITHUB_TRIGGERING_ACTOR": "attacker",
+            },
+            False,
+            id="fork-owner-dispatch",
+        ),
+    ),
+)
+def test_cuda_router_authorizes_only_owner_dispatch_and_main_schedule(overrides, authorized):
+    workflow = _read("cuda-ci.yml")
+    completed = _run_cuda_routing_guard(workflow, **overrides)
+
+    assert (completed.returncode == 0) is authorized
+    if not authorized:
+        assert "custom CUDA runners require an owner-triggered dispatch" in completed.stderr
+
+
+def test_owner_dispatch_unlocks_both_exact_cuda_runner_routes():
+    workflow = _read("cuda-ci.yml")
+    assert _run_cuda_routing_guard(workflow).returncode == 0
+
+    single = workflow.split("  single-gpu:", 1)[1].split("\n  two-gpu:", 1)[0]
+    two = workflow.split("  two-gpu:", 1)[1]
+    assert (
+        "${{ needs.cuda-runner-routing.result == 'success' &&\n"
+        "      'explainiverse-cuda-single' || 'ubuntu-latest' }}" in single
+    )
+    assert (
+        "${{ needs.cuda-runner-routing.result == 'success' &&\n"
+        "      'explainiverse-cuda-two' || 'ubuntu-latest' }}" in two
+    )
+
+
 def test_cuda_runner_routing_contract_rejects_fail_open_drift():
     workflow = _read("cuda-ci.yml")
     publish = _read("publish-pypi.yml")
@@ -399,11 +523,46 @@ def test_cuda_runner_routing_contract_rejects_fail_open_drift():
                 1,
             ),
         ),
+        (
+            workflow.replace(
+                'repository == "jemsbhai/explainiverse"',
+                "repository == repository",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "actor == repository_owner",
+                "actor == actor",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "triggering_actor == repository_owner",
+                "triggering_actor == triggering_actor",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                'event_name == "schedule" and ref == "refs/heads/main"',
+                'event_name == "schedule"',
+                1,
+            ),
+            publish,
+        ),
     )
 
-    for mutated_workflow, mutated_publish in mutations:
-        with pytest.raises(AssertionError):
+    for index, (mutated_workflow, mutated_publish) in enumerate(mutations):
+        try:
             _assert_cuda_runner_routing_contract(mutated_workflow, mutated_publish)
+        except AssertionError:
+            continue
+        raise AssertionError(f"CUDA routing mutation {index} escaped the contract")
 
 
 def test_cuda_cam_matrix_uses_each_family_valid_target_contract():
