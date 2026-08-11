@@ -58,6 +58,11 @@ jobs:
             echo "tag must have the form vMAJOR.MINOR.PATCH" >&2
             exit 1
           fi
+          expected_ref="refs/tags/$RELEASE_TAG"
+          if [[ "$GITHUB_REF" != "$expected_ref" ]]; then
+            echo "recovery workflow must be dispatched from $expected_ref, got $GITHUB_REF" >&2
+            exit 1
+          fi
           if [[ ! "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
             echo "source_run_id must be a positive integer" >&2
             exit 1
@@ -76,6 +81,11 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: .github/requirements/release-tools.txt
+
+      - name: Bind the recovery execution to the immutable release tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python scripts/validate_release_attestation_context.py
 
       - name: Install the hash-locked recovery and provenance verifier
         run: |
@@ -147,7 +157,16 @@ jobs:
         env:
           RECOVERY_ACTOR: ${{ github.actor }}
           RECOVERY_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
+          python scripts/verify_release_recovery.py governance-record \
+            --record-json provenance/RELEASE_GOVERNANCE.json \
+            --run-json recovery/source-run.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$(git rev-parse HEAD)" \
+            --source-run-id "$SOURCE_RUN_ID"
           python - <<'PY'
           import json
           import os
@@ -283,6 +302,10 @@ jobs:
         run: |
           is_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
           if [[ "$is_draft" = true ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              > recovery/pre-finalize-immutable-releases.json
+            jq -e '.enabled == true' recovery/pre-finalize-immutable-releases.json > /dev/null
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --draft=false --title "Explainiverse $RELEASE_TAG"
           fi
@@ -312,9 +335,12 @@ jobs:
             -H "X-GitHub-Api-Version: 2026-03-10" \
             > recovery/final-github-release-api.json
           test "$(jq -r '.tagName' recovery/final-github-release.json)" = "$RELEASE_TAG"
-          test "$(jq -r '.isDraft' recovery/final-github-release.json)" = false
-          test "$(jq -r '.isPrerelease' recovery/final-github-release.json)" = false
-          test "$(jq -r '.immutable' recovery/final-github-release-api.json)" = true
+          jq -e '.isDraft == false and .isPrerelease == false' \
+            recovery/final-github-release.json > /dev/null
+          jq -e '.immutable == true' recovery/final-github-release-api.json > /dev/null
+          python scripts/verify_release_recovery.py release-body \
+            --release-json recovery/final-github-release-api.json \
+            --disclosure provenance/RELEASE_GOVERNANCE.md
 
       - name: Archive complete or partial recovery evidence
         if: always()

@@ -198,7 +198,11 @@ def _cuda_jobs(commit=SHA):
                 "runner_name": f"ephemeral-gpu-{index}",
                 "runner_group_id": 7,
                 "runner_group_name": "approved-gpu",
-                "labels": ["self-hosted", "gpu"],
+                "labels": [
+                    "self-hosted",
+                    "gpu",
+                    policy["cuda_evidence"]["required_runner_labels"][name],
+                ],
             }
             for index, name in enumerate(policy["cuda_evidence"]["required_jobs"])
         ],
@@ -615,6 +619,64 @@ def test_cuda_evidence_fails_closed_on_wrong_commit_rerun_or_incomplete_query(mu
             policy,
             run,
             jobs,
+            run_id="456",
+            repository=policy["repository"],
+            release_commit=SHA,
+        )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        ["self-hosted", "gpu"],
+        ["self-hosted", "gpu", "explainiverse-cuda-two"],
+    ],
+)
+def test_cuda_evidence_requires_the_expected_custom_topology_label(replacement):
+    policy, _ = _policy()
+    jobs = _cuda_jobs()
+    jobs["jobs"][0]["labels"] = replacement
+
+    with pytest.raises(ValueError, match="expected custom runner label"):
+        controls.verify_cuda_evidence(
+            policy,
+            _cuda_run(),
+            jobs,
+            run_id="456",
+            repository=policy["repository"],
+            release_commit=SHA,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda cuda_policy: cuda_policy.pop("required_runner_labels"),
+        lambda cuda_policy: cuda_policy.update(required_runner_labels=[]),
+        lambda cuda_policy: cuda_policy["required_runner_labels"].pop(
+            "CUDA single-GPU (Torch latest)"
+        ),
+        lambda cuda_policy: cuda_policy["required_runner_labels"].update(
+            {"unexpected": "explainiverse-cuda-single"}
+        ),
+        lambda cuda_policy: cuda_policy["required_runner_labels"].update(
+            {"CUDA single-GPU (Torch latest)": ""}
+        ),
+        lambda cuda_policy: cuda_policy["required_runner_labels"].update(
+            {"CUDA single-GPU (Torch latest)": "explainiverse-cuda-two"}
+        ),
+    ],
+)
+def test_cuda_evidence_rejects_malformed_runner_label_policy(mutation):
+    policy, _ = _policy()
+    policy = copy.deepcopy(policy)
+    mutation(policy["cuda_evidence"])
+
+    with pytest.raises(ValueError, match="CUDA evidence required runner label"):
+        controls.verify_cuda_evidence(
+            policy,
+            _cuda_run(),
+            _cuda_jobs(),
             run_id="456",
             repository=policy["repository"],
             release_commit=SHA,

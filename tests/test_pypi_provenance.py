@@ -25,17 +25,23 @@ FILES = {
 }
 
 
-def _statement(filename, digest, *, predicate_type=provenance._PYPI_PUBLISH_ATTESTATION_V1):
+def _statement(
+    filename,
+    digest,
+    *,
+    predicate_type=provenance._PYPI_PUBLISH_ATTESTATION_V1,
+    predicate=None,
+):
     statement = {
         "_type": provenance._IN_TOTO_STATEMENT_V1,
         "subject": [{"name": filename, "digest": {"sha256": digest}}],
         "predicateType": predicate_type,
-        "predicate": None,
+        "predicate": predicate,
     }
     return base64.b64encode(json.dumps(statement).encode()).decode()
 
 
-def _payload(filename, digest):
+def _payload(filename, digest, *, predicate=None):
     return {
         "version": 1,
         "attestation_bundles": [
@@ -52,7 +58,7 @@ def _payload(filename, digest):
                         "version": 1,
                         "envelope": {
                             "signature": "signed",
-                            "statement": _statement(filename, digest),
+                            "statement": _statement(filename, digest, predicate=predicate),
                         },
                         "verification_material": {
                             "certificate": "certificate",
@@ -87,9 +93,10 @@ def _verify(payload, filename=None, digest=None):
     )
 
 
-def test_matching_pypi_publisher_and_publish_subject_are_required():
+@pytest.mark.parametrize("predicate", [None, {}], ids=["json-null", "empty-object"])
+def test_matching_pypi_publisher_publish_subject_and_predicate_are_required(predicate):
     filename = next(iter(FILES))
-    assert _verify(_payload(filename, FILES[filename])) == {
+    assert _verify(_payload(filename, FILES[filename], predicate=predicate)) == {
         "bundle_count": 1,
         "attestation_count": 1,
         "publish_attestation_count": 1,
@@ -126,7 +133,6 @@ def test_publisher_identity_mismatch_fails_closed(field, replacement):
         ),
         (lambda statement: statement.update(_type="attacker"), "wrong statement type"),
         (lambda statement: statement.update(predicateType="attacker"), "no publish attestation"),
-        (lambda statement: statement.update(predicate={}), "non-null predicate"),
         (lambda statement: statement.update(subject=[]), "exactly one subject"),
     ],
 )
@@ -138,6 +144,51 @@ def test_statement_substitution_or_malformed_publish_claim_fails_closed(mutation
     mutation(statement)
     envelope["statement"] = base64.b64encode(json.dumps(statement).encode()).decode()
     with pytest.raises(ValueError, match=match):
+        _verify(payload)
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        {"unexpected": None},
+        [],
+        [1],
+        "",
+        "claim",
+        0,
+        1,
+        1.5,
+        False,
+        True,
+    ],
+    ids=[
+        "nonempty-object",
+        "empty-array",
+        "nonempty-array",
+        "empty-string",
+        "string",
+        "zero",
+        "integer",
+        "float",
+        "false",
+        "true",
+    ],
+)
+def test_publish_predicate_rejects_nonempty_mappings_arrays_and_scalars(predicate):
+    filename = next(iter(FILES))
+    payload = _payload(filename, FILES[filename], predicate=predicate)
+    with pytest.raises(ValueError, match="JSON null or an empty object"):
+        _verify(payload)
+
+
+def test_publish_predicate_rejects_a_missing_field():
+    filename = next(iter(FILES))
+    payload = _payload(filename, FILES[filename])
+    envelope = payload["attestation_bundles"][0]["attestations"][0]["envelope"]
+    statement = json.loads(base64.b64decode(envelope["statement"]))
+    statement.pop("predicate")
+    envelope["statement"] = base64.b64encode(json.dumps(statement).encode()).decode()
+    with pytest.raises(ValueError, match="must contain a predicate"):
         _verify(payload)
 
 

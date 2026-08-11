@@ -170,6 +170,92 @@ def verify_pypi_json(
         )
 
 
+def verify_release_governance_disclosure(release: Mapping[str, Any], disclosure: str) -> None:
+    """Require the REST release body to contain the exact retained disclosure."""
+    if not disclosure:
+        raise ValueError("governance disclosure must not be empty")
+    body = release.get("body")
+    if not isinstance(body, str):
+        raise ValueError("GitHub release body must be a string")
+    if disclosure not in body:
+        raise ValueError("GitHub release omitted the exact governance disclosure")
+
+
+def _positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def verify_recovery_governance_record(
+    record: Mapping[str, Any],
+    run: Mapping[str, Any],
+    *,
+    repository: str,
+    release_tag: str,
+    release_commit: str,
+    source_run_id: str,
+) -> None:
+    """Bind the retained governance asset to the exact original publish run."""
+    if _TAG.fullmatch(release_tag) is None:
+        raise ValueError("release tag must have the form vMAJOR.MINOR.PATCH")
+    if _COMMIT.fullmatch(release_commit) is None:
+        raise ValueError("release commit must be a complete lowercase commit SHA")
+    if re.fullmatch(r"[1-9][0-9]*", source_run_id) is None:
+        raise ValueError("source run id must be a positive integer")
+    schema_version = record.get("schema_version")
+    if isinstance(schema_version, bool) or schema_version != 1:
+        raise ValueError("release governance record schema_version must be the integer 1")
+
+    source_repository = _mapping(run.get("repository"), "source run repository").get("full_name")
+    source_id = _positive_integer(run.get("id"), "source run id")
+    source_attempt = _positive_integer(run.get("run_attempt"), "source run attempt")
+    source_actor = _mapping(run.get("actor"), "source run actor").get("login")
+    source_triggering_actor = _mapping(
+        run.get("triggering_actor"), "source run triggering actor"
+    ).get("login")
+    if not isinstance(source_actor, str) or not source_actor:
+        raise ValueError("source run actor login must be a non-empty string")
+    if not isinstance(source_triggering_actor, str) or not source_triggering_actor:
+        raise ValueError("source run triggering actor login must be a non-empty string")
+
+    source_fields = {
+        "id": (str(source_id), source_run_id),
+        "repository": (source_repository, repository),
+        "tag": (run.get("head_branch"), release_tag),
+        "commit": (run.get("head_sha"), release_commit),
+    }
+    for field, (actual, expected) in source_fields.items():
+        if actual != expected:
+            raise ValueError(
+                f"source run {field} mismatch for governance binding: "
+                f"expected {expected!r}, got {actual!r}"
+            )
+
+    release = _mapping(record.get("release"), "governance record release")
+    governance = _mapping(record.get("governance"), "governance record governance")
+    evidence = _mapping(record.get("evidence"), "governance record evidence")
+    expected_url = f"https://github.com/{repository}/actions/runs/{source_run_id}"
+    record_fields = {
+        "repository": (release.get("repository"), repository),
+        "tag": (release.get("tag"), release_tag),
+        "commit": (release.get("commit"), release_commit),
+        "source run id": (str(evidence.get("release_workflow_run_id")), source_run_id),
+        "source run URL": (evidence.get("release_workflow_run_url"), expected_url),
+        "source run attempt": (str(governance.get("release_run_attempt")), str(source_attempt)),
+        "source actor": (governance.get("release_dispatch_actor"), source_actor),
+        "source triggering actor": (
+            governance.get("release_triggering_actor"),
+            source_triggering_actor,
+        ),
+    }
+    for field, (actual, expected) in record_fields.items():
+        if actual != expected:
+            raise ValueError(
+                f"governance record {field} mismatch: expected {expected!r}, got {actual!r}"
+            )
+
+
 def verify_source_run(
     run: Mapping[str, Any],
     jobs_response: Mapping[str, Any],
@@ -314,6 +400,16 @@ def _parser() -> argparse.ArgumentParser:
     artifacts.add_argument("--tag", required=True)
     artifacts.add_argument("--github-assets", type=Path)
     artifacts.add_argument("--provenance", type=Path)
+    governance = subparsers.add_parser("governance-record")
+    governance.add_argument("--record-json", type=Path, required=True)
+    governance.add_argument("--run-json", type=Path, required=True)
+    governance.add_argument("--repository", required=True)
+    governance.add_argument("--tag", required=True)
+    governance.add_argument("--commit", required=True)
+    governance.add_argument("--source-run-id", required=True)
+    release_body = subparsers.add_parser("release-body")
+    release_body.add_argument("--release-json", type=Path, required=True)
+    release_body.add_argument("--disclosure", type=Path, required=True)
     return parser
 
 
@@ -336,7 +432,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "source run is an unplanned downstream failure, not the required staged drill"
                 )
             print(f"verified recovery source kind: {source_kind}")
-        else:
+        elif args.command == "governance-record":
+            record = _mapping(
+                json.loads(args.record_json.read_text(encoding="utf-8")),
+                "release governance record",
+            )
+            run = _mapping(
+                json.loads(args.run_json.read_text(encoding="utf-8")),
+                "source run JSON",
+            )
+            verify_recovery_governance_record(
+                record,
+                run,
+                repository=args.repository,
+                release_tag=args.tag,
+                release_commit=args.commit.strip().lower(),
+                source_run_id=args.source_run_id,
+            )
+            print("verified governance record binding to the original publish run")
+        elif args.command == "artifacts":
             expected = parse_sha256sums(args.sums)
             verify_distribution_directory(args.dist, expected)
             metadata = _mapping(json.loads(args.pypi_json.read_text(encoding="utf-8")), "PyPI JSON")
@@ -354,6 +468,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.github_assets,
                     expected_directories=[args.dist, args.provenance],
                 )
+        else:
+            release = _mapping(
+                json.loads(args.release_json.read_text(encoding="utf-8")),
+                "GitHub release JSON",
+            )
+            disclosure = args.disclosure.read_text(encoding="utf-8").strip()
+            verify_release_governance_disclosure(release, disclosure)
         return 0
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         print(str(exc), file=sys.stderr)

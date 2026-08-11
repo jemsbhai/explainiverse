@@ -20,6 +20,7 @@ sys.modules[SPEC.name] = recovery
 SPEC.loader.exec_module(recovery)
 
 SHA = "a" * 40
+SOURCE_RUN_ID = "1234"
 FILENAMES = ("explainiverse-0.15.0-py3-none-any.whl", "explainiverse-0.15.0.tar.gz")
 
 
@@ -48,6 +49,10 @@ def _artifacts(tmp_path):
 
 def _source_run():
     run = {
+        "id": int(SOURCE_RUN_ID),
+        "run_attempt": 1,
+        "actor": {"login": "jemsbhai"},
+        "triggering_actor": {"login": "jemsbhai"},
         "repository": {"full_name": "jemsbhai/explainiverse"},
         "path": ".github/workflows/publish-pypi.yml",
         "event": "workflow_dispatch",
@@ -92,6 +97,121 @@ def _source_run():
     return run, jobs
 
 
+def _governance_record():
+    return {
+        "schema_version": 1,
+        "release": {
+            "repository": "jemsbhai/explainiverse",
+            "tag": "v0.15.0",
+            "commit": SHA,
+        },
+        "governance": {
+            "release_dispatch_actor": "jemsbhai",
+            "release_triggering_actor": "jemsbhai",
+            "release_run_attempt": "1",
+        },
+        "evidence": {
+            "release_workflow_run_id": SOURCE_RUN_ID,
+            "release_workflow_run_url": (
+                f"https://github.com/jemsbhai/explainiverse/actions/runs/{SOURCE_RUN_ID}"
+            ),
+        },
+    }
+
+
+def _verify_governance(record, run):
+    recovery.verify_recovery_governance_record(
+        record,
+        run,
+        repository="jemsbhai/explainiverse",
+        release_tag="v0.15.0",
+        release_commit=SHA,
+        source_run_id=SOURCE_RUN_ID,
+    )
+
+
+def test_recovery_governance_record_is_bound_to_the_exact_source_run():
+    run, _ = _source_run()
+    _verify_governance(_governance_record(), run)
+
+
+@pytest.mark.parametrize(
+    ("target", "path", "replacement", "match"),
+    [
+        ("record", ("schema_version",), True, "schema_version"),
+        ("record", ("release", "repository"), "other/repository", "record repository"),
+        ("record", ("release", "tag"), "v0.15.1", "record tag"),
+        ("record", ("release", "commit"), "b" * 40, "record commit"),
+        ("record", ("evidence", "release_workflow_run_id"), "999", "source run id"),
+        (
+            "record",
+            ("evidence", "release_workflow_run_url"),
+            "https://github.com/jemsbhai/explainiverse/actions/runs/999",
+            "source run URL",
+        ),
+        ("record", ("governance", "release_run_attempt"), "2", "source run attempt"),
+        ("record", ("governance", "release_dispatch_actor"), "other", "source actor"),
+        (
+            "record",
+            ("governance", "release_triggering_actor"),
+            "other",
+            "source triggering actor",
+        ),
+        ("run", ("id",), 999, "source run id mismatch"),
+        ("run", ("repository", "full_name"), "other/repository", "source run repository"),
+        ("run", ("head_branch",), "v0.15.1", "source run tag"),
+        ("run", ("head_sha",), "b" * 40, "source run commit"),
+        ("run", ("run_attempt",), 2, "record source run attempt"),
+        ("run", ("actor", "login"), "other", "record source actor"),
+        (
+            "run",
+            ("triggering_actor", "login"),
+            "other",
+            "record source triggering actor",
+        ),
+    ],
+)
+def test_recovery_governance_record_rejects_cross_run_or_identity_drift(
+    target, path, replacement, match
+):
+    record = _governance_record()
+    run, _ = _source_run()
+    value = record if target == "record" else run
+    for key in path[:-1]:
+        value = value[key]
+    value[path[-1]] = replacement
+    with pytest.raises(ValueError, match=match):
+        _verify_governance(record, run)
+
+
+def test_governance_record_cli_fails_closed_on_retained_record_substitution(tmp_path):
+    record_path = tmp_path / "RELEASE_GOVERNANCE.json"
+    run_path = tmp_path / "source-run.json"
+    record = _governance_record()
+    run, _ = _source_run()
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+    arguments = [
+        "governance-record",
+        "--record-json",
+        str(record_path),
+        "--run-json",
+        str(run_path),
+        "--repository",
+        "jemsbhai/explainiverse",
+        "--tag",
+        "v0.15.0",
+        "--commit",
+        SHA,
+        "--source-run-id",
+        SOURCE_RUN_ID,
+    ]
+    assert recovery.main(arguments) == 0
+    record["evidence"]["release_workflow_run_id"] = "999"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    assert recovery.main(arguments) == 2
+
+
 def test_original_dist_pypi_and_github_assets_must_have_identical_hashes(tmp_path):
     dist, sums, hashes, pypi = _artifacts(tmp_path)
     expected = recovery.parse_sha256sums(sums)
@@ -127,6 +247,47 @@ def test_github_release_requires_exact_dist_and_provenance_asset_inventory(tmp_p
         recovery.verify_release_asset_directory(
             release_assets, expected_directories=[dist, provenance]
         )
+
+
+def test_final_release_body_contains_the_exact_retained_governance_disclosure():
+    disclosure = "## Release governance\n\nSingle-operator approval is disclosed."
+    recovery.verify_release_governance_disclosure(
+        {"body": f"Generated notes.\n\n{disclosure}\n"}, disclosure
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "disclosure", "match"),
+    [
+        (None, "required disclosure", "body must be a string"),
+        ("required disclosurE", "required disclosure", "exact governance disclosure"),
+        ("anything", "", "must not be empty"),
+    ],
+)
+def test_final_release_body_rejects_missing_or_near_match_disclosures(body, disclosure, match):
+    with pytest.raises(ValueError, match=match):
+        recovery.verify_release_governance_disclosure({"body": body}, disclosure)
+
+
+def test_release_body_cli_fails_closed_on_disclosure_tampering(tmp_path):
+    release_json = tmp_path / "release.json"
+    disclosure_file = tmp_path / "RELEASE_GOVERNANCE.md"
+    disclosure_file.write_text("authoritative disclosure\n", encoding="utf-8")
+    release_json.write_text(
+        json.dumps({"body": "notes\n\nauthoritative disclosure"}), encoding="utf-8"
+    )
+    arguments = [
+        "release-body",
+        "--release-json",
+        str(release_json),
+        "--disclosure",
+        str(disclosure_file),
+    ]
+    assert recovery.main(arguments) == 0
+    release_json.write_text(
+        json.dumps({"body": "notes\n\nauthoritative disclosurE"}), encoding="utf-8"
+    )
+    assert recovery.main(arguments) == 2
 
 
 @pytest.mark.parametrize(
@@ -361,6 +522,49 @@ def test_recovery_workflow_has_no_pypi_upload_or_skip_existing_escape_hatch():
     assert "final-github-assets.sha256" in workflow
     assert "Archive complete or partial recovery evidence" in workflow
     assert "if: always()" in workflow
+    final_api = workflow.index("> recovery/final-github-release-api.json")
+    immutable = workflow.index(
+        "'.immutable == true' recovery/final-github-release-api.json", final_api
+    )
+    final_disclosure = workflow.index("verify_release_recovery.py release-body", immutable)
+    assert final_api < immutable < final_disclosure
+    assert "--release-json recovery/final-github-release-api.json" in workflow
+    assert "--disclosure provenance/RELEASE_GOVERNANCE.md" in workflow
+
+
+def test_recovery_checks_immutable_release_setting_immediately_before_finalizing():
+    workflow = (ROOT / ".github" / "workflows" / "recover-github-release.yml").read_text(
+        encoding="utf-8"
+    )
+    finalize_step = workflow.split(
+        "      - name: Finalize the verified draft without any PyPI upload", 1
+    )[1].split("      - name: Record and reverify the final GitHub Release inventory", 1)[0]
+    draft_guard = finalize_step.index('if [[ "$is_draft" = true ]]')
+    setting_query = finalize_step.index(
+        'gh api "repos/$GITHUB_REPOSITORY/immutable-releases"', draft_guard
+    )
+    api_version = finalize_step.index("X-GitHub-Api-Version: 2026-03-10", setting_query)
+    explicit_true = finalize_step.index("jq -e '.enabled == true'", api_version)
+    publish = finalize_step.index('gh release edit "$RELEASE_TAG"', explicit_true)
+    assert draft_guard < setting_query < api_version < explicit_true < publish
+
+
+def test_recovery_binds_governance_record_before_any_draft_mutation():
+    workflow = (ROOT / ".github" / "workflows" / "recover-github-release.yml").read_text(
+        encoding="utf-8"
+    )
+    binding = workflow.index("verify_release_recovery.py governance-record")
+    draft_mutation = workflow.index("      - name: Create or inspect a recovery draft")
+    assert binding < draft_mutation
+    for argument in (
+        "--record-json provenance/RELEASE_GOVERNANCE.json",
+        "--run-json recovery/source-run.json",
+        '--repository "$GITHUB_REPOSITORY"',
+        '--tag "$RELEASE_TAG"',
+        '--commit "$(git rev-parse HEAD)"',
+        '--source-run-id "$SOURCE_RUN_ID"',
+    ):
+        assert argument in workflow[binding:draft_mutation]
 
 
 def test_staged_drill_step_contract_matches_every_real_downstream_workflow_step():

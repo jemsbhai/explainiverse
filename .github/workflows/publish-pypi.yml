@@ -142,7 +142,7 @@ jobs:
           ref: ${{ inputs.tag }}
           persist-credentials: false
 
-      - name: Require an approved Linux GPU runner
+      - name: Require Linux GPU runner OS
         run: test "$RUNNER_OS" = Linux
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -255,52 +255,6 @@ jobs:
           --only-binary=:all:
           --requirement .github/requirements/release-tools.txt
 
-      - name: Record runner image, bootstrap pip, and release-tool identities
-        run: >-
-          python scripts/record_release_environment.py
-          --requirements .github/requirements/release-tools.txt
-          --output provenance/release-environment.json
-
-      - name: Archive the attested preflight and render the single-operator disclosure
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
-          CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          mkdir -p release-governance
-          gh run download "$PREFLIGHT_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name release-control-preflight --dir release-governance
-          (cd release-governance && \
-            sha256sum --check admin-capture.json.sha256 && \
-            sha256sum --check cuda-evidence.sha256 && \
-            sha256sum --check external-controls.json.sha256)
-          for evidence in \
-            admin-capture.json admin-capture.json.sha256 \
-            cuda-run.json cuda-jobs.json cuda-evidence.sha256 \
-            external-controls.json external-controls.json.sha256; do
-            gh attestation verify "release-governance/$evidence" \
-              --repo "$GITHUB_REPOSITORY" \
-              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-preflight.yml@refs/heads/main"
-          done
-          cp release-governance/* provenance/
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID" \
-            > provenance/preflight-source-run.json
-          python scripts/create_release_governance_record.py \
-            --policy .github/release-control-policy.json \
-            --snapshot provenance/external-controls.json \
-            --output-json provenance/RELEASE_GOVERNANCE.json \
-            --output-markdown provenance/RELEASE_GOVERNANCE.md \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" \
-            --commit "$(git rev-parse HEAD)" \
-            --preflight-run-id "$PREFLIGHT_RUN_ID" \
-            --cuda-run-id "$CUDA_RUN_ID" \
-            --release-run-id "$GITHUB_RUN_ID" \
-            --release-run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --release-actor "$GITHUB_ACTOR" \
-            --release-triggering-actor "$GITHUB_TRIGGERING_ACTOR"
-
       - name: Install the exact locked Python release environment
         run: poetry sync --all-extras --with dev,tutorial --no-interaction
 
@@ -326,15 +280,227 @@ jobs:
           npm run build:demo
           npm run check:package-boundary
 
-      - name: Build Python distributions exactly once
+      - name: Refuse release inputs created by candidate-authored gates
         run: |
-          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          for path in release-source release-governance reproducibility-proof provenance dist; do
+            if [[ -e "$path" || -L "$path" ]]; then
+              echo "candidate gates created reserved release path: $path" >&2
+              exit 1
+            fi
+          done
+
+      - name: Check out a clean release source after all candidate-authored gates
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: release-source
+
+      - name: Reverify the clean signed release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test -z "$(git -C release-source status --porcelain --untracked-files=all)"
+          (
+            cd release-source
+            python scripts/validate_release_attestation_context.py
+            test "$(git cat-file -t "$RELEASE_TAG")" = tag
+            test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+            tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.verification.verified')" = true
+            git fetch origin main --no-tags
+            git merge-base --is-ancestor HEAD origin/main
+          )
+
+      - name: Recreate governance and bind the accepted reproducibility artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
+          CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          mkdir release-governance reproducibility-proof provenance
+          gh run download "$PREFLIGHT_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name release-control-preflight --dir release-governance
+          (cd release-governance && \
+            sha256sum --check admin-capture.json.sha256 && \
+            sha256sum --check cuda-evidence.sha256 && \
+            sha256sum --check external-controls.json.sha256)
+          for evidence in \
+            admin-capture.json admin-capture.json.sha256 \
+            cuda-run.json cuda-jobs.json cuda-evidence.sha256 \
+            external-controls.json external-controls.json.sha256; do
+            gh attestation verify "release-governance/$evidence" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-preflight.yml@refs/heads/main"
+          done
+          cp release-governance/* provenance/
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID" \
+            > provenance/preflight-source-run.json
+          python release-source/scripts/create_release_governance_record.py \
+            --policy release-source/.github/release-control-policy.json \
+            --snapshot provenance/external-controls.json \
+            --output-json provenance/RELEASE_GOVERNANCE.json \
+            --output-markdown provenance/RELEASE_GOVERNANCE.md \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$(git -C release-source rev-parse HEAD)" \
+            --preflight-run-id "$PREFLIGHT_RUN_ID" \
+            --cuda-run-id "$CUDA_RUN_ID" \
+            --release-run-id "$GITHUB_RUN_ID" \
+            --release-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --release-actor "$GITHUB_ACTOR" \
+            --release-triggering-actor "$GITHUB_TRIGGERING_ACTOR"
+          (
+            cd release-source
+            python scripts/record_release_environment.py \
+              --requirements .github/requirements/release-tools.txt \
+              --output "$GITHUB_WORKSPACE/provenance/release-environment.json"
+          )
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          snapshot = json.loads(
+              Path("provenance/external-controls.json").read_text(encoding="utf-8")
+          )
+          matches = [
+              check
+              for check in snapshot["observation"]["check_runs"]
+              if check.get("name") == "Artifact byte reproducibility"
+          ]
+          if len(matches) != 1:
+              raise SystemExit("expected exactly one Artifact byte reproducibility check")
+          expected_run = matches[0].get("workflow_run")
+          if not isinstance(expected_run, dict):
+              raise SystemExit("reproducibility check has no normalized Actions run")
+          expected_fields = {
+              "id",
+              "repository",
+              "path",
+              "event",
+              "head_branch",
+              "head_sha",
+              "status",
+              "conclusion",
+              "run_attempt",
+          }
+          if set(expected_run) != expected_fields:
+              raise SystemExit(
+                  "reproducibility check run fields differ from the reviewed schema: "
+                  f"expected {sorted(expected_fields)!r}, got {sorted(expected_run)!r}"
+              )
+          run_id = expected_run.get("id")
+          if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+              raise SystemExit("reproducibility check has no valid Actions run ID")
+          Path("provenance/reproducibility-expected-run.json").write_text(
+              json.dumps(expected_run, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          reproducibility_run_id=$(
+            jq -er '.id | select(type == "number" and . >= 1) | tostring' \
+              provenance/reproducibility-expected-run.json
+          )
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$reproducibility_run_id" \
+            > provenance/reproducibility-source-run.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          expected = json.loads(
+              Path("provenance/reproducibility-expected-run.json").read_text(encoding="utf-8")
+          )
+          actual = json.loads(
+              Path("provenance/reproducibility-source-run.json").read_text(encoding="utf-8")
+          )
+          repository = actual.get("repository")
+          actual_normalized = {
+              "id": actual.get("id"),
+              "repository": (
+                  repository.get("full_name") if isinstance(repository, dict) else None
+              ),
+              "path": actual.get("path"),
+              "event": actual.get("event"),
+              "head_branch": actual.get("head_branch"),
+              "head_sha": actual.get("head_sha"),
+              "status": actual.get("status"),
+              "conclusion": actual.get("conclusion"),
+              "run_attempt": actual.get("run_attempt"),
+          }
+          if actual_normalized != expected:
+              differences = {
+                  field: {"expected": expected.get(field), "actual": actual_normalized.get(field)}
+                  for field in sorted(expected)
+                  if expected.get(field) != actual_normalized.get(field)
+              }
+              raise SystemExit(
+                  "live reproducibility run differs from the attested check run: "
+                  + json.dumps(differences, sort_keys=True)
+              )
+          PY
+          gh run download "$reproducibility_run_id" --repo "$GITHUB_REPOSITORY" \
+            --name reproducibility-one --dir reproducibility-proof/one
+          gh run download "$reproducibility_run_id" --repo "$GITHUB_REPOSITORY" \
+            --name reproducibility-two --dir reproducibility-proof/two
+          gh run download "$reproducibility_run_id" --repo "$GITHUB_REPOSITORY" \
+            --name reproducibility-report --dir reproducibility-proof/report
+          python release-source/scripts/record_release_environment.py \
+            --compare \
+              reproducibility-proof/one/provenance/release-environment.json \
+              reproducibility-proof/two/provenance/release-environment.json \
+            --output provenance/bound-reproducibility-environment.json
+          python release-source/scripts/compare_distribution_artifacts.py \
+            reproducibility-proof/one/dist reproducibility-proof/two/dist \
+            --report provenance/bound-reproducibility-distributions.json
+          test "$(find reproducibility-proof/report -mindepth 1 | wc -l)" -eq 4
+          for report in \
+            release-environment-one.json \
+            release-environment-two.json \
+            release-environment-comparison.json \
+            reproducibility.json; do
+            test -f "reproducibility-proof/report/$report"
+            test ! -L "reproducibility-proof/report/$report"
+          done
+          cmp reproducibility-proof/report/release-environment-one.json \
+            reproducibility-proof/one/provenance/release-environment.json
+          cmp reproducibility-proof/report/release-environment-two.json \
+            reproducibility-proof/two/provenance/release-environment.json
+          cmp reproducibility-proof/report/release-environment-comparison.json \
+            provenance/bound-reproducibility-environment.json
+          cmp reproducibility-proof/report/reproducibility.json \
+            provenance/bound-reproducibility-distributions.json
+          cp reproducibility-proof/report/release-environment-one.json \
+            provenance/accepted-reproducibility-environment-one.json
+          cp reproducibility-proof/report/release-environment-two.json \
+            provenance/accepted-reproducibility-environment-two.json
+          cp reproducibility-proof/report/release-environment-comparison.json \
+            provenance/accepted-reproducibility-environment-comparison.json
+          cp reproducibility-proof/report/reproducibility.json \
+            provenance/accepted-reproducibility-distributions.json
+
+      - name: Build once from the clean release checkout and match both proof builds
+        run: |
+          test -z "$(git -C release-source status --porcelain --untracked-files=all)"
+          export SOURCE_DATE_EPOCH="$(git -C release-source log -1 --format=%ct)"
           export PYTHONHASHSEED=0
-          poetry build
+          (cd release-source && poetry build --output "$GITHUB_WORKSPACE/dist")
           python -m twine check dist/*
           for artifact in dist/*.whl dist/*.tar.gz; do
-            poetry run python scripts/audit_typing_readiness.py --distribution "$artifact"
+            python release-source/scripts/audit_typing_readiness.py \
+              --policy release-source/.github/typing-readiness-policy.json \
+              --project-file release-source/pyproject.toml \
+              --repository-root release-source \
+              --distribution "$artifact"
           done
+          python release-source/scripts/compare_distribution_artifacts.py \
+            dist reproducibility-proof/one/dist \
+            --report provenance/publish-vs-reproducibility-one.json
+          python release-source/scripts/compare_distribution_artifacts.py \
+            dist reproducibility-proof/two/dist \
+            --report provenance/publish-vs-reproducibility-two.json
 
       - name: Generate hashes and reproducible build-environment SBOM
         run: |
@@ -343,7 +509,7 @@ jobs:
           (cd dist && sha256sum --check ../provenance/SHA256SUMS)
           poetry_python=$(poetry env info --executable)
           cyclonedx-py environment "$poetry_python" \
-            --pyproject pyproject.toml \
+            --pyproject release-source/pyproject.toml \
             --mc-type library \
             --output-reproducible \
             --output-format JSON \
@@ -571,6 +737,10 @@ jobs:
           (cd release-verification/draft-assets && sha256sum * | sort) \
             > release-verification/draft-assets.sha256
           cp github-release-draft.json release-verification/
+          gh api --method GET "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            > release-verification/immutable-releases.json
+          jq -e '.enabled == true' release-verification/immutable-releases.json > /dev/null
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
       - name: Require and reverify the finalized immutable release
@@ -582,9 +752,12 @@ jobs:
             -H "X-GitHub-Api-Version: 2026-03-10" \
             > release-verification/final-release.json
           test "$(jq -r '.tag_name' release-verification/final-release.json)" = "$RELEASE_TAG"
-          test "$(jq -r '.draft' release-verification/final-release.json)" = false
-          test "$(jq -r '.prerelease' release-verification/final-release.json)" = false
-          test "$(jq -r '.immutable' release-verification/final-release.json)" = true
+          jq -e \
+            '.draft == false and .prerelease == false and .immutable == true' \
+            release-verification/final-release.json > /dev/null
+          python scripts/verify_release_recovery.py release-body \
+            --release-json release-verification/final-release.json \
+            --disclosure provenance/RELEASE_GOVERNANCE.md
           mkdir -p release-verification/final-assets
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir release-verification/final-assets

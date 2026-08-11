@@ -728,6 +728,44 @@ def _complete_jobs_response(jobs_response: Mapping[str, Any], name: str) -> list
     ]
 
 
+def _cuda_required_runner_labels(
+    cuda_policy: Mapping[str, Any], required_jobs: Sequence[str]
+) -> Mapping[str, str]:
+    raw_labels = _mapping(
+        cuda_policy.get("required_runner_labels"),
+        "CUDA evidence required runner labels",
+    )
+    expected_keys = set(required_jobs)
+    actual_keys = set(raw_labels)
+    if actual_keys != expected_keys:
+        raise ValueError(
+            "CUDA evidence required runner label keys must exactly match required jobs: "
+            f"expected {sorted(expected_keys)!r}, got {sorted(actual_keys, key=str)!r}"
+        )
+
+    labels: dict[str, str] = {}
+    for job_name in required_jobs:
+        label = raw_labels[job_name]
+        if not isinstance(label, str) or not label:
+            raise ValueError(
+                "CUDA evidence required runner label values must be non-empty strings: "
+                f"{job_name!r} has {label!r}"
+            )
+        if job_name.startswith("CUDA single-GPU "):
+            expected_label = "explainiverse-cuda-single"
+        elif job_name.startswith("CUDA two-GPU scheduled "):
+            expected_label = "explainiverse-cuda-two"
+        else:
+            raise ValueError(f"CUDA evidence required job {job_name!r} has no supported topology")
+        if label != expected_label:
+            raise ValueError(
+                f"CUDA evidence required runner label for {job_name!r} must be "
+                f"{expected_label!r}, got {label!r}"
+            )
+        labels[job_name] = label
+    return labels
+
+
 def verify_cuda_evidence(
     policy: Mapping[str, Any],
     run: Mapping[str, Any],
@@ -761,6 +799,7 @@ def verify_cuda_evidence(
         _sequence(cuda_policy.get("required_jobs"), "CUDA evidence required jobs"),
         "CUDA evidence required jobs",
     )
+    required_runner_labels = _cuda_required_runner_labels(cuda_policy, required_jobs)
     accepted_jobs: list[Mapping[str, Any]] = []
     for job_name in required_jobs:
         matches = [job for job in jobs if job.get("name") == job_name]
@@ -781,24 +820,33 @@ def verify_cuda_evidence(
                 f"CUDA evidence job {job_name!r} head SHA mismatch: "
                 f"expected {release_commit!r}, got {job_head_sha!r}"
             )
-        accepted_jobs.append(
-            {
-                field: job.get(field)
-                for field in (
-                    "id",
-                    "name",
-                    "status",
-                    "conclusion",
-                    "run_attempt",
-                    "head_sha",
-                    "runner_id",
-                    "runner_name",
-                    "runner_group_id",
-                    "runner_group_name",
-                    "labels",
-                )
-            }
+        labels = _canonical_names(
+            _sequence(job.get("labels"), f"CUDA evidence job {job_name!r} labels"),
+            f"CUDA evidence job {job_name!r} labels",
         )
+        required_runner_label = required_runner_labels[job_name]
+        if required_runner_label not in labels:
+            raise ValueError(
+                f"CUDA evidence job {job_name!r} labels must include expected custom "
+                f"runner label {required_runner_label!r}; got {labels!r}"
+            )
+        accepted_job = {
+            field: job.get(field)
+            for field in (
+                "id",
+                "name",
+                "status",
+                "conclusion",
+                "run_attempt",
+                "head_sha",
+                "runner_id",
+                "runner_name",
+                "runner_group_id",
+                "runner_group_name",
+            )
+        }
+        accepted_job["labels"] = labels
+        accepted_jobs.append(accepted_job)
 
     return {
         "schema_version": 1,

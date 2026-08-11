@@ -161,7 +161,13 @@
       "CUDA single-GPU (Torch minimum)",
       "CUDA two-GPU scheduled (Torch latest)",
       "CUDA two-GPU scheduled (Torch minimum)"
-    ]
+    ],
+    "required_runner_labels": {
+      "CUDA single-GPU (Torch latest)": "explainiverse-cuda-single",
+      "CUDA single-GPU (Torch minimum)": "explainiverse-cuda-single",
+      "CUDA two-GPU scheduled (Torch latest)": "explainiverse-cuda-two",
+      "CUDA two-GPU scheduled (Torch minimum)": "explainiverse-cuda-two"
+    }
   },
   "branch_protection": {
     "admin_enforcement": true,

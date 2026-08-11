@@ -41,7 +41,7 @@ from explainiverse.core.scaled_detail import (
 )
 from explainiverse.engine.suite import ExplanationSuite
 
-__version__ = "0.15.0.dev0"
+__version__ = "0.15.0"
 
 __all__ = [
     # Core

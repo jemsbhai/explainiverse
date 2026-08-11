@@ -1,6 +1,6 @@
 [project]
 name = "explainiverse"
-version = "0.15.0.dev0"
+version = "0.15.0"
 description = "Unified, extensible explainability framework with audited method metadata and evaluation diagnostics"
 authors = [
     { name = "Muntaser Syed", email = "jemsbhai@gmail.com" },

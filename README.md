@@ -8,7 +8,7 @@ deployment.
 The latest version published on PyPI is `0.14.0`. Its distributions were uploaded with Twine,
 without Trusted Publishing or published provenance. The matching annotated Git tag is unsigned
 and no GitHub Release exists, so the cross-service release record is incomplete. This checkout
-is the unreleased `0.15.0.dev0` accuracy-remediation line and still declares Python 3.10 through
+is the `0.15.0` stable-release candidate and still declares Python 3.10 through
 3.13. It has not been tagged or published.
 
 ## Accuracy status

@@ -49,7 +49,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require an approved Linux GPU runner
+      - name: Require Linux GPU runner OS
         run: test "$RUNNER_OS" = Linux
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -109,7 +109,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require an approved Linux GPU runner
+      - name: Require Linux GPU runner OS
         run: test "$RUNNER_OS" = Linux
 
       - name: Set up Python ${{ matrix.python-version }}

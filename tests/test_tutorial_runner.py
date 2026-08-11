@@ -166,10 +166,44 @@ def test_clean_execution_must_reproduce_published_outputs():
 
 
 def test_checkout_import_and_hashes_are_current_and_stable():
-    runner._assert_checkout_import()
+    assert runner._assert_checkout_import() == runner._declared_project_version()
     assert runner._lock_digest() == runner._lock_digest()
     assert runner._runner_digest() == runner._runner_digest()
     assert runner._package_source_digest() == runner._package_source_digest()
+
+
+def test_source_only_verification_requires_absent_distribution_metadata(monkeypatch):
+    declared_version = runner._declared_project_version()
+
+    def missing_distribution(_name):
+        raise runner.PackageNotFoundError
+
+    monkeypatch.setattr(runner, "version", missing_distribution)
+    assert runner._assert_checkout_import(source_only=True) == declared_version
+
+    path = runner.DEFAULT_NOTEBOOKS[0]
+    notebook = nbformat.read(path, as_version=4)
+    runner._validate_published_provenance(path, notebook, expected_version=declared_version)
+
+    monkeypatch.setattr(runner, "version", lambda _name: declared_version)
+    with pytest.raises(RuntimeError, match="distribution.*absent"):
+        runner._assert_checkout_import(source_only=True)
+
+
+def test_source_only_mode_cannot_publish_notebooks():
+    with pytest.raises(ValueError, match="source-only.*write"):
+        runner.main(["--source-only", "--write"])
+
+
+def test_checkout_import_is_bound_to_project_metadata(monkeypatch, tmp_path):
+    project = tmp_path / "pyproject.toml"
+    project.write_text(
+        '[project]\nname = "explainiverse"\nversion = "99.0.0"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "PROJECT_FILE", project)
+    with pytest.raises(RuntimeError, match="pyproject.toml.*__version__ disagree"):
+        runner._assert_checkout_import()
 
 
 def test_uncertainty_tutorial_publishes_the_scoped_formula_and_fresh_equality_contracts():

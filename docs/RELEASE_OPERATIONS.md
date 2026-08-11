@@ -70,6 +70,16 @@ gh workflow run publish-pypi.yml --ref $releaseTag `
   -f cuda_run_id=$cudaRunId
 ```
 
+Candidate-authored Python, tutorial, and JavaScript gates run before any release input is created.
+After those gates finish, the workflow refuses reserved release paths, checks the signed tag out a
+second time into a clean directory, and revalidates the tag object, exact commit, and `main`
+ancestry. It then obtains the exact `Artifact byte reproducibility` run ID from the accepted
+external-control snapshot, downloads both clean-build artifact sets and their report from that
+run, and rechecks their environment and byte manifests. The distribution is built once from the
+second checkout and must be byte-identical to both accepted builds before it can be attested or
+uploaded. Missing or expired proof artifacts require a fresh exact-commit reproducibility run;
+they are never bypassed.
+
 Before the draft GitHub Release is finalized, the workflow downloads and attestation-verifies the
 full preflight evidence, then generates `RELEASE_GOVERNANCE.json` and
 `RELEASE_GOVERNANCE.md`. The record binds the release actor, environment reviewer and self-review
@@ -81,6 +91,12 @@ release JSON and per-file Integrity provenance, constrain the DSSE subjects and 
 identity to the exact repository/workflow/environment, and cryptographically verify every file
 with the hash-locked `pypi-attestations` tool before finalizing. Both paths then re-read the final
 GitHub Release and require the service's immutable flag.
+
+GitHub's immutable-Release setting protects the tag and attached assets, but the title and
+release notes remain mutable. The attached `RELEASE_GOVERNANCE.json` and
+`RELEASE_GOVERNANCE.md` governance assets are authoritative. The final REST re-read proves that
+the release notes contained the exact Markdown disclosure at finalization; it does not make that
+body permanent, so any later notes drift must not supersede the retained governance assets.
 
 PyPI publisher configuration cannot be read through a
 public API; the project owner must separately archive direct settings-page evidence for owner
@@ -97,6 +113,16 @@ single OIDC PyPI upload succeeds. Do not rerun all jobs and do not add `skip-exi
 Dispatch `recover-github-release.yml` with the tag and failed source run ID. For the formal drill,
 set `require_staged_drill=true`; the verifier distinguishes that explicit failed staging step from
 an unplanned downstream failure and refuses a successful or ambiguous source run. It will:
+
+```powershell
+gh workflow run recover-github-release.yml --ref $releaseTag `
+  -f tag=$releaseTag `
+  -f source_run_id="<failed-publish-workflow-run-id>" `
+  -f require_staged_drill=true
+```
+
+The `--ref $releaseTag` argument is mandatory: recovery fails unless the workflow execution ref
+is `refs/tags/$releaseTag` and its `GITHUB_SHA` equals the checked-out tag commit.
 
 1. query every jobs page with `filter=all` and require the original build, attestation, and PyPI
    jobs to have completed successfully exactly once in the named `publish-pypi.yml` run on the
@@ -135,6 +161,13 @@ means the checked-in exact node manifest matched collection and all 15 CUDA test
 skips, including adapter prediction/gradients, every vector and CAM gradient family,
 randomisation success/failure, initialized-device RNG byte restoration, dtype/device placement,
 and hook cleanup.
+
+The reviewed policy requires the single-GPU jobs to carry the custom runner label
+`explainiverse-cuda-single` and the two-GPU jobs to carry
+`explainiverse-cuda-two`. Configure the variables to those exact labels and assign each label only
+to capacity whose visible-device topology matches its name. The preflight checks the labels and
+exact device count; the repository administrator must still retain the infrastructure-owner
+record establishing that the selected self-hosted runners are isolated and approved.
 
 As of the 2026-08-11 audit, the repository API reported zero Actions variables and zero registered
 runners. Both variables are therefore unset and no live GPU acceptance exists. A repository

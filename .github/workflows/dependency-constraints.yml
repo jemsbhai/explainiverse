@@ -153,7 +153,7 @@ jobs:
             echo "version=$candidate" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "The prerelease selector failed; no compatibility claim is possible." >> "$GITHUB_STEP_SUMMARY"
+            echo "The prerelease selector failed; no source-compatibility evidence is possible." >> "$GITHUB_STEP_SUMMARY"
             candidate=""
           fi
           export CANDIDATE="$candidate" SELECTOR_STATUS="$status"
@@ -187,8 +187,8 @@ jobs:
               "package": "scikit-image",
               "required_major": 1,
               "candidate": candidate,
-              "compatibility_status": (
-                  "pending"
+              "source_probe_status": (
+                  "pending-source-probe"
                   if candidate
                   else "blocked-no-candidate"
                   if selector_status == 3
@@ -218,11 +218,11 @@ jobs:
       - name: Fail closed while no candidate exists
         if: steps.candidate.outputs.available != 'true'
         run: |
-          echo "No compatibility proof can run; absence is blocked, not a successful probe." >&2
+          echo "No source-compatibility probe can run; absence is blocked, not a successful probe." >&2
           exit 1
 
-  scikit-image-next-major-compatibility:
-    name: scikit-image 1.x prerelease compatibility proof
+  scikit-image-next-major-source-probe:
+    name: scikit-image 1.x prerelease source-compatibility probe
     needs: scikit-image-next-major-discovery
     if: >-
       always() &&
@@ -268,17 +268,18 @@ jobs:
           )
           if record.get("candidate") != os.environ["CANDIDATE"]:
               raise SystemExit("discovery artifact candidate does not match the job output")
-          if record.get("compatibility_status") != "pending":
-              raise SystemExit("discovery artifact is not pending a compatibility proof")
+          if record.get("source_probe_status") != "pending-source-probe":
+              raise SystemExit("discovery artifact is not pending a source-compatibility probe")
           PY
 
-      - name: Install the candidate outside the current declared bound
+      - name: Install the outside-bound candidate for a source-only probe
         env:
           CANDIDATE: ${{ needs.scikit-image-next-major-discovery.outputs.version }}
         run: |
           python -m pip install \
             --editable . \
             "pytest>=8,<9" \
+            "packaging>=24,<27" \
             "build>=1,<2" \
             "twine>=5,<7" \
             "nbformat>=5.10,<6" \
@@ -290,14 +291,19 @@ jobs:
             2>&1 | tee artifacts/scikit-image-prerelease/pre-candidate-pip-check.txt
           python -m pip uninstall --yes explainiverse
           if python -m pip show explainiverse >/dev/null 2>&1; then
-            echo "candidate proof must import the checkout through PYTHONPATH, not installed capped metadata" >&2
+            echo "source-only probe must import the checkout through PYTHONPATH, not installed capped metadata" >&2
             exit 1
           fi
           python -m pip install --upgrade --pre "scikit-image==$CANDIDATE"
           python -c "import skimage; assert skimage.__version__ == '$CANDIDATE'"
           python -m pip check \
-            2>&1 | tee artifacts/scikit-image-prerelease/post-candidate-pip-check.txt
+            2>&1 | tee artifacts/scikit-image-prerelease/post-candidate-dependencies-pip-check.txt
           python -m pip freeze --all > artifacts/scikit-image-prerelease/pip-freeze.txt
+          python scripts/record_dependency_candidate_probe.py \
+            --project-file pyproject.toml \
+            --package scikit-image \
+            --candidate "$CANDIDATE" \
+            --output artifacts/scikit-image-prerelease/candidate-source-probe.json
 
       - name: Exercise localisation and LIME
         run: |
@@ -310,36 +316,60 @@ jobs:
             tests/test_lime_explainer.py \
             2>&1 | tee artifacts/scikit-image-prerelease/pytest.log
 
-      - name: Exercise package and tutorial gates
+      - name: Exercise capped package metadata and source-only tutorial gates
+        env:
+          CANDIDATE: ${{ needs.scikit-image-next-major-discovery.outputs.version }}
         run: |
           python -m build 2>&1 | tee artifacts/scikit-image-prerelease/build.log
           python -m twine check dist/* 2>&1 | tee artifacts/scikit-image-prerelease/twine.log
           sha256sum dist/* > artifacts/scikit-image-prerelease/distribution-sha256.txt
-          python scripts/execute_tutorials.py \
+          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl')
+          test "${#wheels[@]}" -eq 1
+          python scripts/record_dependency_candidate_probe.py \
+            --project-file pyproject.toml \
+            --package scikit-image \
+            --candidate "$CANDIDATE" \
+            --wheel "${wheels[0]}" \
+            --output artifacts/scikit-image-prerelease/candidate-wheel-metadata.json
+          sha256sum \
+            artifacts/scikit-image-prerelease/candidate-source-probe.json \
+            artifacts/scikit-image-prerelease/candidate-wheel-metadata.json \
+            > artifacts/scikit-image-prerelease/candidate-boundary.sha256
+          python scripts/execute_tutorials.py --source-only \
             2>&1 | tee artifacts/scikit-image-prerelease/tutorials.log
 
-      - name: Mark the candidate compatibility proof successful
+      - name: Mark the source-compatibility probe successful
         env:
           EVIDENCE_DIR: artifacts/scikit-image-prerelease
         run: |
+          sha256sum --check "$EVIDENCE_DIR/candidate-boundary.sha256"
           python - <<'PY'
+          import hashlib
           import json
           import os
           from pathlib import Path
 
-          path = Path(os.environ["EVIDENCE_DIR"]) / "selection.json"
+          evidence = Path(os.environ["EVIDENCE_DIR"])
+          path = evidence / "selection.json"
           record = json.loads(path.read_text(encoding="utf-8"))
-          record["compatibility_status"] = "passed"
-          record["proof_commit"] = os.environ["GITHUB_SHA"]
-          record["proof_run_id"] = int(os.environ["GITHUB_RUN_ID"])
+          if record.get("source_probe_status") != "pending-source-probe":
+              raise SystemExit("source probe status changed before finalization")
+          record["source_probe_status"] = "source-probe-passed"
+          record["source_probe_commit"] = os.environ["GITHUB_SHA"]
+          record["source_probe_run_id"] = int(os.environ["GITHUB_RUN_ID"])
+          for field, filename in (
+              ("source_probe_record_sha256", "candidate-source-probe.json"),
+              ("wheel_metadata_record_sha256", "candidate-wheel-metadata.json"),
+          ):
+              record[field] = hashlib.sha256((evidence / filename).read_bytes()).hexdigest()
           path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           PY
 
-      - name: Archive candidate compatibility proof
+      - name: Archive candidate source-compatibility probe
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: scikit-image-prerelease-compatibility-${{ github.run_id }}
+          name: scikit-image-prerelease-source-probe-${{ github.run_id }}
           path: artifacts/scikit-image-prerelease/
           if-no-files-found: error
           retention-days: 180

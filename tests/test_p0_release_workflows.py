@@ -78,11 +78,20 @@ def test_publish_cannot_build_without_preflight_and_real_cuda_edges():
     assert "release-verification/draft-assets" in workflow
     assert "release-verification/final-assets" in workflow
     assert workflow.count("verify_release_recovery.py artifacts") == 2
-    assert "'.immutable' release-verification/final-release.json" in workflow
+    assert "'.draft == false and .prerelease == false and .immutable == true'" in workflow
     assert (
         'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \\\n'
         '            -H "X-GitHub-Api-Version: 2026-03-10"'
     ) in workflow
+    immutable_release_precondition = (
+        'gh api --method GET "repos/$GITHUB_REPOSITORY/immutable-releases" \\\n'
+        '            -H "X-GitHub-Api-Version: 2026-03-10" \\\n'
+        "            > release-verification/immutable-releases.json\n"
+        "          jq -e '.enabled == true' "
+        "release-verification/immutable-releases.json > /dev/null\n"
+        '          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false'
+    )
+    assert immutable_release_precondition in workflow
     assert "Archive normal-path release verification evidence" in workflow
     assert "if: always() && inputs.stage_recovery_drill == false" in workflow
     assert "retention-days: 90" in workflow
@@ -94,15 +103,107 @@ def test_publish_cannot_build_without_preflight_and_real_cuda_edges():
     assert "pypi-attestations-version.txt" in workflow
     assert "--require-hashes" in workflow
     assert "defaults:\n  run:\n    shell: bash" in workflow
+    assert "'.enabled == true' release-verification/immutable-releases.json" in workflow
     build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
     assert "actions: read" in build_job and "attestations: read" in build_job
     assert "sha256sum --check admin-capture.json.sha256" in build_job
     assert "sha256sum --check cuda-evidence.sha256" in build_job
     assert "for evidence in" in build_job
-    assert "audit_typing_readiness.py --distribution" in build_job
-    assert build_job.index("audit_typing_readiness.py --distribution") < build_job.index(
+    assert "release-source/scripts/audit_typing_readiness.py" in build_job
+    assert '--distribution "$artifact"' in build_job
+    assert build_job.index("release-source/scripts/audit_typing_readiness.py") < build_job.index(
         "Upload immutable distributions"
     )
+
+
+def test_publish_rebuilds_a_clean_tag_and_binds_the_attested_reproducibility_bytes():
+    workflow = _read("publish-pypi.yml")
+    build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
+
+    candidate_gates = build_job.index("Run the complete experimental JavaScript gate")
+    reserved_paths = build_job.index("Refuse release inputs created by candidate-authored gates")
+    clean_checkout = build_job.index("Check out a clean release source")
+    clean_reverification = build_job.index("Reverify the clean signed release source")
+    bind_reproducibility = build_job.index("bind the accepted reproducibility artifacts")
+    clean_build = build_job.index("Build once from the clean release checkout")
+    assert (
+        candidate_gates
+        < reserved_paths
+        < clean_checkout
+        < clean_reverification
+        < bind_reproducibility
+        < clean_build
+    )
+
+    assert 'if [[ -e "$path" || -L "$path" ]]' in build_job
+    assert "path: release-source" in build_job
+    assert (
+        build_job.count(
+            'test -z "$(git -C release-source status --porcelain --untracked-files=all)"'
+        )
+        == 2
+    )
+    assert "python release-source/scripts/create_release_governance_record.py" in build_job
+    assert (
+        "cd release-source\n            python scripts/record_release_environment.py" in build_job
+    )
+    assert "--requirements .github/requirements/release-tools.txt" in build_job
+    assert '--output "$GITHUB_WORKSPACE/provenance/release-environment.json"' in build_job
+
+    assert "provenance/reproducibility-expected-run.json" in build_job
+    assert "if len(matches) != 1" in build_job
+    assert "if set(expected_run) != expected_fields" in build_job
+    for field in (
+        "id",
+        "repository",
+        "path",
+        "event",
+        "head_branch",
+        "head_sha",
+        "status",
+        "conclusion",
+        "run_attempt",
+    ):
+        assert f'"{field}": actual.get("{field}")' in build_job or field == "repository"
+    assert 'repository.get("full_name") if isinstance(repository, dict) else None' in build_job
+    assert "if actual_normalized != expected" in build_job
+    assert "live reproducibility run differs from the attested check run" in build_job
+    assert 'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$reproducibility_run_id"' in build_job
+    assert build_job.count('gh run download "$reproducibility_run_id"') == 3
+
+    for name, destination in (
+        ("reproducibility-one", "reproducibility-proof/one"),
+        ("reproducibility-two", "reproducibility-proof/two"),
+        ("reproducibility-report", "reproducibility-proof/report"),
+    ):
+        assert f"--name {name} --dir {destination}" in build_job
+    assert "reproducibility-proof/one/provenance/release-environment.json" in build_job
+    assert "reproducibility-proof/two/provenance/release-environment.json" in build_job
+    assert "reproducibility-proof/one/dist reproducibility-proof/two/dist" in build_job
+    assert "find reproducibility-proof/report -mindepth 1 | wc -l" in build_job
+    for source, accepted in (
+        ("release-environment-one.json", "accepted-reproducibility-environment-one.json"),
+        ("release-environment-two.json", "accepted-reproducibility-environment-two.json"),
+        (
+            "release-environment-comparison.json",
+            "accepted-reproducibility-environment-comparison.json",
+        ),
+        ("reproducibility.json", "accepted-reproducibility-distributions.json"),
+    ):
+        assert source in build_job
+        expected_copy = (
+            f"cp reproducibility-proof/report/{source} \\\n" f"            provenance/{accepted}"
+        )
+        assert expected_copy in build_job
+        assert build_job.index(f"provenance/{accepted}") < build_job.index("Upload hashes and SBOM")
+    assert 'test -f "reproducibility-proof/report/$report"' in build_job
+    assert 'test ! -L "reproducibility-proof/report/$report"' in build_job
+    assert build_job.count("cmp reproducibility-proof/report/") == 4
+
+    assert build_job.count("poetry build") == 1
+    assert '(cd release-source && poetry build --output "$GITHUB_WORKSPACE/dist")' in build_job
+    assert "dist reproducibility-proof/one/dist" in build_job
+    assert "dist reproducibility-proof/two/dist" in build_job
 
 
 def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
@@ -128,7 +229,11 @@ def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
     assert "if: always()" in workflow
     assert "--notes-file provenance/RELEASE_GOVERNANCE.md" in workflow
     assert "recovery draft omitted the original governance disclosure" in workflow
-    assert "'.immutable' recovery/final-github-release-api.json" in workflow
+    assert "'.isDraft == false and .isPrerelease == false'" in workflow
+    assert "'.immutable == true' recovery/final-github-release-api.json" in workflow
+    assert "verify_release_recovery.py release-body" in workflow
+    assert "--release-json recovery/final-github-release-api.json" in workflow
+    assert "--disclosure provenance/RELEASE_GOVERNANCE.md" in workflow
     assert (
         'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \\\n'
         '            -H "X-GitHub-Api-Version: 2026-03-10"'
@@ -158,7 +263,7 @@ def test_cuda_workflow_has_required_and_scheduled_minimum_latest_zero_skip_lanes
     assert "torch.cuda.device_count() == REQUIRED_CUDA_DEVICES" in suite
     assert 'CUDA_VISIBLE_DEVICES: "0"' in workflow
     assert 'CUDA_VISIBLE_DEVICES: "0,1"' in workflow
-    assert workflow.count("Require an approved Linux GPU runner") == 2
+    assert workflow.count("Require Linux GPU runner OS") == 2
     assert "defaults:\n  run:\n    shell: bash" in workflow
     skip_policy = (ROOT / "tests_cuda" / "conftest.py").read_text(encoding="utf-8")
     assert "report.skipped" in skip_policy
@@ -166,7 +271,7 @@ def test_cuda_workflow_has_required_and_scheduled_minimum_latest_zero_skip_lanes
     publish = _read("publish-pypi.yml")
     assert 'EXPLAINIVERSE_ENFORCE_CUDA_MANIFEST: "1"' in publish
     publish_cuda = publish.split("  cuda-release:", 1)[1].split("\n  build:", 1)[0]
-    assert "Require an approved Linux GPU runner" in publish_cuda
+    assert "Require Linux GPU runner OS" in publish_cuda
     assert 'CUDA_VISIBLE_DEVICES: "0"' in publish_cuda
 
 
@@ -209,7 +314,7 @@ def test_dependency_schedule_covers_each_declared_edge_and_next_major_probe():
         in workflow
     )
     assert "scikit-image 1.x prerelease availability (blocking monitor)" in workflow
-    assert "scikit-image 1.x prerelease compatibility proof" in workflow
+    assert "scikit-image 1.x prerelease source-compatibility probe" in workflow
     assert "select_dependency_prerelease.py" in workflow
     assert '--metadata "$EVIDENCE_DIR/pypi-metadata.json"' in workflow
     assert "pypi-metadata.sha256" in workflow
@@ -225,16 +330,24 @@ def test_dependency_schedule_covers_each_declared_edge_and_next_major_probe():
     assert workflow.count("tests/reference/test_ref_deeplift.py") == 2
     assert "import captum" in workflow
     assert "python -m build" in workflow
-    assert "python scripts/execute_tutorials.py" in workflow
+    assert "python scripts/execute_tutorials.py --source-only" in workflow
     assert "pip-freeze.txt" in workflow
     assert "pre-candidate-pip-check.txt" in workflow
-    assert "post-candidate-pip-check.txt" in workflow
+    assert "post-candidate-dependencies-pip-check.txt" in workflow
+    assert "post-candidate-pip-check.txt" not in workflow
     assert "python -m pip uninstall --yes explainiverse" in workflow
     assert "PYTHONPATH: ${{ github.workspace }}/src" in workflow
     assert '--no-deps "scikit-image==$CANDIDATE"' not in workflow
     assert "distribution-sha256.txt" in workflow
+    assert workflow.count("python scripts/record_dependency_candidate_probe.py") == 2
+    assert "candidate-source-probe.json" in workflow
+    assert "candidate-wheel-metadata.json" in workflow
+    assert '--wheel "${wheels[0]}"' in workflow
+    assert 'record["source_probe_status"] = "source-probe-passed"' in workflow
+    assert 'record["source_probe_commit"] = os.environ["GITHUB_SHA"]' in workflow
+    assert "candidate-boundary.sha256" in workflow
     assert "--junitxml artifacts/scikit-image-prerelease/pytest.xml" in workflow
-    assert "Archive candidate compatibility proof" in workflow
+    assert "Archive candidate source-compatibility probe" in workflow
 
 
 def test_required_context_policy_matches_new_p0_and_preserved_p1_gates():
@@ -300,3 +413,10 @@ def test_release_runbook_records_legacy_incident_without_fabricating_recovery():
     assert "e2ab525f720d9970f25c307be84b9a5a6bb5feb612a4457ba9d72925cf2af68b" in runbook
     assert "unsigned" in runbook
     assert "cannot recreate original provenance" in runbook
+
+
+def test_release_runbook_dispatches_recovery_from_the_tag_and_defers_to_assets():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    assert "gh workflow run recover-github-release.yml --ref $releaseTag" in runbook
+    assert "release notes remain mutable" in runbook
+    assert "governance assets are authoritative" in runbook

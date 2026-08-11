@@ -207,9 +207,17 @@ def verify_provenance(
             if not transparency:
                 raise ValueError(f"PyPI attestation for {filename!r} has no transparency entry")
             if statement.get("predicateType") == _PYPI_PUBLISH_ATTESTATION_V1:
-                if statement.get("predicate") is not None:
+                if "predicate" not in statement:
                     raise ValueError(
-                        f"PyPI publish attestation for {filename!r} has a non-null predicate"
+                        f"PyPI publish attestation for {filename!r} must contain a predicate"
+                    )
+                predicate = statement["predicate"]
+                if predicate is not None and (
+                    not isinstance(predicate, Mapping) or bool(predicate)
+                ):
+                    raise ValueError(
+                        f"PyPI publish attestation for {filename!r} predicate must be "
+                        "JSON null or an empty object"
                     )
                 publish_attestation_count += 1
 

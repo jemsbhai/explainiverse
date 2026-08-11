@@ -1,6 +1,6 @@
-# Migrating from 0.14 to the 0.15 development line
+# Migrating from 0.14 to the 0.15 release line
 
-This document records intentional corrective tightenings in `0.15.0.dev0`. They prevent
+This document records intentional corrective tightenings in `0.15.0`. They prevent
 ambiguous or fabricated results; they are not compatibility shims that preserve every
 `0.14.0` edge case.
 

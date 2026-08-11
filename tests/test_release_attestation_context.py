@@ -59,3 +59,18 @@ def test_publish_workflow_runs_the_attestation_context_guard():
         encoding="utf-8"
     )
     assert "python scripts/validate_release_attestation_context.py" in workflow
+
+
+def test_recovery_workflow_binds_its_dispatch_ref_and_sha_before_remote_evidence():
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "recover-github-release.yml"
+    ).read_text(encoding="utf-8")
+    checkout = workflow.index("Check out the immutable release tag")
+    guard = workflow.index("python scripts/validate_release_attestation_context.py")
+    source_run_query = workflow.index(
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID"'
+    )
+    assert "ref: ${{ inputs.tag }}" in workflow
+    dispatch_guard = workflow.index('expected_ref="refs/tags/$RELEASE_TAG"')
+    assert dispatch_guard < checkout
+    assert checkout < guard < source_run_query
