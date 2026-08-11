@@ -27,6 +27,7 @@ tie-invariant.
 
 import re
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, localcontext
 from numbers import Integral, Real
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -41,6 +42,17 @@ except AttributeError:
 
 from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation._utils import (
+    _stable_dot,
+    _stable_mean,
+    _stable_mean_difference,
+    _stable_mean_square,
+    _stable_pearson,
+    _stable_pearson_affine,
+    _stable_pearson_decimal_affine,
+    _stable_spearman,
+    _stable_spearman_affine,
+    _stable_std,
+    _stable_sum,
     apply_feature_mask,
     compute_baseline_values,
     get_prediction_value,
@@ -90,6 +102,179 @@ def _validate_nonnegative_real(value, name: str) -> float:
     return result
 
 
+def _finite_attribution_sum(values: np.ndarray, context: str) -> float:
+    """Sum finite attributions without losing representable cancellation."""
+    result = float(_stable_sum(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} attribution sum is not representable")
+    return result
+
+
+def _finite_mean(values: Union[Sequence[float], np.ndarray], context: str) -> float:
+    result = float(_stable_mean(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} mean is not representable")
+    return result
+
+
+def _finite_std(values: Union[Sequence[float], np.ndarray], context: str) -> float:
+    result = float(_stable_std(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} standard deviation is not representable")
+    return result
+
+
+def _finite_dot(left: np.ndarray, right: np.ndarray, context: str) -> float:
+    result = _stable_dot(left, right)
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} dot product is not representable")
+    return result
+
+
+def _finite_difference(left: float, right: float, context: str) -> float:
+    result = float(_stable_sum(np.asarray([left, -right], dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} difference is not representable")
+    return result
+
+
+def _finite_ratio(numerator: float, denominator: float, context: str) -> float:
+    """Divide finite binary64 values with one final, checked rounding."""
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator == 0.0:
+        raise ValueError(f"{context} requires finite values and a non-zero denominator")
+    with localcontext() as decimal_context:
+        decimal_context.prec = 2500
+        exact = Decimal.from_float(float(numerator)) / Decimal.from_float(float(denominator))
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError(f"{context} ratio is not representable")
+    return result
+
+
+def _finite_affine_normalized_trapezoid(
+    y: Union[Sequence[float], np.ndarray],
+    x: Union[Sequence[float], np.ndarray],
+    normalizer: float,
+    *,
+    offset: float,
+    multiplier: int,
+    context: str,
+) -> float:
+    """Evaluate ``offset * span + multiplier * integral(y) / normalizer`` exactly.
+
+    The aggregate may be representable even when individual normalized curve
+    points or an intermediate raw integral are not.
+    """
+    y_values = np.asarray(y, dtype=np.float64)
+    x_values = np.asarray(x, dtype=np.float64)
+    if y_values.ndim != 1 or x_values.shape != y_values.shape or y_values.size < 2:
+        raise ValueError("trapezoid inputs must be paired one-dimensional arrays")
+    if not np.all(np.isfinite(y_values)) or not np.all(np.isfinite(x_values)):
+        raise ValueError("trapezoid inputs must contain only finite values")
+    if not np.isfinite(normalizer) or normalizer == 0.0 or not np.isfinite(offset):
+        raise ValueError(f"{context} requires a finite non-zero normalizer")
+    if multiplier not in (-1, 1):
+        raise ValueError("trapezoid multiplier must be -1 or 1")
+
+    with localcontext() as decimal_context:
+        decimal_context.prec = 3000 + len(str(y_values.size))
+        integral = _exact_trapezoid_integral(y_values, x_values)
+        span = Decimal.from_float(float(x_values[-1])) - Decimal.from_float(float(x_values[0]))
+        exact = Decimal.from_float(float(offset)) * span + Decimal(
+            multiplier
+        ) * integral / Decimal.from_float(float(normalizer))
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError(f"{context} is not representable")
+    return result
+
+
+def _exact_trapezoid_integral(y_values: np.ndarray, x_values: np.ndarray) -> Decimal:
+    """Integrate binary64 samples, preserving an intended uniform grid exactly."""
+    y_decimal = [Decimal.from_float(float(value)) for value in y_values]
+    x_decimal = [Decimal.from_float(float(value)) for value in x_values]
+    intended_uniform = np.array_equal(
+        x_values,
+        np.linspace(float(x_values[0]), float(x_values[-1]), x_values.size),
+    )
+    if intended_uniform:
+        weighted_sum = (
+            y_decimal[0] / Decimal(2)
+            + sum(y_decimal[1:-1], start=Decimal(0))
+            + y_decimal[-1] / Decimal(2)
+        )
+        return weighted_sum * (x_decimal[-1] - x_decimal[0]) / Decimal(y_values.size - 1)
+    return sum(
+        (
+            (y_decimal[index] + y_decimal[index + 1])
+            * (x_decimal[index + 1] - x_decimal[index])
+            / Decimal(2)
+            for index in range(y_values.size - 1)
+        ),
+        start=Decimal(0),
+    )
+
+
+def _finite_trapezoid(
+    y: Union[Sequence[float], np.ndarray],
+    x: Union[Sequence[float], np.ndarray],
+    context: str,
+) -> float:
+    y_values = np.asarray(y, dtype=np.float64)
+    x_values = np.asarray(x, dtype=np.float64)
+    if y_values.ndim != 1 or x_values.shape != y_values.shape or y_values.size < 2:
+        raise ValueError("trapezoid inputs must be paired one-dimensional arrays")
+    if not np.all(np.isfinite(y_values)) or not np.all(np.isfinite(x_values)):
+        raise ValueError("trapezoid inputs must contain only finite values")
+    with localcontext() as decimal_context:
+        decimal_context.prec = 3000 + len(str(y_values.size))
+        exact = _exact_trapezoid_integral(y_values, x_values)
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError(f"{context} trapezoid integral is not representable")
+    return result
+
+
+def _finite_rational_trapezoid(
+    y: Union[Sequence[float], np.ndarray],
+    numerators: Sequence[int],
+    denominator: int,
+    context: str,
+) -> float:
+    """Integrate at exact rational coordinates used by feature-count curves."""
+    y_values = np.asarray(y, dtype=np.float64)
+    coordinate_values = np.asarray(numerators)
+    if (
+        y_values.ndim != 1
+        or coordinate_values.shape != y_values.shape
+        or y_values.size < 2
+        or isinstance(denominator, bool)
+        or not isinstance(denominator, (int, np.integer))
+        or int(denominator) <= 0
+    ):
+        raise ValueError("rational trapezoid inputs must be paired with a positive denominator")
+    if not np.all(np.isfinite(y_values)) or not np.issubdtype(coordinate_values.dtype, np.integer):
+        raise ValueError("rational trapezoid values must be finite and coordinates integral")
+    if np.any(np.diff(coordinate_values) < 0):
+        raise ValueError("rational trapezoid coordinates must be non-decreasing")
+    with localcontext() as decimal_context:
+        decimal_context.prec = 3000 + len(str(y_values.size))
+        y_decimal = [Decimal.from_float(float(value)) for value in y_values]
+        integral = sum(
+            (
+                (y_decimal[index] + y_decimal[index + 1])
+                * Decimal(int(coordinate_values[index + 1] - coordinate_values[index]))
+                / (Decimal(2) * Decimal(int(denominator)))
+                for index in range(y_values.size - 1)
+            ),
+            start=Decimal(0),
+        )
+        result = float(integral)
+    if not np.isfinite(result) or (result == 0.0 and integral != 0):
+        raise FloatingPointError(f"{context} trapezoid integral is not representable")
+    return result
+
+
 def _defined_pearson(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
     """Compute Pearson's r, rejecting samples for which it is undefined."""
     a = np.asarray(a, dtype=float)
@@ -98,12 +283,24 @@ def _defined_pearson(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
         raise ValueError("Pearson correlation requires two paired observations")
     if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
         raise ValueError("Pearson correlation inputs must be finite")
-    if np.ptp(a) == 0.0 or np.ptp(b) == 0.0:
-        raise ValueError("Pearson correlation is undefined for a constant input")
-    correlation, p_value = stats.pearsonr(a, b)
+    correlation = _stable_pearson(a, b)
+    p_value = _pearson_p_value(correlation, a.size)
     if not np.isfinite(correlation) or not np.isfinite(p_value):
         raise ValueError("Pearson correlation is undefined for these observations")
     return float(correlation), float(p_value)
+
+
+def _pearson_p_value(correlation: float, sample_count: int) -> float:
+    """Return Pearson's two-sided p-value from a stable coefficient and count."""
+    if sample_count < 2:
+        raise ValueError("Pearson p-value requires at least two observations")
+    if sample_count == 2:
+        return 1.0
+    magnitude = abs(float(correlation))
+    if magnitude >= 1.0:
+        return 0.0
+    statistic = magnitude * np.sqrt((sample_count - 2) / (1.0 - magnitude * magnitude))
+    return float(2.0 * stats.t.sf(statistic, df=sample_count - 2))
 
 
 def _defined_spearman(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
@@ -114,9 +311,10 @@ def _defined_spearman(a: np.ndarray, b: np.ndarray) -> Tuple[float, float]:
         raise ValueError("Spearman correlation requires two paired observations")
     if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
         raise ValueError("Spearman correlation inputs must be finite")
-    if np.ptp(a) == 0.0 or np.ptp(b) == 0.0:
+    if np.min(a) == np.max(a) or np.min(b) == np.max(b):
         raise ValueError("Spearman correlation is undefined for a constant input")
-    correlation, p_value = stats.spearmanr(a, b)
+    correlation = _stable_spearman(a, b)
+    _, p_value = stats.spearmanr(a, b)
     if not np.isfinite(correlation):
         raise ValueError("Spearman correlation is undefined for these observations")
     return float(correlation), float(p_value) if np.isfinite(p_value) else np.nan
@@ -191,8 +389,8 @@ def _summarize_scores(scores: Sequence[float]) -> Dict[str, float]:
     if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
         raise ValueError("batch evaluation produced no finite scores")
     return {
-        "mean": float(np.mean(values)),
-        "std": float(np.std(values)),
+        "mean": _finite_mean(values, "batch score"),
+        "std": _finite_std(values, "batch score"),
         "min": float(np.min(values)),
         "max": float(np.max(values)),
         "n_samples": int(values.size),
@@ -385,8 +583,8 @@ def _noisy_linear_impute(
     if len(remaining_indices) == 0:
         # No remaining features to predict from - use column means + noise
         for j in removed_indices:
-            col_mean = np.mean(background_data[:, j])
-            col_std = np.std(background_data[:, j])
+            col_mean = _finite_mean(background_data[:, j], "imputation column")
+            col_std = _finite_std(background_data[:, j], "imputation column")
             imputed[j] = col_mean + rng.normal(0, noise_scale * col_std)
         return imputed
 
@@ -415,7 +613,7 @@ def _noisy_linear_impute(
             # Compute residual standard deviation
             y_pred_train = X_aug @ coeffs
             residuals = y_target - y_pred_train
-            residual_std = np.std(residuals)
+            residual_std = _finite_std(residuals, "imputation residual")
 
             # Add calibrated noise
             noise = rng.normal(0, noise_scale * max(residual_std, 1e-10))
@@ -423,8 +621,8 @@ def _noisy_linear_impute(
 
         except np.linalg.LinAlgError:
             # Fallback: use column mean + noise if linear fit fails
-            col_mean = np.mean(y_target)
-            col_std = np.std(y_target)
+            col_mean = _finite_mean(y_target, "imputation fallback column")
+            col_std = _finite_std(y_target, "imputation fallback column")
             imputed[j] = col_mean + rng.normal(0, noise_scale * max(col_std, 1e-10))
 
     return imputed
@@ -590,7 +788,6 @@ def compute_road(
     original_value = _get_target_class_prediction(model, instance.reshape(1, -1), target_class)
 
     # Evaluate at each removal percentage
-    prediction_changes = []
     predictions = []
     n_removed_list = []
 
@@ -623,16 +820,26 @@ def compute_road(
         imputed_value = _get_target_class_prediction(model, imputed.reshape(1, -1), target_class)
 
         predictions.append(imputed_value)
-        # Signed output drop (positive = tracked output decreased)
-        prediction_changes.append(original_value - imputed_value)
 
-    prediction_change_array = np.asarray(prediction_changes, dtype=float)
     prediction_array = np.asarray(predictions, dtype=float)
 
     # Score: mean prediction change across percentages
-    score = float(np.mean(prediction_change_array))
+    score = _stable_mean_difference(original_value, prediction_array)
 
     if return_details:
+        try:
+            prediction_change_array = np.asarray(
+                [
+                    _finite_difference(original_value, value, "ROAD prediction change")
+                    for value in prediction_array
+                ],
+                dtype=np.float64,
+            )
+        except FloatingPointError as exc:
+            raise FloatingPointError(
+                "return_details cannot represent an individual ROAD prediction_change; "
+                "use return_details=False for the representable aggregate"
+            ) from exc
         return {
             "score": score,
             "prediction_changes": prediction_change_array,
@@ -725,7 +932,7 @@ def compute_road_combined(
     return {
         "morf": float(morf_score),
         "lerf": float(lerf_score),
-        "gap": float(morf_score - lerf_score),
+        "gap": _finite_difference(morf_score, lerf_score, "ROAD combined gap"),
         "scores": {"morf": float(morf_score), "lerf": float(lerf_score)},
     }
 
@@ -936,6 +1143,7 @@ def compute_deletion_auc(
     # Build the deletion curve
     predictions = [original_pred]
     fractions = [0.0]
+    fraction_counts = [0]
     current = instance.copy()
     prev_count = 0
 
@@ -949,6 +1157,7 @@ def compute_deletion_auc(
         pred_val = _get_target_class_prediction(model, current.reshape(1, -1), target_class)
         predictions.append(pred_val)
         fractions.append(float(count) / float(n_features))
+        fraction_counts.append(int(count))
 
     prediction_array = np.asarray(predictions, dtype=float)
     fraction_array = np.asarray(fractions, dtype=float)
@@ -956,7 +1165,12 @@ def compute_deletion_auc(
     # Compute AUC using trapezoidal rule
     # x-axis: fraction of features removed [0, 1]
     # y-axis: raw fixed-target output
-    auc = float(_trapezoid(prediction_array, fraction_array))
+    auc = _finite_rational_trapezoid(
+        prediction_array,
+        fraction_counts,
+        n_features,
+        "deletion AUC",
+    )
 
     if return_curve:
         return {
@@ -1138,6 +1352,7 @@ def compute_insertion_auc(
     # Build the insertion curve
     predictions = [baseline_pred]
     fractions = [0.0]
+    fraction_counts = [0]
     prev_count = 0
 
     for count in insertion_counts:
@@ -1150,6 +1365,7 @@ def compute_insertion_auc(
         pred_val = _get_target_class_prediction(model, current.reshape(1, -1), target_class)
         predictions.append(pred_val)
         fractions.append(float(count) / float(n_features))
+        fraction_counts.append(int(count))
 
     prediction_array = np.asarray(predictions, dtype=float)
     fraction_array = np.asarray(fractions, dtype=float)
@@ -1157,7 +1373,12 @@ def compute_insertion_auc(
     # Compute AUC using trapezoidal rule
     # x-axis: fraction of features inserted [0, 1]
     # y-axis: raw fixed-target output
-    auc = float(_trapezoid(prediction_array, fraction_array))
+    auc = _finite_rational_trapezoid(
+        prediction_array,
+        fraction_counts,
+        n_features,
+        "insertion AUC",
+    )
 
     if return_curve:
         return {
@@ -1290,7 +1511,7 @@ def compute_insertion_deletion_auc(
     return {
         "insertion_auc": insertion_auc,
         "deletion_auc": deletion_auc,
-        "delta": insertion_auc - deletion_auc,
+        "delta": _finite_difference(insertion_auc, deletion_auc, "insertion-deletion AUC delta"),
     }
 
 
@@ -1371,7 +1592,7 @@ def compute_faithfulness_estimate(
 
     if subset_size == 1:
         # Single-feature perturbation: evaluate each feature individually
-        prediction_changes = []
+        perturbed_values = []
         attribution_values = []
 
         for i in range(n_features):
@@ -1381,15 +1602,16 @@ def compute_faithfulness_estimate(
                 model, perturbed.reshape(1, -1), target_class
             )
 
-            prediction_changes.append(original_value - perturbed_value)
+            perturbed_values.append(perturbed_value)
             attribution_values.append(attr_array[i])
 
-        corr, _ = _defined_pearson(np.asarray(attribution_values), np.asarray(prediction_changes))
-        return corr
+        return _stable_pearson_affine(
+            np.asarray(attribution_values), original_value, np.asarray(perturbed_values)
+        )
 
     else:
         # Random subset perturbation
-        prediction_changes = []
+        perturbed_values = []
         attribution_sums = []
 
         for _ in range(n_subsets):
@@ -1404,16 +1626,18 @@ def compute_faithfulness_estimate(
             perturbed_value = _get_target_class_prediction(
                 model, perturbed.reshape(1, -1), target_class
             )
-            change = original_value - perturbed_value
-
             # Sum of attributions in subset
-            attr_sum = np.sum(attr_array[subset_indices])
+            attr_sum = sum(
+                (Decimal.from_float(float(value)) for value in attr_array[subset_indices]),
+                start=Decimal(0),
+            )
 
-            prediction_changes.append(change)
+            perturbed_values.append(perturbed_value)
             attribution_sums.append(attr_sum)
 
-        corr, _ = _defined_pearson(np.asarray(attribution_sums), np.asarray(prediction_changes))
-        return corr
+        return _stable_pearson_decimal_affine(
+            attribution_sums, original_value, np.asarray(perturbed_values)
+        )
 
 
 def compute_batch_faithfulness_estimate(
@@ -1557,15 +1781,26 @@ def compute_irof(
 
     # IROF's segment equation uses mean L1 relevance. The signed branch is an
     # explicit option of this one-dimensional adaptation.
-    segment_importance = np.zeros(n_segments)
-    for i, segment in enumerate(segments):
-        if use_absolute:
-            segment_importance[i] = np.mean(np.abs(attr_array[segment]))
-        else:
-            segment_importance[i] = np.mean(attr_array[segment])
+    segment_importance_exact = []
+    for segment in segments:
+        segment_values = np.abs(attr_array[segment]) if use_absolute else attr_array[segment]
+        segment_importance_exact.append(
+            sum(
+                (Decimal.from_float(float(value)) for value in segment_values),
+                start=Decimal(0),
+            )
+            / Decimal(len(segment))
+        )
 
     # Sort segments by importance (descending - most important first)
-    sorted_segment_indices = np.argsort(-segment_importance, kind="stable")
+    sorted_segment_indices = np.asarray(
+        sorted(
+            range(n_segments),
+            key=segment_importance_exact.__getitem__,
+            reverse=True,
+        ),
+        dtype=np.int64,
+    )
 
     # Resolve the explanation's declared output once, then keep it fixed.
     target_class = _resolve_target_output(model, instance, explanation, target_class)
@@ -1593,15 +1828,50 @@ def compute_irof(
 
         predictions.append(current_pred)
 
-    prediction_array = np.asarray(predictions, dtype=float)
-    normalised_predictions = prediction_array / original_value
-    prediction_drops = 1.0 - normalised_predictions
-
     # Per-instance normalized area over the curve.
+    prediction_array = np.asarray(predictions, dtype=float)
     x = np.linspace(0, 1, len(prediction_array))
-    aoc = _trapezoid(prediction_drops, x)
+    aoc = _finite_affine_normalized_trapezoid(
+        prediction_array,
+        x,
+        original_value,
+        offset=1.0,
+        multiplier=-1,
+        context="IROF area over curve",
+    )
 
     if return_details:
+        segment_importance = np.asarray(
+            [float(value) for value in segment_importance_exact], dtype=np.float64
+        )
+        if np.any(~np.isfinite(segment_importance)) or any(
+            result == 0.0 and exact != 0
+            for result, exact in zip(segment_importance, segment_importance_exact)
+        ):
+            raise FloatingPointError(
+                "IROF scalar area is representable, but an exact segment importance "
+                "cannot be represented in the requested details"
+            )
+        try:
+            normalised_predictions = np.asarray(
+                [
+                    _finite_ratio(value, original_value, "IROF normalized prediction")
+                    for value in prediction_array
+                ],
+                dtype=float,
+            )
+            prediction_drops = np.asarray(
+                [
+                    _finite_difference(1.0, value, "IROF normalized prediction drop")
+                    for value in normalised_predictions
+                ],
+                dtype=float,
+            )
+        except FloatingPointError as exc:
+            raise FloatingPointError(
+                "IROF scalar area is representable, but the requested per-step "
+                "normalized details are not representable"
+            ) from exc
         return {
             "aoc": float(aoc),
             "curve": prediction_drops,
@@ -1610,6 +1880,7 @@ def compute_irof(
             "segment_order": sorted_segment_indices.tolist(),
             "segments": segments,
             "segment_importance": segment_importance,
+            "segment_importance_exact_decimal": [str(value) for value in segment_importance_exact],
             "n_segments": n_segments,
             "original_prediction": original_value,
         }
@@ -1697,7 +1968,7 @@ def compute_irof_multi_segment(
         )
         scores[seg_size] = score
 
-    mean_score = np.mean(list(scores.values()))
+    mean_score = _finite_mean(list(scores.values()), "IROF segment score")
 
     return {
         "mean": float(mean_score),
@@ -1881,7 +2152,7 @@ def compute_infidelity(
         raise ValueError("subset_size cannot exceed the number of features")
 
     # Monte Carlo sampling for expectation
-    squared_errors = []
+    residuals = []
     expected_changes = []
     actual_changes = []
 
@@ -1893,7 +2164,7 @@ def compute_infidelity(
             perturbed = instance - perturbation
 
             # Expected change: φ(x)ᵀ · I
-            expected_change = np.dot(attr_array, perturbation)
+            expected_change = _finite_dot(attr_array, perturbation, "infidelity")
 
         elif perturbation_type == "square":
             # Square/binary mask perturbation
@@ -1910,7 +2181,7 @@ def compute_infidelity(
                     perturbed[i] = baseline_values[i]
 
             # Expected change: φ(x)ᵀ · I (using the actual perturbation magnitude)
-            expected_change = np.dot(attr_array, perturbation)
+            expected_change = _finite_dot(attr_array, perturbation, "infidelity")
 
         elif perturbation_type == "subset":
             # Random subset perturbation
@@ -1926,7 +2197,7 @@ def compute_infidelity(
                 perturbed[idx] = baseline_values[idx]
 
             # Expected change: φ(x)ᵀ · I
-            expected_change = np.dot(attr_array, perturbation)
+            expected_change = _finite_dot(attr_array, perturbation, "infidelity")
 
         # Get perturbed prediction
         perturbed_value = _get_target_class_prediction(
@@ -1934,25 +2205,36 @@ def compute_infidelity(
         )
 
         # Actual change: f(x) - f(x - I)
-        actual_change = original_value - perturbed_value
+        actual_change = float(
+            _stable_sum(np.asarray([original_value, -perturbed_value], dtype=np.float64))
+        )
+        if not np.isfinite(actual_change):
+            raise FloatingPointError("infidelity actual change is not representable")
 
         # Squared error: (expected - actual)²
-        sq_error = (expected_change - actual_change) ** 2
+        residual = _finite_difference(expected_change, actual_change, "infidelity")
 
-        squared_errors.append(sq_error)
+        residuals.append(residual)
         expected_changes.append(expected_change)
         actual_changes.append(actual_change)
 
-    squared_error_array = np.asarray(squared_errors, dtype=float)
+    residual_array = np.asarray(residuals, dtype=float)
     expected_change_array = np.asarray(expected_changes, dtype=float)
     actual_change_array = np.asarray(actual_changes, dtype=float)
 
     # Infidelity is the mean squared error
-    infidelity = float(np.mean(squared_error_array))
-    if not np.isfinite(infidelity):
-        raise ValueError("infidelity is non-finite")
+    infidelity = _stable_mean_square(residual_array)
 
     if return_details:
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            squared_error_array = residual_array * residual_array
+        if not np.all(np.isfinite(squared_error_array)) or np.any(
+            (squared_error_array == 0.0) & (residual_array != 0.0)
+        ):
+            raise FloatingPointError(
+                "return_details cannot represent individual infidelity squared_errors; "
+                "use return_details=False for the representable aggregate"
+            )
         return {
             "infidelity": infidelity,
             "squared_errors": squared_error_array,
@@ -2041,7 +2323,7 @@ def compute_infidelity_multi_perturbation(
         )
         scores[ptype] = score
 
-    mean_score = float(np.mean(list(scores.values())))
+    mean_score = _finite_mean(list(scores.values()), "multi-perturbation infidelity")
     if not np.isfinite(mean_score):
         raise ValueError("multi-perturbation mean is non-finite")
 
@@ -2207,7 +2489,6 @@ def compute_selectivity(
     # Track predictions and drops at each step
     # Step 0: no features removed (drop = 0)
     predictions = [original_value]
-    prediction_drops = [0.0]  # f(x) - f(x) = 0
 
     # Remove features one by one (most important first)
     for k in range(n_steps):
@@ -2220,16 +2501,27 @@ def compute_selectivity(
 
         predictions.append(current_pred)
         # Prediction drop: f(x) - f(x_{1..k})
-        prediction_drops.append(original_value - current_pred)
 
     prediction_array = np.asarray(predictions, dtype=float)
-    prediction_drop_array = np.asarray(prediction_drops, dtype=float)
 
     # Compute AOPC: average of prediction drops across all steps
     # AOPC = (1/(K+1)) * Σₖ₌₀ᴷ [f(x) - f(x_{1..k})]
-    aopc = np.mean(prediction_drop_array)
+    aopc = _stable_mean_difference(original_value, prediction_array)
 
     if return_details:
+        try:
+            prediction_drop_array = np.asarray(
+                [
+                    _finite_difference(original_value, value, "selectivity drop")
+                    for value in prediction_array
+                ],
+                dtype=np.float64,
+            )
+        except FloatingPointError as exc:
+            raise FloatingPointError(
+                "return_details cannot represent an individual selectivity prediction_drop; "
+                "use return_details=False for the representable aggregate"
+            ) from exc
         return {
             "aopc": float(aopc),
             "prediction_drops": prediction_drop_array,
@@ -2383,7 +2675,7 @@ def compute_sensitivity_n(
 
     # Sample random subsets and compute correlations
     attribution_sums = []
-    prediction_drops = []
+    perturbed_values = []
     subsets = []
 
     for _ in range(n_subsets):
@@ -2392,10 +2684,11 @@ def compute_sensitivity_n(
         subsets.append(subset.tolist())
 
         # Compute sum of attributions in subset
-        if use_absolute:
-            attr_sum = np.sum(np.abs(attr_array[subset]))
-        else:
-            attr_sum = np.sum(attr_array[subset])
+        subset_values = np.abs(attr_array[subset]) if use_absolute else attr_array[subset]
+        attr_sum = sum(
+            (Decimal.from_float(float(value)) for value in subset_values),
+            start=Decimal(0),
+        )
         attribution_sums.append(attr_sum)
 
         # Create perturbed instance with subset features removed
@@ -2408,16 +2701,36 @@ def compute_sensitivity_n(
             model, perturbed.reshape(1, -1), target_class
         )
 
-        # Prediction drop (positive = removing features decreased prediction)
-        drop = original_value - perturbed_value
-        prediction_drops.append(drop)
+        perturbed_values.append(perturbed_value)
 
-    attribution_sum_array = np.asarray(attribution_sums, dtype=float)
-    prediction_drop_array = np.asarray(prediction_drops, dtype=float)
-
-    corr, p_value = _defined_pearson(attribution_sum_array, prediction_drop_array)
+    perturbed_array = np.asarray(perturbed_values, dtype=float)
+    corr = _stable_pearson_decimal_affine(attribution_sums, original_value, perturbed_array)
 
     if return_details:
+        attribution_sum_array = np.asarray(
+            [float(value) for value in attribution_sums], dtype=np.float64
+        )
+        if np.any(~np.isfinite(attribution_sum_array)) or any(
+            result == 0.0 and exact != 0
+            for result, exact in zip(attribution_sum_array, attribution_sums)
+        ):
+            raise FloatingPointError(
+                "Sensitivity-n scalar correlation is representable, but an exact "
+                "attribution_sum cannot be represented in the requested details"
+            )
+        try:
+            prediction_drop_array = np.asarray(
+                [
+                    _finite_difference(original_value, value, "Sensitivity-n prediction drop")
+                    for value in perturbed_array
+                ]
+            )
+        except FloatingPointError as exc:
+            raise FloatingPointError(
+                "Sensitivity-n scalar correlation is representable, but the requested "
+                "individual prediction_drops are not representable"
+            ) from exc
+        p_value = _pearson_p_value(corr, attribution_sum_array.size)
         return {
             "correlation": float(corr),
             "p_value": float(p_value),
@@ -2518,7 +2831,7 @@ def compute_sensitivity_n_multi(
         )
         scores[n] = score
 
-    mean_score = np.mean(list(scores.values()))
+    mean_score = _finite_mean(list(scores.values()), "Sensitivity-n score")
 
     return {
         "mean": float(mean_score),
@@ -2665,16 +2978,25 @@ def compute_region_perturbation(
     n_regions = len(regions)
 
     # Compute region importance (sum of attributions in each region)
-    region_importance = []
+    region_importance_exact = []
     for region in regions:
-        if use_absolute:
-            importance = np.sum(np.abs(attr_array[region]))
-        else:
-            importance = np.sum(attr_array[region])
-        region_importance.append(importance)
+        region_values = np.abs(attr_array[region]) if use_absolute else attr_array[region]
+        region_importance_exact.append(
+            sum(
+                (Decimal.from_float(float(value)) for value in region_values),
+                start=Decimal(0),
+            )
+        )
 
     # Sort regions by importance (descending - most important first)
-    sorted_region_indices = np.argsort(-np.array(region_importance), kind="stable")
+    sorted_region_indices = np.asarray(
+        sorted(
+            range(n_regions),
+            key=region_importance_exact.__getitem__,
+            reverse=True,
+        ),
+        dtype=np.int64,
+    )
 
     # Resolve the explanation's declared output once, then keep it fixed.
     target_class = _resolve_target_output(model, instance, explanation, target_class)
@@ -2705,16 +3027,33 @@ def compute_region_perturbation(
 
     prediction_array = np.asarray(predictions, dtype=float)
 
-    # Form a relative-output curve. Ratios need not lie in [0, 1].
-    curve = prediction_array / original_value
-
     # Compute AUC using trapezoidal rule
     # x-axis: fraction of regions perturbed (0 to 1)
     # y-axis: fixed-target output divided by the original output
     x = np.linspace(0, 1, len(prediction_array))
-    auc = _trapezoid(curve, x)
+    auc = _finite_affine_normalized_trapezoid(
+        prediction_array,
+        x,
+        original_value,
+        offset=0.0,
+        multiplier=1,
+        context="region perturbation AUC",
+    )
 
     if return_curve:
+        try:
+            curve = np.asarray(
+                [
+                    _finite_ratio(value, original_value, "region perturbation curve")
+                    for value in prediction_array
+                ],
+                dtype=float,
+            )
+        except FloatingPointError as exc:
+            raise FloatingPointError(
+                "region perturbation scalar AUC is representable, but the "
+                "requested per-step normalized curve is not representable"
+            ) from exc
         return {
             "auc": float(auc),
             "curve": curve,
@@ -2870,7 +3209,7 @@ def compute_pixel_flipping(
     # x-axis: fraction of features removed (0 to 1)
     # y-axis: raw fixed-target output
     x = np.linspace(0, 1, len(prediction_array))
-    auc = _trapezoid(curve, x)
+    auc = _finite_trapezoid(curve, x, "pixel-flipping AUC")
 
     if return_curve:
         return {
@@ -2985,7 +3324,7 @@ def compute_monotonicity_nguyen(
     original_value = _get_target_class_prediction(model, instance.reshape(1, -1), target_class)
 
     # Compute prediction change for each feature when removed
-    prediction_changes = []
+    perturbed_values = []
     attribution_values = []
 
     for i in range(n_features):
@@ -2998,9 +3337,7 @@ def compute_monotonicity_nguyen(
             model, perturbed.reshape(1, -1), target_class
         )
 
-        # Absolute fixed-target output change after replacing this feature.
-        change = original_value - perturbed_value
-        prediction_changes.append(abs(change))
+        perturbed_values.append(perturbed_value)
 
         # Attribution value
         if use_absolute:
@@ -3008,11 +3345,13 @@ def compute_monotonicity_nguyen(
         else:
             attribution_values.append(attr_array[i])
 
-    prediction_change_array = np.asarray(prediction_changes, dtype=float)
     attribution_array = np.asarray(attribution_values, dtype=float)
-
-    corr, _ = _defined_spearman(attribution_array, prediction_change_array)
-    return corr
+    return _stable_spearman_affine(
+        attribution_array,
+        original_value,
+        np.asarray(perturbed_values),
+        absolute=True,
+    )
 
 
 def compute_batch_monotonicity_nguyen(

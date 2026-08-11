@@ -36,10 +36,37 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import validate_name_sequence
+from explainiverse.explainers.gradient._input import (
+    as_floating_array,
+    scale_safe_integrated_gradient,
+    scale_safe_mean,
+    scale_safe_mean_std,
+    scale_safe_product_sum,
+    scale_safe_sum,
+)
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 BaselineCallable = Callable[[np.ndarray], np.ndarray]
 BaselineSpec = Union[np.ndarray, str, BaselineCallable]
+
+
+def _stable_convex_combination(start, end, fraction) -> np.ndarray:
+    """Evaluate ``(1-fraction)*start + fraction*end`` without range overflow."""
+
+    start_values, end_values, fractions = np.broadcast_arrays(start, end, fraction)
+    with np.errstate(over="ignore", invalid="ignore"):
+        direct = (1.0 - fractions) * start_values + fractions * end_values
+    unstable = ~np.isfinite(direct)
+    if np.any(unstable):
+        scale = np.maximum(np.abs(start_values), np.abs(end_values))
+        safe_scale = np.where(scale == 0, 1, scale)
+        scaled = (
+            (1.0 - fractions) * (start_values / safe_scale) + fractions * (end_values / safe_scale)
+        ) * scale
+        direct = np.where(unstable, scaled, direct)
+    if not np.isfinite(direct).all():
+        raise FloatingPointError("finite convex interpolation produced non-finite values")
+    return direct
 
 
 class IntegratedGradientsExplainer(BaseExplainer):
@@ -137,11 +164,26 @@ class IntegratedGradientsExplainer(BaseExplainer):
             if int(random_state) < 0:
                 raise ValueError("random_state must be non-negative")
 
+        valid_methods = {
+            "riemann_middle",
+            "riemann_left",
+            "riemann_right",
+            "riemann_trapezoid",
+        }
+        if not isinstance(method, str):
+            raise TypeError("method must be a supported Riemann integration method")
+        if method not in valid_methods:
+            raise ValueError(f"Unknown method: {method!r}. Use one of {sorted(valid_methods)}")
+
         self.feature_names: Optional[List[str]] = (
-            validate_name_sequence(feature_names, name="feature_names") if feature_names else None
+            validate_name_sequence(feature_names, name="feature_names")
+            if feature_names is not None
+            else None
         )
         self.class_names: Optional[List[str]] = (
-            validate_name_sequence(class_names, name="class_names") if class_names else None
+            validate_name_sequence(class_names, name="class_names")
+            if class_names is not None
+            else None
         )
         self.n_steps: int = int(n_steps)
         self.baseline: Optional[BaselineSpec] = baseline
@@ -159,19 +201,15 @@ class IntegratedGradientsExplainer(BaseExplainer):
         raw = np.asarray(instance)
         if raw.ndim == 0 or raw.size == 0:
             raise ValueError("instance must be a non-empty array with at least one dimension")
-        if not np.isrealobj(raw):
-            raise ValueError("instance must contain only finite real values")
         try:
-            prepared = raw.astype(np.float32, copy=True)
-        except (TypeError, ValueError) as error:
-            raise TypeError("instance must contain real numeric values") from error
-        if not np.isfinite(prepared).all():
-            raise ValueError("instance must contain only finite real values")
+            prepared = as_floating_array(raw, name="instance")
+        except ValueError as exc:
+            if "complex" in str(exc):
+                raise ValueError("instance must contain only finite real values") from exc
+            raise
 
         actual_shape = tuple(prepared.shape)
-        if self.input_shape is None:
-            self.input_shape = actual_shape
-        elif actual_shape != self.input_shape:
+        if self.input_shape is not None and actual_shape != self.input_shape:
             raise ValueError(
                 "instance shape must match input_shape exactly; "
                 f"expected {self.input_shape}, got {actual_shape}"
@@ -188,15 +226,33 @@ class IntegratedGradientsExplainer(BaseExplainer):
                 "baseline shape must match the instance exactly; "
                 f"expected {expected_shape}, got {tuple(raw.shape)}"
             )
-        if not np.isrealobj(raw):
-            raise ValueError("baseline must contain only finite real values")
         try:
-            prepared = raw.astype(np.float32, copy=True)
-        except (TypeError, ValueError) as error:
-            raise TypeError("baseline must contain real numeric values") from error
-        if prepared.size == 0 or not np.isfinite(prepared).all():
-            raise ValueError("baseline must contain only finite real values")
-        return prepared
+            return as_floating_array(raw, name="baseline")
+        except ValueError as exc:
+            if "complex" in str(exc):
+                raise ValueError("baseline must contain only finite real values") from exc
+            raise
+
+    @staticmethod
+    def _as_model_batch(value: np.ndarray) -> np.ndarray:
+        """Add the batch axis and the implicit channel for a 2-D grayscale image."""
+        if value.ndim == 2:
+            return value[np.newaxis, np.newaxis, ...]
+        return value[np.newaxis, ...]
+
+    @staticmethod
+    def _gradient_for_instance(gradients: np.ndarray, shape: Tuple[int, ...]) -> np.ndarray:
+        """Map a model-batch gradient back to the caller's single-input shape."""
+        expected = (1, 1) + shape if len(shape) == 2 else (1,) + shape
+        if gradients.shape != expected:
+            raise ValueError(
+                "predict_with_gradients returned the wrong gradient shape; "
+                f"expected {expected}, got {gradients.shape}"
+            )
+        sample = gradients[0]
+        if len(shape) == 2:
+            sample = sample[0]
+        return sample
 
     def _resolve_target_class(
         self, instance: np.ndarray, target_class: Optional[int]
@@ -214,18 +270,25 @@ class IntegratedGradientsExplainer(BaseExplainer):
             target_index = int(target_class)
             if target_index < 0:
                 raise ValueError("target_class must be non-negative")
-            if self.class_names is not None and target_index >= len(self.class_names):
+            task = getattr(self.model, "task", None)
+            if (
+                task != "regression"
+                and self.class_names is not None
+                and target_index >= len(self.class_names)
+            ):
                 raise ValueError(f"target_class must be in [0, {len(self.class_names) - 1}]")
             return target_index
 
-        is_classification = getattr(self.model, "task", None) == "classification"
+        task = getattr(self.model, "task", None)
+        if task == "regression":
+            return None
         # Keep compatibility with gradient-capable third-party adapters that
         # predate the explicit ``task`` attribute but provide class metadata.
-        if not is_classification and self.class_names is None:
+        if task != "classification" and self.class_names is None:
             return None
 
         with preserve_adapter_model_eval(self.model, preserve_gradients=False):
-            predictions = np.asarray(self.model.predict(instance[np.newaxis, ...]))
+            predictions = np.asarray(self.model.predict(self._as_model_batch(instance)))
         if predictions.ndim != 2 or predictions.shape[0] != 1:
             raise ValueError(
                 "Classification predictions must have shape (1, n_classes) "
@@ -290,12 +353,14 @@ class IntegratedGradientsExplainer(BaseExplainer):
             if self.baseline == "random":
                 # Random baseline (useful for images)
                 local_rng = self._new_rng() if rng is None else rng
-                baseline = local_rng.uniform(
-                    low=float(instance.min()), high=float(instance.max()), size=instance.shape
+                fractions = local_rng.random(instance.shape)
+                baseline = _stable_convex_combination(
+                    float(instance.min()), float(instance.max()), fractions
                 ).astype(instance.dtype)
             elif self.baseline == "mean":
                 # Mean value baseline
-                baseline = np.full_like(instance, instance.mean())
+                stable_mean = float(scale_safe_mean_std(instance.reshape(-1))[0])
+                baseline = np.full_like(instance, stable_mean)
             else:
                 raise ValueError(f"Unknown baseline type: {self.baseline}")
         elif callable(self.baseline):
@@ -344,21 +409,17 @@ class IntegratedGradientsExplainer(BaseExplainer):
         # Get interpolation points
         alphas = self._get_interpolation_alphas()
 
-        # Compute path from baseline to input
-        delta = instance - baseline
-
         # Collect gradients at each interpolation point
         gradient_samples: List[np.ndarray] = []
 
         for alpha in alphas:
-            # Interpolated input: baseline + alpha * (input - baseline)
-            interp_input = baseline + alpha * delta
+            # This convex form is algebraically identical to
+            # ``baseline + alpha * (instance - baseline)`` but does not first
+            # form an unrepresentable endpoint difference for opposite-sign
+            # finite values near the dtype limit.
+            interp_input = _stable_convex_combination(baseline, instance, alpha)
 
-            # Add batch dimension for model
-            if interp_input.ndim == len(original_shape):
-                interp_batch = interp_input[np.newaxis, ...]
-            else:
-                interp_batch = interp_input
+            interp_batch = self._as_model_batch(interp_input)
 
             # Get gradients
             with preserve_adapter_model_eval(self.model):
@@ -367,40 +428,78 @@ class IntegratedGradientsExplainer(BaseExplainer):
                 )
 
             gradients = np.asarray(gradients)
-            expected_gradient_shape = (1,) + original_shape
-            if gradients.shape != expected_gradient_shape:
-                raise ValueError(
-                    "predict_with_gradients returned the wrong gradient shape; "
-                    f"expected {expected_gradient_shape}, got {gradients.shape}"
-                )
             if not np.isrealobj(gradients) or not np.isfinite(gradients).all():
                 raise FloatingPointError(
                     "predict_with_gradients must return finite real input gradients"
                 )
-
-            gradient_samples.append(gradients[0])
+            gradient_samples.append(self._gradient_for_instance(gradients, original_shape))
 
         all_gradients = np.asarray(gradient_samples)  # Shape: (n_steps, *original_shape)
 
         # Approximate the integral
         if self.method == "riemann_trapezoid":
             # Trapezoidal rule
-            weights = np.ones(self.n_steps + 1)
-            weights[0] = 0.5
-            weights[-1] = 0.5
-            # Expand weights for broadcasting
-            for _ in range(len(original_shape)):
-                weights = weights[:, np.newaxis]
-            avg_gradients = np.sum(all_gradients * weights, axis=0) / self.n_steps
+            quadrature_weights = np.ones(self.n_steps + 1)
+            quadrature_weights[0] = 0.5
+            quadrature_weights[-1] = 0.5
+            broadcast_weights = quadrature_weights.reshape(
+                (quadrature_weights.size,) + (1,) * len(original_shape)
+            )
+            try:
+                avg_gradients = scale_safe_product_sum(
+                    all_gradients,
+                    broadcast_weights,
+                    axis=0,
+                    divisor=self.n_steps,
+                )
+            except FloatingPointError:
+                return scale_safe_integrated_gradient(
+                    all_gradients,
+                    baseline,
+                    instance,
+                    weights=quadrature_weights,
+                    divisor=self.n_steps,
+                )
         else:
             # Standard Riemann sum: average of gradients
-            avg_gradients = np.mean(all_gradients, axis=0)
+            quadrature_weights = np.ones(all_gradients.shape[0])
+            try:
+                avg_gradients = scale_safe_mean(all_gradients, axis=0)
+            except FloatingPointError:
+                return scale_safe_integrated_gradient(
+                    all_gradients,
+                    baseline,
+                    instance,
+                    weights=quadrature_weights,
+                    divisor=self.n_steps,
+                )
 
-        # Scale by input - baseline difference
-        integrated_gradients = delta * avg_gradients
+        # Scale by the endpoint difference. Form the direct difference where
+        # representable; for an overflowing finite endpoint span, factor out
+        # the endpoint magnitude and multiply it by the (typically small)
+        # average gradient before applying the normalized difference.
+        with np.errstate(over="ignore", invalid="ignore"):
+            delta = instance - baseline
+            integrated_gradients = delta * avg_gradients
+        overflowing_delta = ~np.isfinite(delta)
+        if np.any(overflowing_delta):
+            endpoint_scale = np.maximum(np.abs(instance), np.abs(baseline))
+            normalized_delta = instance / endpoint_scale - baseline / endpoint_scale
+            with np.errstate(over="ignore", invalid="ignore"):
+                stable_values = normalized_delta * (avg_gradients * endpoint_scale)
+            integrated_gradients = np.where(overflowing_delta, stable_values, integrated_gradients)
 
-        if not np.isfinite(integrated_gradients).all():
-            raise FloatingPointError("Integrated Gradients produced non-finite attributions")
+        needs_exact_fusion = ~np.isfinite(integrated_gradients) | (
+            (integrated_gradients == 0.0) & (instance != baseline) & (avg_gradients != 0.0)
+        )
+        if np.any(needs_exact_fusion):
+            integrated_gradients = scale_safe_integrated_gradient(
+                all_gradients,
+                baseline,
+                instance,
+                weights=quadrature_weights,
+                divisor=self.n_steps,
+            )
 
         return integrated_gradients
 
@@ -429,6 +528,8 @@ class IntegratedGradientsExplainer(BaseExplainer):
         Returns:
             Explanation object with feature attributions.
         """
+        if not isinstance(return_convergence_delta, (bool, np.bool_)):
+            raise TypeError("return_convergence_delta must be a boolean")
         instance = self._prepare_instance(instance)
         original_shape = instance.shape
 
@@ -475,16 +576,21 @@ class IntegratedGradientsExplainer(BaseExplainer):
                 explanation_data["saliency_map"] = np.abs(ig_attributions)
 
         # Determine class name
-        if self.class_names and target_class is not None:
+        if (
+            self.class_names is not None
+            and target_class is not None
+            and target_class < len(self.class_names)
+        ):
             label_name = self.class_names[target_class]
         else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
+            prefix = "output" if getattr(self.model, "task", None) == "regression" else "class"
+            label_name = f"{prefix}_{target_class}" if target_class is not None else "output"
 
         # Optionally compute convergence delta
         if return_convergence_delta:
             # The sum of attributions should equal F(x) - F(baseline)
-            pred_input = instance[np.newaxis, ...]
-            pred_baseline = bl[np.newaxis, ...]
+            pred_input = self._as_model_batch(instance)
+            pred_baseline = self._as_model_batch(bl)
 
             # ``predict_with_gradients`` returns scores in the exact space
             # whose derivatives produced the attributions.  Using predict()
@@ -509,20 +615,23 @@ class IntegratedGradientsExplainer(BaseExplainer):
             score_index = target_class if target_class is not None else 0
             pred_diff = pred_input_val[0, score_index] - pred_baseline_val[0, score_index]
 
-            attribution_sum = float(np.sum(ig_attributions))
+            attribution_sum = float(scale_safe_sum(ig_attributions))
             convergence_delta = abs(float(pred_diff) - attribution_sum)
 
             explanation_data["convergence_delta"] = convergence_delta
             explanation_data["prediction_difference"] = float(pred_diff)
             explanation_data["attribution_sum"] = attribution_sum
 
-        return Explanation(
+        explanation = Explanation(
             explainer_name="IntegratedGradients",
             target_class=label_name,
             explanation_data=explanation_data,
             feature_names=self.feature_names,
             metadata=self._score_space_metadata(),
         )
+        if self.input_shape is None:
+            self.input_shape = original_shape
+        return explanation
 
     def explain_batch(self, X: np.ndarray, target_class: Optional[int] = None) -> List[Explanation]:
         """
@@ -594,15 +703,14 @@ class IntegratedGradientsExplainer(BaseExplainer):
         rng = self._new_rng()
         for _ in range(n_samples):
             # Create noisy baseline
-            noise = rng.normal(0, noise_scale, original_shape).astype(np.float32)
+            noise = rng.normal(0, noise_scale, original_shape).astype(instance.dtype)
             noisy_baseline = self._prepare_baseline(noise, original_shape)
 
             ig = self._compute_integrated_gradients(instance, noisy_baseline, target_class)
             all_attributions.append(ig)
 
         # Average attributions
-        avg_attributions = np.mean(all_attributions, axis=0)
-        std_attributions = np.std(all_attributions, axis=0)
+        avg_attributions, std_attributions = scale_safe_mean_std(np.asarray(all_attributions))
 
         # Build explanation data
         explanation_data = {
@@ -620,15 +728,23 @@ class IntegratedGradientsExplainer(BaseExplainer):
             attributions = {fname: float(flat_avg[i]) for i, fname in enumerate(self.feature_names)}
             explanation_data["feature_attributions"] = attributions
 
-        if self.class_names and target_class is not None:
+        if (
+            self.class_names is not None
+            and target_class is not None
+            and target_class < len(self.class_names)
+        ):
             label_name = self.class_names[target_class]
         else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
+            prefix = "output" if getattr(self.model, "task", None) == "regression" else "class"
+            label_name = f"{prefix}_{target_class}" if target_class is not None else "output"
 
-        return Explanation(
+        explanation = Explanation(
             explainer_name="IntegratedGradients_Smooth",
             target_class=label_name,
             explanation_data=explanation_data,
             feature_names=self.feature_names,
             metadata=self._score_space_metadata(),
         )
+        if self.input_shape is None:
+            self.input_shape = original_shape
+        return explanation

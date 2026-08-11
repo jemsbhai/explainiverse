@@ -38,6 +38,7 @@ from __future__ import annotations
 import math
 import re
 import warnings
+from decimal import Decimal
 from itertools import combinations
 from numbers import Integral, Real
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Union
@@ -49,6 +50,14 @@ from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation._utils import (
     _get_prediction_proba_vector,
     _model_task,
+    _stable_difference_of_means,
+    _stable_mean,
+    _stable_pearson,
+    _stable_pearson_affine,
+    _stable_pearson_decimal_affine,
+    _stable_ratio_of_means,
+    _stable_std,
+    _stable_sum,
     apply_feature_mask,
     compute_baseline_values,
     get_prediction_value,
@@ -400,7 +409,7 @@ def compute_pgi(
     order = _rank_feature_indices(attributions, k_int, absolute=True)
     perturbed = apply_feature_mask(values, order[:k_int].tolist(), baseline_values)
     perturbed_value = _prediction_for_target(model, perturbed, resolved_target)
-    return float(abs(original_value - perturbed_value))
+    return abs(_finite_score_difference(original_value, perturbed_value, "PGI"))
 
 
 def compute_pgu(
@@ -437,7 +446,7 @@ def compute_pgu(
     non_top_k = order[k_int:]
     perturbed = apply_feature_mask(values, non_top_k.tolist(), baseline_values)
     perturbed_value = _prediction_for_target(model, perturbed, resolved_target)
-    return float(abs(original_value - perturbed_value))
+    return abs(_finite_score_difference(original_value, perturbed_value, "PGU"))
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
@@ -445,7 +454,32 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
         raise ValueError("faithfulness ratio requires finite PGI and PGU values")
     if denominator == 0.0:
         raise ValueError("faithfulness ratio is undefined because PGU is zero")
-    return float(numerator / denominator)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        result = float(numerator / denominator)
+    if not np.isfinite(result) or (result == 0.0 and numerator != 0.0):
+        raise FloatingPointError("faithfulness ratio is not representable")
+    return result
+
+
+def _finite_score_mean(values: Sequence[float], context: str) -> float:
+    result = float(_stable_mean(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} mean is not representable")
+    return result
+
+
+def _finite_score_std(values: Sequence[float], context: str) -> float:
+    result = float(_stable_std(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} standard deviation is not representable")
+    return result
+
+
+def _finite_score_difference(left: float, right: float, context: str) -> float:
+    result = float(_stable_sum(np.asarray([left, -right], dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} is not representable")
+    return result
 
 
 def compute_faithfulness_score(
@@ -500,9 +534,37 @@ def _validate_k_values(
         raise TypeError("k_values must be a non-empty sequence of k values") from exc
     if not values:
         raise ValueError("k_values must not be empty")
-    if len({repr(value) for value in values}) != len(values):
-        raise ValueError("k_values must not contain duplicate entries")
+    identities: list[tuple[str, Union[int, float]]] = []
+    fractional_values: list[Real] = []
+    for value in values:
+        identity: tuple[str, Union[int, float]]
+        if isinstance(value, (bool, np.bool_)):
+            raise TypeError("k_values entries must not be boolean")
+        if isinstance(value, Integral):
+            if int(value) <= 0:
+                raise ValueError("integer k_values entries must be positive")
+            identity = ("count", int(value))
+        elif isinstance(value, Real):
+            fraction = float(value)
+            if not np.isfinite(fraction) or not 0.0 < fraction <= 1.0:
+                raise ValueError("fractional k_values entries must be finite and in (0, 1]")
+            if any(bool(value == previous) for previous in fractional_values):
+                raise ValueError("k_values must not contain semantically duplicate entries")
+            fractional_values.append(value)
+            identity = ("fraction", fraction)
+        else:
+            raise TypeError("k_values entries must be integer counts or real fractions")
+        if identity in identities:
+            raise ValueError("k_values must not contain semantically duplicate entries")
+        identities.append(identity)
     return values
+
+
+def _k_result_suffix(k: KValue) -> str:
+    """Return one canonical, collision-free suffix for a validated k value."""
+    if isinstance(k, Integral):
+        return str(int(k))
+    return repr(float(k))
 
 
 def _compute_eraser_adaptation(
@@ -542,10 +604,14 @@ def _compute_eraser_adaptation(
             prefix = "comp"
         perturbed = apply_feature_mask(values, indices_to_mask, baseline_values)
         perturbed_value = _prediction_for_target(model, perturbed, resolved_target)
-        scores[f"{prefix}_k{k}"] = float(original_value - perturbed_value)
+        scores[f"{prefix}_k{_k_result_suffix(k)}"] = _finite_score_difference(
+            original_value, perturbed_value, prefix
+        )
 
     aggregate_name = "sufficiency" if keep_top else "comprehensiveness"
-    scores[aggregate_name] = float(np.mean(list(scores.values())))
+    scores[aggregate_name] = _finite_score_mean(
+        list(scores.values()), f"{aggregate_name} aggregate"
+    )
     return scores
 
 
@@ -689,26 +755,27 @@ def compute_faithfulness_correlation(
     subset_count = _resolve_feature_count(subset_size, values.size)
     subsets = _sample_feature_subsets(values.size, subset_count, n_steps, random_state)
 
-    attribution_sums: list[float] = []
-    output_drops: list[float] = []
+    attribution_sums: list[Decimal] = []
+    perturbed_values: list[float] = []
     for subset in subsets:
-        attribution_sums.append(float(np.sum(attributions[list(subset)])))
+        attribution_sums.append(
+            sum(
+                (Decimal.from_float(float(value)) for value in attributions[list(subset)]),
+                start=Decimal(0),
+            )
+        )
         perturbed = apply_feature_mask(values, list(subset), baseline_values)
         perturbed_value = _prediction_for_target(model, perturbed, resolved_target)
-        output_drops.append(float(original_value - perturbed_value))
+        perturbed_values.append(perturbed_value)
 
-    attribution_array = np.asarray(attribution_sums, dtype=float)
-    output_array = np.asarray(output_drops, dtype=float)
-    centered_attributions = attribution_array - np.mean(attribution_array)
-    centered_outputs = output_array - np.mean(output_array)
-    denominator = float(np.linalg.norm(centered_attributions) * np.linalg.norm(centered_outputs))
-    if denominator == 0.0:
+    perturbed_array = np.asarray(perturbed_values, dtype=float)
+    try:
+        return _stable_pearson_decimal_affine(attribution_sums, original_value, perturbed_array)
+    except ValueError as exc:
         raise ValueError(
             "Pearson faithfulness correlation is undefined when attribution sums "
             "or output changes are constant"
-        )
-    correlation = float(np.dot(centered_attributions, centered_outputs) / denominator)
-    return float(np.clip(correlation, -1.0, 1.0))
+        ) from exc
 
 
 def _validate_explanation_collection(
@@ -783,23 +850,26 @@ def compare_explainer_faithfulness(
             pgi_scores.append(scores["pgi"])
             pgu_scores.append(scores["pgu"])
 
-        mean_pgi = float(np.mean(pgi_scores))
-        mean_pgu = float(np.mean(pgu_scores))
-        ratio_of_means = _safe_ratio(mean_pgi, mean_pgu)
-        mean_of_sample_ratios = float(
-            np.mean([_safe_ratio(pgi, pgu) for pgi, pgu in zip(pgi_scores, pgu_scores)])
+        mean_pgi = _finite_score_mean(pgi_scores, "PGI")
+        mean_pgu = _finite_score_mean(pgu_scores, "PGU")
+        ratio_of_means = _stable_ratio_of_means(np.asarray(pgi_scores), np.asarray(pgu_scores))
+        mean_of_sample_ratios = _finite_score_mean(
+            [_safe_ratio(pgi, pgu) for pgi, pgu in zip(pgi_scores, pgu_scores)],
+            "faithfulness sample ratio",
         )
         results.append(
             {
                 "explainer": explainer_name,
                 "mean_pgi": mean_pgi,
-                "std_pgi": float(np.std(pgi_scores)),
+                "std_pgi": _finite_score_std(pgi_scores, "PGI"),
                 "mean_pgu": mean_pgu,
-                "std_pgu": float(np.std(pgu_scores)),
+                "std_pgu": _finite_score_std(pgu_scores, "PGU"),
                 "ratio_of_means": ratio_of_means,
                 "mean_of_sample_ratios": mean_of_sample_ratios,
                 "mean_ratio": ratio_of_means,
-                "mean_diff": float(mean_pgi - mean_pgu),
+                "mean_diff": _stable_difference_of_means(
+                    np.asarray(pgi_scores), np.asarray(pgu_scores)
+                ),
                 "n_samples": n_samples,
             }
         )
@@ -833,19 +903,20 @@ def compute_batch_faithfulness(
         pgi_scores.append(scores["pgi"])
         pgu_scores.append(scores["pgu"])
 
-    mean_pgi = float(np.mean(pgi_scores))
-    mean_pgu = float(np.mean(pgu_scores))
-    ratio_of_means = _safe_ratio(mean_pgi, mean_pgu)
+    mean_pgi = _finite_score_mean(pgi_scores, "PGI")
+    mean_pgu = _finite_score_mean(pgu_scores, "PGU")
+    ratio_of_means = _stable_ratio_of_means(np.asarray(pgi_scores), np.asarray(pgu_scores))
     return {
         "mean_pgi": mean_pgi,
-        "std_pgi": float(np.std(pgi_scores)),
+        "std_pgi": _finite_score_std(pgi_scores, "PGI"),
         "mean_pgu": mean_pgu,
-        "std_pgu": float(np.std(pgu_scores)),
+        "std_pgu": _finite_score_std(pgu_scores, "PGU"),
         "ratio_of_means": ratio_of_means,
-        "mean_of_sample_ratios": float(
-            np.mean([_safe_ratio(pgi, pgu) for pgi, pgu in zip(pgi_scores, pgu_scores)])
+        "mean_of_sample_ratios": _finite_score_mean(
+            [_safe_ratio(pgi, pgu) for pgi, pgu in zip(pgi_scores, pgu_scores)],
+            "faithfulness sample ratio",
         ),
         "mean_ratio": ratio_of_means,
-        "mean_diff": float(mean_pgi - mean_pgu),
+        "mean_diff": _stable_difference_of_means(np.asarray(pgi_scores), np.asarray(pgu_scores)),
         "n_samples": len(pgi_scores),
     }

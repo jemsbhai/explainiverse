@@ -19,6 +19,31 @@ class _RegistryLike(Protocol):
     def get_meta(self, name: str) -> Any: ...
 
 
+def _targets_equal(left: Any, right: Any) -> bool:
+    """Compare scalar target identities without repr-based false matches.
+
+    NumPy scalar labels are normalized to their Python scalar equivalents so,
+    for example, ``np.int64(1)`` and ``1`` identify the same output. Arbitrary
+    objects must provide an unambiguous scalar equality result; matching text
+    representations alone never establish identity.
+    """
+    if isinstance(left, np.generic):
+        left = left.item()
+    if isinstance(right, np.generic):
+        right = right.item()
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, Real) and isinstance(right, Real):
+        return bool(left == right)
+    if type(left) is not type(right):
+        return False
+    try:
+        result = left == right
+    except Exception:
+        return False
+    return bool(result) if isinstance(result, (bool, np.bool_)) else False
+
+
 class ExplanationSuite:
     """
     Run and compare multiple explainers on the same instances.
@@ -351,11 +376,14 @@ class ExplanationSuite:
                 )
                 and len(set(contracts.values())) == 1
             )
-            targets = {
-                name: repr(explanation.target_class)
-                for name, explanation in self.explanations.items()
+            target_values = {
+                name: explanation.target_class for name, explanation in self.explanations.items()
             }
-            targets_match = len(set(targets.values())) == 1
+            targets = {name: repr(value) for name, value in target_values.items()}
+            first_target = next(iter(target_values.values()))
+            targets_match = all(
+                _targets_equal(first_target, value) for value in target_values.values()
+            )
             features_match = len(set(feature_identities.values())) == 1
             if not contracts_match or not targets_match or not features_match:
                 reasons = []

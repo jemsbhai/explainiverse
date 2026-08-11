@@ -25,6 +25,8 @@ import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.explainers.gradient._input import as_floating_array, scale_safe_sum
+from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 if TYPE_CHECKING:
     import torch
@@ -254,9 +256,7 @@ class LRPExplainer(BaseExplainer):
         array = np.asarray(instance)
         if array.ndim == 0 or array.size == 0:
             raise ValueError("instance must contain at least one feature")
-        if array.dtype.kind not in "biuf":
-            raise TypeError("instance must be a numeric array")
-        array = array.astype(np.float32, copy=False)
+        array = as_floating_array(array, name="instance")
         if len(self.feature_names) != array.size:
             raise ValueError(
                 f"feature_names has {len(self.feature_names)} entries but instance "
@@ -283,7 +283,10 @@ class LRPExplainer(BaseExplainer):
             raise ValueError(
                 "A tabular LRP instance must be one-dimensional; " f"got {tuple(array.shape)}"
             )
-        return torch.as_tensor(array, device=self._get_model_device()).unsqueeze(0)
+        tensor = self.model._to_tensor(array).detach().clone()
+        if not tensor.is_floating_point():
+            raise TypeError("LRP inputs must resolve to a floating-point model dtype")
+        return tensor.unsqueeze(0)
 
     def _forward_leafwise(self, x: torch.Tensor):
         current = x
@@ -510,9 +513,9 @@ class LRPExplainer(BaseExplainer):
                 if stored is not None:
                     actual = stored.detach() * target_score
                     layer_relevances[f"layer_{idx}_{name}_{type(_layer).__name__}"] = (
-                        actual.cpu().numpy().reshape(-1)
+                        self.model._to_numpy(actual).reshape(-1)
                     )
-            layer_relevances["input"] = attributions.detach().cpu().numpy().reshape(-1)
+            layer_relevances["input"] = self.model._to_numpy(attributions).reshape(-1)
             return attributions.detach(), layer_relevances
         finally:
             model.load_state_dict(state, strict=True)
@@ -578,17 +581,20 @@ class LRPExplainer(BaseExplainer):
             elif isinstance(layer, self._RESHAPE):
                 relevance = relevance.reshape_as(activation)
             # Pointwise activations and eval-mode dropout preserve relevance.
-            layer_relevances[f"layer_{idx}_{name}_{type(layer).__name__}"] = (
-                relevance.detach().cpu().numpy().reshape(-1)
-            )
+            layer_relevances[f"layer_{idx}_{name}_{type(layer).__name__}"] = self.model._to_numpy(
+                relevance
+            ).reshape(-1)
 
-        layer_relevances["input"] = relevance.detach().cpu().numpy().reshape(-1)
+        layer_relevances["input"] = self.model._to_numpy(relevance).reshape(-1)
         return relevance.detach(), layer_relevances
 
     def _compute(self, instance: np.ndarray, target_class: Optional[int]) -> Dict[str, Any]:
         x = self._prepare_input_tensor(instance)
         model = self._get_pytorch_model()
-        with _LRP_LOCK:
+        # The preliminary leafwise forward is model work too: user hooks can
+        # consume Torch RNG or mutate registered buffers before Captum's own
+        # state snapshot. Preserve the complete operation, including failures.
+        with preserve_adapter_model_eval(self.model), _LRP_LOCK:
             training_flags = {module: module.training for module in model.modules()}
             try:
                 model.eval()
@@ -608,14 +614,14 @@ class LRPExplainer(BaseExplainer):
             finally:
                 self._restore_training_flags(training_flags)
 
-        flat = attributions.cpu().numpy().reshape(-1)
+        flat = self.model._to_numpy(attributions).reshape(-1)
         if not np.isfinite(flat).all():
             raise FloatingPointError(
                 "LRP produced non-finite relevance. Use epsilon > 0 or inspect "
                 "zero denominators in the selected rule."
             )
         target_score = float(output[0, target_index].item() * sign)
-        attribution_sum = float(flat.sum())
+        attribution_sum = float(scale_safe_sum(flat))
         signed_delta = target_score - attribution_sum
         semantic_target_index = target_index
         if self.model.task == "classification" and output.shape[1] == 1:
@@ -638,6 +644,8 @@ class LRPExplainer(BaseExplainer):
         target_class: Optional[int] = None,
         return_layer_relevances: bool = False,
     ):
+        if not isinstance(return_layer_relevances, (bool, np.bool_)):
+            raise TypeError("return_layer_relevances must be a boolean")
         result = self._compute(instance, target_class)
         if return_layer_relevances:
             return result["attributions"], result["layer_relevances"]
@@ -699,6 +707,8 @@ class LRPExplainer(BaseExplainer):
         target_class: Optional[int] = None,
         return_convergence_delta: bool = False,
     ) -> Explanation:
+        if not isinstance(return_convergence_delta, (bool, np.bool_)):
+            raise TypeError("return_convergence_delta must be a boolean")
         original = np.asarray(instance)
         result = self._compute(original, target_class)
         raw = result["attributions"]
@@ -795,7 +805,7 @@ class LRPExplainer(BaseExplainer):
                         "attributions": [float(value) for value in values],
                         "top_feature": self.feature_names[top_index],
                         "top_attribution": float(values[top_index]),
-                        "attribution_sum": float(values.sum()),
+                        "attribution_sum": float(scale_safe_sum(values)),
                         "attribution_range": (
                             float(values.min()),
                             float(values.max()),

@@ -18,6 +18,7 @@ Reference:
 from __future__ import annotations
 
 import operator
+from decimal import Decimal, localcontext
 from numbers import Integral
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 
@@ -26,6 +27,11 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._input import (
+    as_floating_array,
+    scale_safe_mean_std,
+    scale_safe_sum,
+)
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 if TYPE_CHECKING:
@@ -59,6 +65,86 @@ except ImportError:  # pragma: no cover - exercised in installations without cap
     CaptumIntegratedGradients = None
     CAPTUM_AVAILABLE = False
     CAPTUM_VERSION = None
+
+
+def _stable_attribution_comparison(
+    deeplift_values: np.ndarray,
+    integrated_gradient_values: np.ndarray,
+) -> dict:
+    """Compare two finite attribution vectors with exact binary64 arithmetic."""
+
+    left = as_real_array(
+        deeplift_values,
+        name="DeepLIFT attributions",
+        dtype=np.float64,
+        require_finite=True,
+    ).reshape(-1)
+    right = as_real_array(
+        integrated_gradient_values,
+        name="Integrated Gradients attributions",
+        dtype=np.float64,
+        require_finite=True,
+    ).reshape(-1)
+    if left.size == 0 or left.shape != right.shape:
+        raise ValueError("attribution comparisons require paired non-empty vectors")
+
+    with localcontext() as context:
+        context.prec = 3500 + len(str(left.size))
+        left_decimal = [Decimal.from_float(float(value)) for value in left]
+        right_decimal = [Decimal.from_float(float(value)) for value in right]
+        count = Decimal(left.size)
+        differences = [
+            left_value - right_value for left_value, right_value in zip(left_decimal, right_decimal)
+        ]
+        exact_mse = (
+            sum(
+                (difference * difference for difference in differences),
+                start=Decimal(0),
+            )
+            / count
+        )
+        exact_max_difference = max(abs(difference) for difference in differences)
+        mse = float(exact_mse)
+        max_difference = float(exact_max_difference)
+
+        left_constant = min(left_decimal) == max(left_decimal)
+        right_constant = min(right_decimal) == max(right_decimal)
+        correlation_defined = not (left_constant or right_constant)
+        if correlation_defined:
+            left_sum = sum(left_decimal, start=Decimal(0))
+            right_sum = sum(right_decimal, start=Decimal(0))
+            cross_sum = sum(
+                (
+                    left_value * right_value
+                    for left_value, right_value in zip(left_decimal, right_decimal)
+                ),
+                start=Decimal(0),
+            )
+            left_square_sum = sum((value * value for value in left_decimal), start=Decimal(0))
+            right_square_sum = sum((value * value for value in right_decimal), start=Decimal(0))
+            covariance = count * cross_sum - left_sum * right_sum
+            left_variance = count * left_square_sum - left_sum * left_sum
+            right_variance = count * right_square_sum - right_sum * right_sum
+            exact_correlation = covariance / (left_variance * right_variance).sqrt()
+            correlation = float(exact_correlation)
+        else:
+            exact_correlation = Decimal(0)
+            correlation = None
+
+    if not np.isfinite(mse) or (mse == 0.0 and exact_mse != 0):
+        raise FloatingPointError("attribution comparison MSE is not representable")
+    if not np.isfinite(max_difference) or (max_difference == 0.0 and exact_max_difference != 0):
+        raise FloatingPointError("attribution comparison maximum difference is not representable")
+    if correlation is not None:
+        if not np.isfinite(correlation) or (correlation == 0.0 and exact_correlation != 0):
+            raise FloatingPointError("attribution comparison correlation is not representable")
+        correlation = float(np.clip(correlation, -1.0, 1.0))
+    return {
+        "correlation": correlation,
+        "correlation_defined": correlation_defined,
+        "mse": mse,
+        "max_difference": max_difference,
+    }
 
 
 def _require_backends() -> None:
@@ -265,6 +351,8 @@ class DeepLIFTExplainer(BaseExplainer):
                 "DeepLIFT requires a PyTorchAdapter so the explained score "
                 "space and class mapping are explicit."
             )
+        if not isinstance(multiply_by_inputs, (bool, np.bool_)):
+            raise TypeError("multiply_by_inputs must be a boolean")
         validated_features = validate_name_sequence(feature_names, name="feature_names")
         validated_classes = validate_name_sequence(
             class_names,
@@ -308,17 +396,7 @@ class DeepLIFTExplainer(BaseExplainer):
                 f"{len(self.feature_names)} feature_names were provided. "
                 "DeepLIFT currently supports flat feature vectors only."
             )
-        try:
-            array = as_real_array(
-                raw,
-                name=name,
-                dtype=np.float32,
-            ).copy()
-        except ValueError as error:
-            raise TypeError(f"{name} must contain real numeric values") from error
-        if not np.all(np.isfinite(array)):
-            raise ValueError(f"{name} must contain only finite values")
-        return array
+        return as_floating_array(raw, name=name)
 
     def _new_rng(self) -> np.random.Generator:
         """Create a per-operation generator without touching NumPy global state."""
@@ -336,7 +414,7 @@ class DeepLIFTExplainer(BaseExplainer):
                         high=float(instance.max()),
                         size=instance.shape,
                     )
-                    .astype(np.float32)
+                    .astype(instance.dtype)
                 )
             elif self.baseline == "mean":
                 raise ValueError(
@@ -351,21 +429,16 @@ class DeepLIFTExplainer(BaseExplainer):
         return self._as_feature_vector(baseline, "baseline")
 
     def set_baseline(self, data: np.ndarray, method: str = "mean") -> "DeepLIFTExplainer":
-        data = as_real_array(
-            data,
-            name="data",
-            dtype=np.float32,
-            require_finite=True,
-        )
+        data = as_floating_array(data, name="data")
         if data.ndim == 1:
             data = data.reshape(1, -1)
         if data.ndim != 2 or data.shape[1] != len(self.feature_names):
             raise ValueError("data must have shape (n_samples, len(feature_names))")
 
         if method == "mean":
-            self.baseline = np.mean(data, axis=0).astype(np.float32)
+            self.baseline = scale_safe_mean_std(data)[0]
         elif method == "median":
-            self.baseline = np.median(data, axis=0).astype(np.float32)
+            self.baseline = np.median(data, axis=0)
         elif method == "zeros":
             self.baseline = None
         else:
@@ -378,15 +451,15 @@ class DeepLIFTExplainer(BaseExplainer):
         baselines: np.ndarray,
         target_class: Optional[int],
     ) -> Tuple["torch.Tensor", "torch.Tensor", int, str]:
-        instance_tensor = torch.as_tensor(
-            instance.reshape(1, -1), dtype=torch.float32, device=self.model.device
-        )
+        instance_tensor = self.model._to_tensor(instance.reshape(1, -1)).detach().clone()
+        if not instance_tensor.is_floating_point():
+            raise TypeError("DeepLIFT inputs must resolve to a floating-point model dtype")
         instance_tensor.requires_grad_(True)
-        baseline_tensor = torch.as_tensor(
-            baselines.reshape(-1, len(self.feature_names)),
-            dtype=torch.float32,
-            device=self.model.device,
+        baseline_tensor = (
+            self.model._to_tensor(baselines.reshape(-1, len(self.feature_names))).detach().clone()
         )
+        if not baseline_tensor.is_floating_point():
+            raise TypeError("DeepLIFT baselines must resolve to a floating-point model dtype")
 
         with preserve_adapter_model_eval(self.model), torch.no_grad():
             raw = self.model.model(instance_tensor)
@@ -467,7 +540,7 @@ class DeepLIFTExplainer(BaseExplainer):
             instance, baseline.reshape(1, -1), target_class
         )
         values = self._attribute_single(input_tensor, baseline_tensor, target)
-        return values.detach().cpu().numpy().reshape(-1)
+        return self.model._to_numpy(values).reshape(-1)
 
     def _label_name(self, target: int) -> str:
         if self.class_names is not None:
@@ -484,6 +557,8 @@ class DeepLIFTExplainer(BaseExplainer):
         method: str = "rescale",
         return_convergence_delta: bool = False,
     ) -> Explanation:
+        if not isinstance(return_convergence_delta, (bool, np.bool_)):
+            raise TypeError("return_convergence_delta must be a boolean")
         self._validate_method(method)
         if return_convergence_delta and not self.multiply_by_inputs:
             raise ValueError(
@@ -509,7 +584,7 @@ class DeepLIFTExplainer(BaseExplainer):
         else:
             attribution_tensor = result
             captum_delta = None
-        values = attribution_tensor.detach().cpu().numpy().reshape(-1)
+        values = self.model._to_numpy(attribution_tensor).reshape(-1)
 
         explanation_data = {
             "feature_attributions": {
@@ -530,7 +605,7 @@ class DeepLIFTExplainer(BaseExplainer):
                 actual = float(self._score_model(input_tensor)[0, target].item())
                 reference = float(self._score_model(baseline_tensor)[0, target].item())
             prediction_difference = actual - reference
-            attribution_sum = float(values.sum())
+            attribution_sum = float(scale_safe_sum(values))
             explanation_data.update(
                 {
                     "convergence_delta": abs(prediction_difference - attribution_sum),
@@ -556,7 +631,7 @@ class DeepLIFTExplainer(BaseExplainer):
         method: str = "rescale",
     ) -> List[Explanation]:
         self._validate_method(method)
-        X = as_real_array(X, name="X", dtype=np.float32, require_finite=True)
+        X = as_floating_array(X, name="X")
         if X.ndim == 1:
             X = X.reshape(1, -1)
         if X.ndim != 2 or X.shape[1] != len(self.feature_names):
@@ -576,7 +651,7 @@ class DeepLIFTExplainer(BaseExplainer):
         individual = []
         for baseline_row in baseline_tensor:
             attribution = self._attribute_single(input_tensor, baseline_row.unsqueeze(0), target)
-            individual.append(attribution.detach().cpu().numpy().reshape(-1))
+            individual.append(self.model._to_numpy(attribution).reshape(-1))
         individual_values = np.vstack(individual)
 
         if len(baseline_tensor) == 1:
@@ -595,15 +670,25 @@ class DeepLIFTExplainer(BaseExplainer):
                 averaged_tensor = backend.attribute(
                     input_tensor, baselines=baseline_tensor, target=target
                 )
-            averaged = averaged_tensor.detach().cpu().numpy().reshape(-1)
+            backend_average = self.model._to_numpy(averaged_tensor).reshape(-1)
+            stable_average = scale_safe_mean_std(individual_values)[0]
+            if not np.isfinite(stable_average).all():
+                raise FloatingPointError(
+                    "DeepSHAP background expectation exceeds the finite float range"
+                )
 
             # DeepLiftShap is defined as the expectation of DeepLIFT over the
-            # baseline distribution. Abort if a backend change violates it.
-            if not np.allclose(averaged, individual_values.mean(axis=0), atol=1e-6, rtol=1e-5):
+            # baseline distribution. Validate every finite backend result, but
+            # use the independently accumulated scale-safe expectation so a
+            # representable result cannot be lost to Captum's raw sum overflow.
+            if np.isfinite(backend_average).all() and not np.allclose(
+                backend_average, stable_average, atol=1e-6, rtol=1e-5
+            ):
                 raise RuntimeError(
                     "Captum DeepLiftShap disagreed with the mean of its DeepLIFT "
                     "baseline contributions; attribution was aborted."
                 )
+            averaged = stable_average
 
         return averaged, individual_values, target, output_space
 
@@ -616,12 +701,7 @@ class DeepLIFTExplainer(BaseExplainer):
     ) -> Explanation:
         self._validate_method(method)
         instance_array = self._as_feature_vector(instance, "instance")
-        baseline_array = as_real_array(
-            baselines,
-            name="baselines",
-            dtype=np.float32,
-            require_finite=True,
-        )
+        baseline_array = as_floating_array(baselines, name="baselines")
         if baseline_array.ndim == 1:
             baseline_array = baseline_array.reshape(1, -1)
         if baseline_array.ndim != 2 or baseline_array.shape[1] != len(self.feature_names):
@@ -641,7 +721,7 @@ class DeepLIFTExplainer(BaseExplainer):
                     name: float(averaged[i]) for i, name in enumerate(self.feature_names)
                 },
                 "attributions_raw": averaged.tolist(),
-                "attributions_std": individual.std(axis=0).tolist(),
+                "attributions_std": scale_safe_mean_std(individual)[1].tolist(),
                 "n_baselines": len(baseline_array),
                 "method": "rescale",
                 "backend": (
@@ -683,27 +763,22 @@ class DeepLIFTExplainer(BaseExplainer):
                 n_steps=ig_steps,
                 method="gausslegendre",
             )
-        dl_values = dl_tensor.detach().cpu().numpy().reshape(-1)
-        ig_values = ig_tensor.detach().cpu().numpy().reshape(-1)
-        correlation_defined = not (
-            float(np.ptp(dl_values)) == 0.0 or float(np.ptp(ig_values)) == 0.0
-        )
-        if correlation_defined:
-            correlation = float(np.corrcoef(dl_values, ig_values)[0, 1])
-        else:
-            correlation = None
+        dl_values = self.model._to_numpy(dl_tensor).reshape(-1)
+        ig_values = self.model._to_numpy(ig_tensor).reshape(-1)
+        comparison_metrics = _stable_attribution_comparison(dl_values, ig_values)
+        correlation_defined = bool(comparison_metrics["correlation_defined"])
         return {
             "deeplift_attributions": dl_values.tolist(),
             "integrated_gradients_attributions": ig_values.tolist(),
-            "correlation": correlation,
+            "correlation": comparison_metrics["correlation"],
             "correlation_defined": correlation_defined,
             "correlation_undefined_reason": (
                 None
                 if correlation_defined
                 else "Pearson correlation is undefined when either attribution vector is constant"
             ),
-            "mse": float(np.mean((dl_values - ig_values) ** 2)),
-            "max_difference": float(np.max(np.abs(dl_values - ig_values))),
+            "mse": comparison_metrics["mse"],
+            "max_difference": comparison_metrics["max_difference"],
             "ig_steps": ig_steps,
             "output_space": output_space,
             "target_index": target,
@@ -748,12 +823,7 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
             self.set_background(background_data)
 
     def set_background(self, data: np.ndarray) -> "DeepLIFTShapExplainer":
-        data = as_real_array(
-            data,
-            name="background data",
-            dtype=np.float32,
-            require_finite=True,
-        )
+        data = as_floating_array(data, name="background data")
         if data.ndim == 1:
             data = data.reshape(1, -1)
         if data.ndim != 2 or data.shape[1] != len(self.feature_names):
@@ -767,6 +837,42 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
             data = data[indices]
         self._background_data = data.copy()
         return self
+
+    def set_baseline(self, data: np.ndarray, method: str = "mean") -> "DeepLIFTShapExplainer":
+        """Reject the inherited single-reference API for distributional DeepSHAP."""
+        del data, method
+        raise NotImplementedError(
+            "DeepSHAP uses a background distribution. Call set_background(data) instead of "
+            "the single-baseline set_baseline() API."
+        )
+
+    def explain_with_multiple_baselines(
+        self,
+        instance: np.ndarray,
+        baselines: np.ndarray,
+        target_class: Optional[int] = None,
+        method: str = "rescale",
+    ) -> Explanation:
+        """Reject the inherited ad-hoc baseline API in favor of stored background state."""
+        del instance, baselines, target_class, method
+        raise NotImplementedError(
+            "DeepSHAP backgrounds are persistent explainer state. Call set_background(data) "
+            "and then explain(instance)."
+        )
+
+    def compare_with_integrated_gradients(
+        self,
+        instance: np.ndarray,
+        target_class: Optional[int] = None,
+        baseline: Optional[np.ndarray] = None,
+        ig_steps: int = 50,
+    ) -> dict:
+        """Reject the inherited single-baseline comparison, which is not DeepSHAP."""
+        del instance, target_class, baseline, ig_steps
+        raise NotImplementedError(
+            "The inherited comparison uses one baseline and does not represent DeepSHAP's "
+            "background expectation. Use DeepLIFTExplainer for that comparison."
+        )
 
     def explain(
         self,
@@ -783,7 +889,9 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
         if isinstance(baseline, str):
             legacy_method = baseline
             baseline = None
-            if isinstance(method, bool):
+            if isinstance(method, (bool, np.bool_)):
+                if not isinstance(return_convergence_delta, (bool, np.bool_)):
+                    raise TypeError("return_convergence_delta must be a boolean")
                 if return_convergence_delta:
                     raise TypeError(
                         "return_convergence_delta was supplied in both legacy and current slots"
@@ -799,6 +907,8 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
                 "DeepSHAP uses the background distribution set by set_background(); "
                 "a per-call baseline is not supported"
             )
+        if not isinstance(return_convergence_delta, (bool, np.bool_)):
+            raise TypeError("return_convergence_delta must be a boolean")
         self._validate_method(method)
         if self._background_data is None:
             raise ValueError("Background data not set. Call set_background() first.")
@@ -812,7 +922,7 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
                 name: float(values[i]) for i, name in enumerate(self.feature_names)
             },
             "attributions_raw": values.tolist(),
-            "attributions_std": individual.std(axis=0).tolist(),
+            "attributions_std": scale_safe_mean_std(individual)[1].tolist(),
             "n_background_samples": len(self._background_data),
             "method": "rescale",
             "backend": (
@@ -829,9 +939,15 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
             )
             with preserve_adapter_model_eval(self.model), torch.no_grad():
                 actual = float(self._score_model(input_tensor)[0, target].item())
-                expected = float(self._score_model(baseline_tensor)[:, target].mean().item())
+                baseline_scores = self._score_model(baseline_tensor)[:, target]
+                score_scale = baseline_scores.abs().max()
+                expected = float(
+                    ((baseline_scores / score_scale).mean() * score_scale).item()
+                    if score_scale.item() != 0
+                    else 0.0
+                )
             difference = actual - expected
-            attribution_sum = float(values.sum())
+            attribution_sum = float(scale_safe_sum(values))
             explanation_data.update(
                 {
                     "expected_output": expected,

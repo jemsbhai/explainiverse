@@ -45,6 +45,7 @@ from __future__ import annotations
 import copy
 import warnings
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, localcontext
 from numbers import Real
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
@@ -52,6 +53,7 @@ import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import _stable_mean, _stable_std, _stable_sum
 
 
 def _as_finite_vector(
@@ -109,6 +111,12 @@ def _validate_model_fn(model_fn: Callable) -> None:
         raise TypeError(f"model_fn must be callable, got {type(model_fn).__name__}")
 
 
+def _validate_bool(value, name: str) -> bool:
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a boolean")
+    return bool(value)
+
+
 def _safe_model_output(
     model_fn: Callable,
     x: np.ndarray,
@@ -158,6 +166,7 @@ def _get_explanation_vector(
     explain_kwargs: Optional[Dict[str, object]] = None,
     verify_determinism: bool = True,
 ) -> np.ndarray:
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     if not hasattr(explainer, "explain") or not callable(explainer.explain):
         raise TypeError("explainer must provide a callable explain() method")
     kwargs = {} if explain_kwargs is None else dict(explain_kwargs)
@@ -213,14 +222,80 @@ def _validate_attribution_batch(attributions_list, n: int) -> None:
 
 def _summarize(scores: List[float]) -> Dict[str, object]:
     values = _as_finite_vector(scores, "scores")
+    mean = float(_stable_mean(values))
+    std = float(_stable_std(values))
+    if not np.isfinite(mean) or not np.isfinite(std):
+        raise FloatingPointError("score summary is not representable")
     return {
-        "mean": float(np.mean(values)),
-        "std": float(np.std(values)),
+        "mean": mean,
+        "std": std,
         "max": float(np.max(values)),
         "min": float(np.min(values)),
         "scores": [float(value) for value in values],
         "n_evaluated": int(values.size),
     }
+
+
+def _rms_difference(left: np.ndarray, right: np.ndarray, context: str) -> float:
+    """Compute RMS(left-right) without materializing overflowing squares."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        difference = np.asarray(left, dtype=np.float64) - np.asarray(right, dtype=np.float64)
+    if np.all(np.isfinite(difference)):
+        scale = float(np.max(np.abs(difference)))
+        if scale == 0.0:
+            return 0.0
+        normalized = difference / scale
+        with np.errstate(over="ignore", invalid="ignore"):
+            result = float(scale * np.sqrt(float(_stable_mean(normalized * normalized))))
+        exact_nonzero = True
+    else:
+        with localcontext() as decimal_context:
+            decimal_context.prec = 1600
+            squared = sum(
+                (
+                    (Decimal.from_float(float(left_value)) - Decimal.from_float(float(right_value)))
+                    ** 2
+                    for left_value, right_value in zip(left, right)
+                ),
+                start=Decimal(0),
+            )
+            exact = (squared / Decimal(len(left))).sqrt()
+            result = float(exact)
+            exact_nonzero = exact != 0
+    if not np.isfinite(result) or (result == 0.0 and exact_nonzero):
+        raise FloatingPointError(f"{context} RMS is not representable")
+    return result
+
+
+def _mean_absolute_pair_difference(values: np.ndarray, pairs: List[Tuple[int, int]]) -> float:
+    """Average pair disparities using exact fallback for overflowing differences."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        differences = np.asarray(
+            [abs(values[first] - values[second]) for first, second in pairs],
+            dtype=np.float64,
+        )
+    if np.all(np.isfinite(differences)):
+        result = float(_stable_mean(differences))
+        exact_nonzero = bool(np.any(differences != 0.0))
+    else:
+        with localcontext() as decimal_context:
+            decimal_context.prec = 1600
+            total = sum(
+                (
+                    abs(
+                        Decimal.from_float(float(values[first]))
+                        - Decimal.from_float(float(values[second]))
+                    )
+                    for first, second in pairs
+                ),
+                start=Decimal(0),
+            )
+            exact = total / Decimal(len(pairs))
+            result = float(exact)
+            exact_nonzero = exact != 0
+    if not np.isfinite(result) or (result == 0.0 and exact_nonzero):
+        raise FloatingPointError("symmetry disparity is not representable")
+    return result
 
 
 def compute_completeness(
@@ -257,7 +332,12 @@ def compute_completeness(
         baseline_vector = _as_finite_vector(baseline, "baseline", expected_length=x.size)
     output_at_x = _safe_model_output(model_fn, x, output_func)
     output_at_baseline = _safe_model_output(model_fn, baseline_vector, output_func)
-    return float(abs(float(np.sum(attrs)) - (output_at_x - output_at_baseline)))
+    residual = float(
+        _stable_sum(np.concatenate((attrs, np.array([-output_at_x, output_at_baseline]))))
+    )
+    if not np.isfinite(residual):
+        raise FloatingPointError("completeness residual is not representable")
+    return abs(residual)
 
 
 def compute_completeness_score(
@@ -292,6 +372,7 @@ def compute_batch_completeness(
     verify_determinism: bool = True,
 ) -> Dict[str, object]:
     """Compute completeness residuals for a batch, failing on any bad row."""
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     if model_fn is None:
         raise ValueError("model_fn is required for Completeness evaluation")
     if X is None:
@@ -393,6 +474,7 @@ def compute_non_sensitivity(
     validation; the set formula itself does not evaluate the model once ``X0``
     is supplied.
     """
+    normalize = _validate_bool(normalize, "normalize")
     _validate_model_fn(model_fn)
     attrs = _as_finite_vector(attributions, "attributions")
     x = _as_finite_vector(instance, "instance")
@@ -437,6 +519,8 @@ def compute_non_sensitivity_score(
     verify_determinism: bool = True,
 ) -> float:
     """Generate attributions and compute ``|A0 Δ X0|``."""
+    normalize = _validate_bool(normalize, "normalize")
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     x = _as_finite_vector(instance, "instance")
     attrs = _get_explanation_vector(explainer, x, x.size, explain_kwargs, verify_determinism)
     return compute_non_sensitivity(
@@ -470,6 +554,8 @@ def compute_batch_non_sensitivity(
     verify_determinism: bool = True,
 ) -> Dict[str, object]:
     """Compute non-sensitivity mismatch counts, failing on any bad row."""
+    normalize = _validate_bool(normalize, "normalize")
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     if model_fn is None:
         raise ValueError("model_fn is required for Non-Sensitivity evaluation")
     if X is None:
@@ -554,6 +640,7 @@ def _translation_sensitivity(
     seed: Optional[int],
     verify_determinism: bool,
 ) -> float:
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     if not callable(explain_func):
         raise TypeError(f"explain_func must be callable, got {type(explain_func).__name__}")
     x = _as_finite_vector(instance, "instance")
@@ -562,6 +649,8 @@ def _translation_sensitivity(
         explain_func, x, expected_length=x.size, label="original attributions"
     )
     shifted_x = x + shift_vector
+    if not np.all(np.isfinite(shifted_x)):
+        raise FloatingPointError("shifted instance is not representable")
     shifted = _explanation_result(
         explain_func,
         shifted_x,
@@ -583,7 +672,7 @@ def _translation_sensitivity(
         )
         _assert_deterministic(original, original_again, "explain_func")
         _assert_deterministic(shifted, shifted_again, "explain_func")
-    return float(np.sqrt(np.mean(np.square(original - shifted))))
+    return _rms_difference(original, shifted, "input-invariance")
 
 
 def compute_input_invariance(
@@ -641,6 +730,7 @@ def compute_input_invariance_pytorch(
     A zero result is evidence only for this transformation and tested input.  It
     does not establish global Input Invariance or Implementation Invariance.
     """
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     try:
         import torch
         import torch.nn as nn
@@ -723,6 +813,8 @@ def compute_input_invariance_pytorch(
         _assert_deterministic(original, original_again, "explain_func")
 
     shifted_x = x + shift_vector
+    if not np.all(np.isfinite(shifted_x)):
+        raise FloatingPointError("shifted instance is not representable")
     shifted = _torch_attributions(
         explain_func,
         compensated_model,
@@ -739,7 +831,7 @@ def compute_input_invariance_pytorch(
             "repeated compensated attributions",
         )
         _assert_deterministic(shifted, shifted_again, "explain_func")
-    return float(np.sqrt(np.mean(np.square(original - shifted))))
+    return _rms_difference(original, shifted, "compensated input-invariance")
 
 
 def compute_batch_input_invariance(
@@ -751,6 +843,7 @@ def compute_batch_input_invariance(
     verify_determinism: bool = True,
 ) -> Dict[str, object]:
     """Batch uncompensated translation-sensitivity diagnostic."""
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     warnings.warn(
         "compute_batch_input_invariance is an uncompensated translation-"
         "sensitivity diagnostic, not a test of the Input Invariance axiom",
@@ -784,6 +877,7 @@ def compute_batch_input_invariance_pytorch(
     verify_determinism: bool = True,
 ) -> Dict[str, object]:
     """Batch compensated input-shift tests, failing on any bad row."""
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     batch, n = _validate_batch_inputs(X, max_instances)
     shared_shift = _build_shift(batch[0], shift, seed)
     scores = [
@@ -880,7 +974,7 @@ def compute_symmetry(
                 raise ValueError(
                     f"baseline values for symmetric pair {(first, second)} are " "not equal"
                 )
-    return float(np.mean([abs(attrs[first] - attrs[second]) for first, second in pairs]))
+    return _mean_absolute_pair_difference(attrs, pairs)
 
 
 def compute_symmetry_score(
@@ -922,6 +1016,7 @@ def compute_batch_symmetry(
     verify_determinism: bool = True,
 ) -> Dict[str, object]:
     """Compute conditional attribution-pair disparities for a batch."""
+    verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     if attributions_list is None and (explainer is None or X is None):
         raise ValueError("Either attributions_list or (explainer + X) must be provided")
     if attributions_list is not None:

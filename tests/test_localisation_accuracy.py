@@ -38,10 +38,15 @@ from explainiverse.evaluation.localisation import (
     compute_top_k_intersection,
 )
 
-quantus = pytest.importorskip("quantus")
+
+def _quantus_reference():
+    """Load Quantus only for tests that use the official reference package."""
+    return pytest.importorskip("quantus")
 
 
+@pytest.mark.quantus_reference
 def test_pointing_game_matches_official_quantus_for_tied_maxima():
+    quantus = _quantus_reference()
     attributions = np.array([0.9, 0.9, 0.1, 0.0])
     mask = np.array([0, 1, 0, 0])
 
@@ -65,7 +70,9 @@ def test_pointing_game_default_ranks_raw_values_not_magnitude():
     assert compute_pointing_game(attributions, mask, use_abs=True) == 0.0
 
 
+@pytest.mark.quantus_reference
 def test_attribution_localisation_matches_equation_and_official_quantus():
+    quantus = _quantus_reference()
     attributions = np.array([0.6, -0.5, 0.4, 0.0])
     mask = np.array([1, 1, 0, 0])
     expected = 0.6 / (0.6 + 0.4)
@@ -91,7 +98,9 @@ def test_attribution_localisation_matches_equation_and_official_quantus():
     assert reference == pytest.approx(expected)
 
 
+@pytest.mark.quantus_reference
 def test_top_k_intersection_matches_equation_and_official_quantus():
+    quantus = _quantus_reference()
     attributions = np.array([0.9, 0.8, 0.7, 0.1, 0.0])
     mask = np.array([1, 0, 1, 0, 0])
     expected = 2.0 / 3.0
@@ -119,7 +128,9 @@ def test_top_k_rejects_implicit_k_and_ambiguous_boundary_tie():
         )
 
 
+@pytest.mark.quantus_reference
 def test_relevance_mass_accuracy_matches_arras_and_official_quantus():
+    quantus = _quantus_reference()
     relevance = np.array([0.7, 0.2, 0.1, 0.0])
     mask = np.array([1, 0, 1, 0])
     expected = 0.8
@@ -144,7 +155,9 @@ def test_rma_scale_normalisation_cannot_shift_signed_values():
         compute_relevance_mass_accuracy(np.array([-1.0, 0.5, 1.0, 0.0]), mask, normalise=True)
 
 
+@pytest.mark.quantus_reference
 def test_relevance_rank_accuracy_matches_arras_and_official_quantus():
+    quantus = _quantus_reference()
     relevance = np.array([0.9, 0.8, 0.7, 0.1, 0.0])
     mask = np.array([1, 0, 1, 0, 0])
     expected = 0.5
@@ -161,7 +174,9 @@ def test_relevance_rank_accuracy_matches_arras_and_official_quantus():
     assert reference == pytest.approx(expected)
 
 
+@pytest.mark.quantus_reference
 def test_auc_matches_sklearn_and_official_quantus_with_ties():
+    quantus = _quantus_reference()
     scores = np.array([0.9, 0.5, 0.5, 0.1, 0.0])
     mask = np.array([1, 1, 0, 0, 0])
     expected = roc_auc_score(mask, scores)
@@ -194,7 +209,9 @@ def test_energy_based_pointing_game_rejects_signed_or_zero_energy():
         compute_energy_based_pointing_game(np.zeros(2), mask)
 
 
+@pytest.mark.quantus_reference
 def test_focus_matches_primary_formula_and_official_quantus():
+    quantus = _quantus_reference()
     attributions = np.arange(16, dtype=float).reshape(4, 4)
     # Target images occupy top-left and bottom-left quadrants.
     mask = np.zeros((4, 4))

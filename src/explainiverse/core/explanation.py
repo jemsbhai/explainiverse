@@ -64,7 +64,7 @@ class Explanation:
         if feature_names is not None:
             if isinstance(feature_names, (str, bytes)) or not isinstance(feature_names, Sequence):
                 raise TypeError("feature_names must be a sequence of strings or None")
-            if any(not isinstance(name, str) or not name for name in feature_names):
+            if any(not isinstance(name, str) or not name.strip() for name in feature_names):
                 raise ValueError("feature_names must contain non-empty strings")
             if len(feature_names) != len(set(feature_names)):
                 raise ValueError("feature_names must be unique")

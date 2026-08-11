@@ -28,6 +28,12 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._input import (
+    as_floating_array,
+    scale_safe_mean_std,
+    scale_safe_product_sum,
+    scale_safe_spatial_mean_product_sum,
+)
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 Target = Optional[Union[int, np.integer]]
@@ -75,7 +81,7 @@ def _prepare_single_input(
 ) -> Tuple[np.ndarray, Tuple[int, int]]:
     """Normalize one CHW/HWC image (or an explicit flat-unflatten input)."""
     input_layout = _validate_input_layout(input_layout)
-    prepared = as_real_array(image, name="image", dtype=np.float32, require_finite=True)
+    prepared = as_floating_array(image, name="image")
 
     if prepared.size == 0:
         raise ValueError("image must not be empty")
@@ -243,10 +249,17 @@ def _normalize_cam(cam: np.ndarray) -> np.ndarray:
         raise ValueError(f"CAM must be a non-empty 2D array; got shape {cam.shape}")
     minimum = float(np.min(cam))
     maximum = float(np.max(cam))
-    span = maximum - minimum
-    if span <= np.finfo(np.float64).eps:
+    if minimum == maximum:
         return np.zeros(cam.shape, dtype=np.float64)
-    return (cam - minimum) / span
+
+    # Scale before subtracting.  Direct ``maximum - minimum`` can overflow for
+    # opposite-sign finite extremes, while an absolute epsilon threshold
+    # incorrectly erases genuine structure at very small magnitudes.
+    scale = max(abs(minimum), abs(maximum))
+    scaled = cam / scale
+    scaled_minimum = minimum / scale
+    scaled_span = maximum / scale - scaled_minimum
+    return (scaled - scaled_minimum) / scaled_span
 
 
 def _cam_normalization_metadata(cam: np.ndarray) -> dict:
@@ -256,7 +269,7 @@ def _cam_normalization_metadata(cam: np.ndarray) -> dict:
         raise ValueError("CAM normalization metadata requires one finite non-empty 2D map")
     minimum = float(np.min(values))
     maximum = float(np.max(values))
-    degenerate = bool(maximum - minimum <= np.finfo(np.float64).eps)
+    degenerate = bool(maximum == minimum)
     return {
         "normalization_input_min": minimum,
         "normalization_input_max": maximum,
@@ -379,8 +392,12 @@ class GradCAMExplainer(BaseExplainer):
     def _compute_gradcam(activations: np.ndarray, gradients: np.ndarray) -> np.ndarray:
         """Apply Selvaraju et al. equations 1 and 2 before display scaling."""
         activations, gradients = _validate_spatial_pair(activations, gradients)
-        weights = np.mean(gradients, axis=(2, 3), keepdims=True)
-        return np.maximum(np.sum(weights * activations, axis=1)[0], 0.0)
+        try:
+            weights = scale_safe_mean_std(gradients, axis=(2, 3))[0][:, :, None, None]
+            raw_cam = scale_safe_product_sum(weights, activations, axis=1)[0]
+        except FloatingPointError:
+            raw_cam = scale_safe_spatial_mean_product_sum(activations, gradients)[0]
+        return np.maximum(raw_cam, 0.0)
 
     def _label_for_target(self, target: int) -> str:
         if self.class_names is not None and target < len(self.class_names):

@@ -34,7 +34,11 @@ class CounterfactualExplainer(BaseExplainer):
     Categorical features can only take values observed in ``training_data``.
     Features omitted from both declarations remain fixed to the query value.
     The method requires classifier probabilities, either as ``(n, C)`` or a
-    one-column/one-dimensional binary positive-class probability.
+    one-column/one-dimensional binary positive-class probability. Custom
+    adapters whose one-dimensional probabilities can equal hard-label values
+    such as 0 or 1 should declare
+    ``prediction_output_kind = "probabilities"``; without that marker the two
+    representations are mathematically indistinguishable.
     """
 
     training_data: np.ndarray

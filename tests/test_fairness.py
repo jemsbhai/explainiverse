@@ -78,7 +78,7 @@ def unfair_attributions(sample_data, sensitive_features_binary):
             attrs[i] = [0.7, 0.2, 0.0, 0.1, 0.0]
         else:
             # Group 1 fixture
-            attrs[i] = [0.2, 0.2, 0.1, 0.25, 0.25]
+            attrs[i] = [0.2, 0.2, 0.1, 0.25, 0.35]
     return attrs
 
 

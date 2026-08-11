@@ -262,6 +262,9 @@ class LimeExplainer(BaseExplainer):
 
         if num_features is None:
             num_features = len(self.feature_names)
+        elif not isinstance(num_features, Integral) or isinstance(num_features, bool):
+            raise TypeError("num_features must be an integer or None")
+        num_features = int(num_features)
         if not 1 <= num_features <= len(self.feature_names):
             raise ValueError("num_features must be between 1 and the feature count")
         if (

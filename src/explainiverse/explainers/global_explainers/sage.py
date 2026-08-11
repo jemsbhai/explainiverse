@@ -21,7 +21,11 @@ from sklearn.metrics import accuracy_score, mean_squared_error
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
-from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers._validation import (
+    as_real_array,
+    get_prediction_output_kind,
+    validate_name_sequence,
+)
 
 SAGETask: TypeAlias = Literal["classification", "regression"]
 LossValue: TypeAlias = float | np.ndarray
@@ -101,6 +105,9 @@ class SAGEExplainer(BaseExplainer):
         self.loss_name: str
         self.loss_direction: str
         self.loss_is_custom: bool
+
+        if loss_fn is not None and not callable(loss_fn):
+            raise TypeError("loss_fn must be callable or None")
 
         if loss_fn is None:
             if task == "classification":
@@ -185,6 +192,14 @@ class SAGEExplainer(BaseExplainer):
 
     def _zero_one_loss(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
         """Return zero-one loss after mapping output columns to model class labels."""
+        output_kind = get_prediction_output_kind(self.model)
+        if output_kind == "class_labels":
+            raise ValueError(
+                "SAGE's default classification loss requires class probabilities "
+                "or scores, not hard class-label predictions"
+            )
+        if output_kind == "regression_values":
+            raise ValueError("SAGE classification is incompatible with regression_values outputs")
         predictions = as_real_array(
             y_pred,
             name="classification predictions",
@@ -210,9 +225,15 @@ class SAGEExplainer(BaseExplainer):
             positive = predictions[:, 0]
             if np.any((positive < 0.0) | (positive > 1.0)):
                 raise ValueError("one-column classification outputs must be probabilities")
-            labels = class_labels[(positive >= 0.5).astype(int)]
+            # Match argmax([1 - p, p]): an exact tie selects the first class.
+            labels = class_labels[(positive > 0.5).astype(int)]
         else:
             class_labels = self._labels_for_probability_width(predictions.shape[1])
+            if output_kind == "probabilities":
+                if np.any((predictions < 0.0) | (predictions > 1.0)):
+                    raise ValueError("declared classification probabilities must lie in [0, 1]")
+                if not np.allclose(predictions.sum(axis=1), 1.0, atol=1e-6, rtol=1e-6):
+                    raise ValueError("declared classification probability rows must sum to 1")
             labels = class_labels[np.argmax(predictions, axis=1)]
         return float(1.0 - accuracy_score(targets, labels))
 

@@ -18,22 +18,23 @@ Reference:
     Gurumoorthy, K.S., Dhurandhar, A., Cecchi, G., & Aggarwal, C. (2019).
     "Efficient Data Representation by Selecting Prototypes with Importance Weights"
     IEEE International Conference on Data Mining (ICDM).
-    
+
 Example:
     from explainiverse.explainers.example_based import ProtoDashExplainer
-    
+
     # Dataset summarization
     explainer = ProtoDashExplainer(n_prototypes=10, kernel="rbf")
     result = explainer.find_prototypes(X_train)
     print(f"Prototype indices: {result.explanation_data['prototype_indices']}")
     print(f"Weights: {result.explanation_data['weights']}")
-    
+
     # Explaining a prediction
     explainer = ProtoDashExplainer(model=adapter, n_prototypes=5)
     explanation = explainer.explain(test_instance, X_reference=X_train)
 """
 
-from numbers import Integral
+from fractions import Fraction
+from numbers import Integral, Real
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -120,18 +121,33 @@ class ProtoDashExplainer(BaseExplainer):
             raise TypeError("n_prototypes must be an integer")
         if n_prototypes < 1:
             raise ValueError("n_prototypes must be at least 1")
-        if kernel_width is not None and (not np.isfinite(kernel_width) or kernel_width <= 0):
-            raise ValueError("kernel_width must be a positive finite number")
+        if not isinstance(kernel, str):
+            raise TypeError("kernel must be a string")
+        if kernel_width is not None:
+            if not isinstance(kernel_width, Real) or isinstance(kernel_width, (bool, np.bool_)):
+                raise TypeError("kernel_width must be a real number or None")
+            if not np.isfinite(kernel_width) or kernel_width <= 0:
+                raise ValueError("kernel_width must be a positive finite number")
+        if not isinstance(epsilon, Real) or isinstance(epsilon, (bool, np.bool_)):
+            raise TypeError("epsilon must be a real number")
         if not np.isfinite(epsilon) or epsilon <= 0:
             raise ValueError("epsilon must be a positive finite number")
+        for value, name in (
+            (optimize_weights, "optimize_weights"),
+            (force_n_prototypes, "force_n_prototypes"),
+        ):
+            if not isinstance(value, (bool, np.bool_)):
+                raise TypeError(f"{name} must be a boolean")
         if random_state is not None and (
             not isinstance(random_state, Integral) or isinstance(random_state, bool)
         ):
             raise TypeError("random_state must be an integer or None")
+        if random_state is not None and (random_state < 0 or random_state > 2**32 - 1):
+            raise ValueError("random_state must be between 0 and 2**32 - 1 or None")
 
         self.n_prototypes = int(n_prototypes)
         self.kernel = kernel.lower()
-        self.kernel_width = kernel_width
+        self.kernel_width = None if kernel_width is None else float(kernel_width)
         self.epsilon = float(epsilon)
         self.optimize_weights = bool(optimize_weights)
         self.random_state = None if random_state is None else int(random_state)
@@ -168,11 +184,11 @@ class ProtoDashExplainer(BaseExplainer):
         # Get median of non-zero distances
         mask = distances > 0
         if np.any(mask):
-            median_dist = np.median(distances[mask])
+            median_dist = float(np.median(distances[mask]))
         else:
             median_dist = 1.0
 
-        return max(median_dist, self.epsilon)
+        return float(max(median_dist, self.epsilon))
 
     def _compute_kernel(
         self, X: np.ndarray, Y: Optional[np.ndarray] = None, kernel_width: Optional[float] = None
@@ -414,8 +430,10 @@ class ProtoDashExplainer(BaseExplainer):
         # Use the QP solver
         return self._optimize_weights_qp(K_proto_proto, mu, normalize=False)
 
-    def _normalized_display_weights(self, objective_weights: np.ndarray) -> np.ndarray:
-        """Return normalized presentation weights without altering objective weights."""
+    def _scale_safe_weight_normalization(
+        self, objective_weights: np.ndarray
+    ) -> Tuple[np.ndarray, bool]:
+        """Normalize finite non-negative weights without summation overflow."""
         objective_weights = as_real_array(
             objective_weights,
             name="objective_weights",
@@ -423,11 +441,80 @@ class ProtoDashExplainer(BaseExplainer):
             require_finite=True,
         )
         if objective_weights.size == 0:
-            return objective_weights
-        total = float(np.sum(objective_weights))
-        if total > self.epsilon:
-            return objective_weights / total
-        return np.full(objective_weights.size, 1.0 / objective_weights.size)
+            return objective_weights, False
+        if np.any(objective_weights < 0):
+            raise ValueError("objective_weights must be non-negative")
+
+        scale = float(np.max(objective_weights))
+        if scale == 0.0:
+            return np.zeros_like(objective_weights), False
+
+        scaled_weights = objective_weights / scale
+        scaled_total = float(np.sum(scaled_weights))
+        if scale <= self.epsilon / scaled_total:
+            return np.zeros_like(objective_weights), False
+        return scaled_weights / scaled_total, True
+
+    def _normalized_display_weights(self, objective_weights: np.ndarray) -> np.ndarray:
+        """Normalize positive mass; preserve zero mass instead of inventing weights."""
+        normalized, _ = self._scale_safe_weight_normalization(objective_weights)
+        return normalized
+
+    def _normalized_weights_defined(self, objective_weights: np.ndarray) -> bool:
+        """Return whether canonical weights have enough mass to normalize."""
+        _, is_defined = self._scale_safe_weight_normalization(objective_weights)
+        return is_defined
+
+    @staticmethod
+    def _evaluate_objective(
+        mu: np.ndarray,
+        kernel_matrix: np.ndarray,
+        objective_weights: np.ndarray,
+    ) -> float:
+        """Evaluate the ProtoDash objective without serializing overflow artifacts."""
+        for values, name in (
+            (mu, "mu"),
+            (kernel_matrix, "kernel_matrix"),
+            (objective_weights, "objective_weights"),
+        ):
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f"{name} must contain only finite values")
+
+        try:
+            with np.errstate(over="raise", under="raise", invalid="raise"):
+                result = float(
+                    mu @ objective_weights
+                    - 0.5 * objective_weights @ kernel_matrix @ objective_weights
+                )
+        except FloatingPointError:
+            # The two terms may overflow separately even when exact cancellation
+            # leaves a representable result. Re-evaluate that exceptional path
+            # from the exact binary-float rationals before deciding to fail.
+            weights_exact = [Fraction.from_float(float(value)) for value in objective_weights]
+            linear = sum(
+                Fraction.from_float(float(value)) * weight
+                for value, weight in zip(mu, weights_exact)
+            )
+            quadratic = sum(
+                left_weight * Fraction.from_float(float(kernel_matrix[row, column])) * right_weight
+                for row, left_weight in enumerate(weights_exact)
+                for column, right_weight in enumerate(weights_exact)
+            )
+            exact_result = linear - quadratic / 2
+            try:
+                result = float(exact_result)
+            except OverflowError as exc:
+                raise ValueError(
+                    "ProtoDash objective is not representable as a finite float64 value"
+                ) from exc
+            if result == 0.0 and exact_result != 0:
+                raise ValueError(
+                    "ProtoDash objective is not representable as a nonzero float64 value"
+                )
+
+        if not np.isfinite(result):
+            raise ValueError("ProtoDash objective is not representable as a finite float64 value")
+        return result
 
     def find_prototypes(
         self,
@@ -463,6 +550,9 @@ class ProtoDashExplainer(BaseExplainer):
                 - mmd_score: (optional) Final MMD between prototypes and data
         """
         X = as_real_array(X, name="X", dtype=np.float64, require_finite=True)
+        if not isinstance(return_mmd, (bool, np.bool_)):
+            raise TypeError("return_mmd must be a boolean")
+        return_mmd = bool(return_mmd)
         if X.ndim == 1:
             X = X.reshape(1, -1)
         if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
@@ -532,13 +622,19 @@ class ProtoDashExplainer(BaseExplainer):
         else:
             objective_weights = greedy_weights.copy()
         weights = self._normalized_display_weights(objective_weights)
+        normalized_weights_defined = self._normalized_weights_defined(objective_weights)
 
         # Build explanation data
         explanation_data = {
             "prototype_indices": prototype_indices,
             "weights": weights.tolist(),
             "objective_weights": objective_weights.tolist(),
-            "weight_semantics": "normalized_relative_objective_weights",
+            "weight_semantics": (
+                "normalized_relative_objective_weights"
+                if normalized_weights_defined
+                else "undefined_zero_objective_weight_mass"
+            ),
+            "normalized_weights_defined": normalized_weights_defined,
             "objective_weight_semantics": "unnormalized_protodash_weights",
             "prototypes": X[prototype_indices].tolist(),
             "n_prototypes": len(prototype_indices),
@@ -554,29 +650,34 @@ class ProtoDashExplainer(BaseExplainer):
 
         # Compute MMD if requested
         if return_mmd:
-            proto_idx_local = np.array(local_indices)
-            K_pp = K_cand_cand[np.ix_(proto_idx_local, proto_idx_local)]
-            K_pt = K_cand_target[proto_idx_local, :]
-            K_tt = self._compute_kernel(X_target, X_target, effective_kernel_width)
-
-            # Distributional MMD uses normalized presentation weights. The
-            # unnormalized canonical weights are reported separately above.
-            w = np.array(weights)
-            mmd_sq = w @ K_pp @ w - 2 * w @ K_pt.mean(axis=1) + K_tt.mean()
-            mmd = np.sqrt(max(mmd_sq, 0))
-
-            explanation_data["mmd_score"] = float(mmd)
             explanation_data["mmd_weight_space"] = "normalized_relative_weights"
+            explanation_data["mmd_defined"] = normalized_weights_defined
+            if normalized_weights_defined:
+                # Distributional MMD requires a probability measure over the
+                # selected support. Canonical zero-mass ProtoDash weights do
+                # not define one and must not be replaced with uniform mass.
+                proto_idx_local = np.array(local_indices)
+                K_pp = K_cand_cand[np.ix_(proto_idx_local, proto_idx_local)]
+                K_pt = K_cand_target[proto_idx_local, :]
+                K_tt = self._compute_kernel(X_target, X_target, effective_kernel_width)
+                w = np.array(weights)
+                mmd_sq = w @ K_pp @ w - 2 * w @ K_pt.mean(axis=1) + K_tt.mean()
+                mmd = np.sqrt(max(mmd_sq, 0))
+                explanation_data["mmd_score"] = float(mmd)
+            else:
+                explanation_data["mmd_undefined_reason"] = (
+                    "objective_weights_have_zero_normalizable_mass"
+                )
 
         if local_indices:
             selected = np.asarray(local_indices, dtype=int)
             K_selected = K_cand_cand[np.ix_(selected, selected)]
             mu_selected = K_cand_target[selected].mean(axis=1)
-            objective = (
-                mu_selected @ objective_weights
-                - 0.5 * objective_weights @ K_selected @ objective_weights
+            explanation_data["protodash_objective"] = self._evaluate_objective(
+                mu_selected,
+                K_selected,
+                objective_weights,
             )
-            explanation_data["protodash_objective"] = float(objective)
 
         # Determine label
         if target_class is not None:
@@ -622,6 +723,15 @@ class ProtoDashExplainer(BaseExplainer):
             dtype=np.float64,
             require_finite=True,
         )
+
+        for value, name in (
+            (use_predictions, "use_predictions"),
+            (return_similarity, "return_similarity"),
+        ):
+            if not isinstance(value, (bool, np.bool_)):
+                raise TypeError(f"{name} must be a boolean")
+        use_predictions = bool(use_predictions)
+        return_similarity = bool(return_similarity)
 
         if X_reference.ndim == 1:
             X_reference = X_reference.reshape(1, -1)
@@ -704,13 +814,19 @@ class ProtoDashExplainer(BaseExplainer):
         else:
             objective_weights = greedy_weights.copy()
         weights = self._normalized_display_weights(objective_weights)
+        normalized_weights_defined = self._normalized_weights_defined(objective_weights)
 
         # Build explanation data
         explanation_data = {
             "prototype_indices": [int(i) for i in prototype_indices],
             "weights": weights.tolist(),
             "objective_weights": objective_weights.tolist(),
-            "weight_semantics": "normalized_relative_objective_weights",
+            "weight_semantics": (
+                "normalized_relative_objective_weights"
+                if normalized_weights_defined
+                else "undefined_zero_objective_weight_mass"
+            ),
+            "normalized_weights_defined": normalized_weights_defined,
             "objective_weight_semantics": "unnormalized_protodash_weights",
             "prototypes": X_reference[prototype_indices].tolist(),
             "n_prototypes": len(prototype_indices),
@@ -737,11 +853,11 @@ class ProtoDashExplainer(BaseExplainer):
             selected = np.asarray(prototype_indices, dtype=int)
             K_selected = K_ref_ref[np.ix_(selected, selected)]
             mu_selected = K_ref_instance[selected].mean(axis=1)
-            objective = (
-                mu_selected @ objective_weights
-                - 0.5 * objective_weights @ K_selected @ objective_weights
+            explanation_data["protodash_objective"] = self._evaluate_objective(
+                mu_selected,
+                K_selected,
+                objective_weights,
             )
-            explanation_data["protodash_objective"] = float(objective)
 
         # Add model predictions if available
         if self.model is not None:
@@ -782,6 +898,8 @@ class ProtoDashExplainer(BaseExplainer):
         X = as_real_array(X, name="X", dtype=np.float64, require_finite=True)
         if X.ndim == 1:
             X = X.reshape(1, -1)
+        if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
+            raise ValueError("X must be a non-empty 2D array")
 
         return [self.explain(X[i], X_reference, feature_names) for i in range(X.shape[0])]
 
@@ -922,6 +1040,9 @@ class ProtoDashExplainer(BaseExplainer):
         Returns:
             Dictionary with prototypes, weights, and optionally criticisms.
         """
+        if not isinstance(include_criticisms, (bool, np.bool_)):
+            raise TypeError("include_criticisms must be a boolean")
+        include_criticisms = bool(include_criticisms)
         # Find prototypes
         proto_exp = self.find_prototypes(X, y, feature_names=feature_names, return_mmd=True)
 

@@ -105,8 +105,15 @@ def _select_prediction_output(
     predictions: np.ndarray,
     task: str,
     output_index: int,
+    *,
+    expected_n_outputs: Optional[int] = None,
 ) -> np.ndarray:
     """Select a response/class score with one-column binary semantics."""
+    if expected_n_outputs is not None and predictions.shape[1] != expected_n_outputs:
+        raise ValueError(
+            "model.predict changed its number of output columns during explanation: "
+            f"expected {expected_n_outputs}, got {predictions.shape[1]}"
+        )
     if task == "classification" and predictions.shape[1] == 1:
         positive_probability = as_real_array(
             predictions[:, 0],
@@ -243,12 +250,26 @@ class PartialDependenceExplainer(BaseExplainer):
         if len(unique_values) <= self.grid_resolution:
             return unique_values
 
-        lower, upper = np.percentile(numeric_values, self.percentile_range)
+        percentile_values = np.asarray(
+            np.percentile(numeric_values, self.percentile_range),
+            dtype=float,
+        ).reshape(-1)
+        lower, upper = float(percentile_values[0]), float(percentile_values[1])
         return np.linspace(lower, upper, self.grid_resolution)
 
-    def _selected_predictions(self, X: np.ndarray, output_index: int) -> np.ndarray:
+    def _selected_predictions(
+        self,
+        X: np.ndarray,
+        output_index: int,
+        expected_n_outputs: int,
+    ) -> np.ndarray:
         predictions = _normalize_predictions(self.model.predict(X), X.shape[0])
-        return _select_prediction_output(predictions, self.task, output_index)
+        return _select_prediction_output(
+            predictions,
+            self.task,
+            output_index,
+            expected_n_outputs=expected_n_outputs,
+        )
 
     def _grid_copy(self, feature_indices: Tuple[int, ...]) -> np.ndarray:
         """Copy X without truncating continuous grid values into integer columns."""
@@ -260,31 +281,33 @@ class PartialDependenceExplainer(BaseExplainer):
         return self.X.copy()
 
     def _compute_pdp_1d(
-        self, feature_idx: int, target_class: Optional[int] = None
+        self,
+        feature_idx: int,
+        output_index: int,
+        expected_n_outputs: int,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute one-dimensional partial dependence."""
-        reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
-        output_index = _resolve_output_index(reference, self.task, target_class)
         grid = self._create_grid(feature_idx)
         pdp_values: np.ndarray = np.empty(len(grid), dtype=float)
 
         for grid_idx, value in enumerate(grid):
             X_temp = self._grid_copy((feature_idx,))
             X_temp[:, feature_idx] = value
-            pdp_values[grid_idx] = np.mean(self._selected_predictions(X_temp, output_index))
+            pdp_values[grid_idx] = np.mean(
+                self._selected_predictions(X_temp, output_index, expected_n_outputs)
+            )
         return grid, pdp_values
 
     def _compute_pdp_2d(
         self,
         feature_idx1: int,
         feature_idx2: int,
-        target_class: Optional[int] = None,
+        output_index: int,
+        expected_n_outputs: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute two-dimensional partial dependence."""
         if feature_idx1 == feature_idx2:
             raise ValueError("A PDP interaction requires two distinct features")
-        reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
-        output_index = _resolve_output_index(reference, self.task, target_class)
         grid1 = self._create_grid(feature_idx1)
         grid2 = self._create_grid(feature_idx2)
         pdp_values: np.ndarray = np.empty((len(grid1), len(grid2)), dtype=float)
@@ -294,7 +317,9 @@ class PartialDependenceExplainer(BaseExplainer):
                 X_temp = self._grid_copy((feature_idx1, feature_idx2))
                 X_temp[:, feature_idx1] = value1
                 X_temp[:, feature_idx2] = value2
-                pdp_values[i, j] = np.mean(self._selected_predictions(X_temp, output_index))
+                pdp_values[i, j] = np.mean(
+                    self._selected_predictions(X_temp, output_index, expected_n_outputs)
+                )
         return grid1, grid2, pdp_values
 
     def explain(  # type: ignore[override]
@@ -312,6 +337,7 @@ class PartialDependenceExplainer(BaseExplainer):
 
         reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
         output_index = _resolve_output_index(reference, self.task, target_class)
+        expected_n_outputs = int(reference.shape[1])
         pdp_results: dict[str, object] = {}
         grid_results: dict[str, object] = {}
         grid_types: dict[str, object] = {}
@@ -322,7 +348,12 @@ class PartialDependenceExplainer(BaseExplainer):
                     raise ValueError("A PDP interaction tuple must contain two features")
                 idx1 = self._get_feature_idx(feature[0])
                 idx2 = self._get_feature_idx(feature[1])
-                grid1, grid2, pdp = self._compute_pdp_2d(idx1, idx2, output_index)
+                grid1, grid2, pdp = self._compute_pdp_2d(
+                    idx1,
+                    idx2,
+                    output_index,
+                    expected_n_outputs,
+                )
                 key = f"{self.feature_names[idx1]}_x_{self.feature_names[idx2]}"
                 pdp_results[key] = pdp.tolist()
                 grid_results[key] = {
@@ -335,7 +366,11 @@ class PartialDependenceExplainer(BaseExplainer):
                 ]
             else:
                 idx = self._get_feature_idx(feature)
-                grid, pdp = self._compute_pdp_1d(idx, output_index)
+                grid, pdp = self._compute_pdp_1d(
+                    idx,
+                    output_index,
+                    expected_n_outputs,
+                )
                 key = self.feature_names[idx]
                 pdp_results[key] = pdp.tolist()
                 grid_results[key] = grid.tolist()

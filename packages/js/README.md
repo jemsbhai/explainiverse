@@ -41,8 +41,17 @@ tests, logs, and empty placeholder modules are excluded from the tarball.
 ## Residual limitations
 
 - No compatibility or semantic-equivalence claim is made with Python beyond
-  the documented snake-case `Explanation` wire payload.
-- `Explanation` accepts structured-clone-compatible data only.
+  the JS-defined JSON-safe subset of the snake-case `Explanation` fields that
+  is exercised by the shared fixture. Python's general `to_dict()` payload is
+  intentionally broader and is not accepted automatically. The JS wire is a
+  closed five-field schema; missing or unknown top-level fields are rejected. This subset
+  is recursively restricted to finite JSON values, unique feature names, arrays,
+  and plain string-keyed objects, and is tested through a shared Python/JS
+  fixture. Maps, sets, dates, typed arrays, BigInt, undefined values, symbols,
+  non-finite numbers, signed negative zero, integers outside JavaScript's safe-integer range,
+  sparse or decorated arrays,
+  accessors, custom prototypes, and cycles are rejected. Arbitrary JSON object
+  keys (including `__proto__`) remain inert own data properties.
 - The registry stores metadata and constructors in memory; it does not discover,
   recommend, sandbox, or execute third-party methods safely.
 - The visualizer supports finite scalar feature-attribution maps only. It does

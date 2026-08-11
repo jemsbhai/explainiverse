@@ -19,6 +19,12 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._input import (
+    scale_safe_multi_product_sum,
+    scale_safe_product,
+    scale_safe_product_sum,
+    scale_safe_sum,
+)
 from explainiverse.explainers.gradient.gradcam import (
     Target,
     _cam_normalization_metadata,
@@ -77,8 +83,11 @@ def _adapter_forward(adapter, inputs: np.ndarray, *, prediction_space: bool) -> 
         elif output.ndim == 1:
             output = output.unsqueeze(-1)
 
+    to_numpy = getattr(adapter, "_to_numpy", None)
+    if not callable(to_numpy):
+        raise TypeError("The model adapter does not expose PyTorch-to-NumPy conversion")
     scores = as_real_array(
-        output.detach().cpu().numpy(),
+        to_numpy(output),
         name="model scores",
         require_finite=True,
     )
@@ -112,10 +121,24 @@ def _principal_projection(activations: np.ndarray, *, center: bool) -> np.ndarra
     matrix: np.ndarray = (
         activations[0].reshape(channels, height * width).T.astype(np.float64, copy=False)
     )
+    # A positive global scale leaves the principal direction and the final
+    # display-normalized projection unchanged, while preventing SVD/centering
+    # reductions from overflowing on large finite activation-gradient values.
+    matrix_scale = float(np.max(np.abs(matrix)))
+    if matrix_scale > 0:
+        matrix = matrix / matrix_scale
     if center:
         matrix = matrix - np.mean(matrix, axis=0, keepdims=True)
     _, _, right_vectors = np.linalg.svd(matrix, full_matrices=False)
     projection = matrix @ right_vectors[0]
+    if matrix_scale > 0:
+        with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+            amplitude_projection = projection * matrix_scale
+        # Preserve the raw reference-operation amplitude whenever it is
+        # representable. If it is not, the scaled projection has the identical
+        # sign/order and remains valid for the subsequent min-max display map.
+        if np.isfinite(amplitude_projection).all():
+            projection = amplitude_projection
     projection = _orient_principal_projection(projection)
     return projection.reshape(height, width)
 
@@ -128,6 +151,8 @@ class BaseCAMExplainer(BaseExplainer):
     _uses_gradients = True
     _class_agnostic = False
     _canonical_paper_method = False
+    _formula_verified = False
+    _relu_postprocessing = True
     _reference = "none"
 
     def __init__(
@@ -231,18 +256,22 @@ class BaseCAMExplainer(BaseExplainer):
             raise ValueError(
                 f"{self._explainer_name} produced shape {cam.shape}; expected a 2D CAM"
             )
-        normalization_input = np.maximum(cam, 0.0)
+        normalization_input = np.maximum(cam, 0.0) if self._relu_postprocessing else cam
         normalization_metadata = _cam_normalization_metadata(normalization_input)
         heatmap = _normalize_cam(normalization_input)
         if resize_to_input and heatmap.shape != input_size:
             heatmap = _resize_2d(heatmap, input_size)
 
         metadata: Dict[str, object] = {
-            "formula_verified": True,
+            "formula_verified": self._formula_verified,
             "canonical_paper_method": self._canonical_paper_method,
             "reference": self._reference,
             "score_space": score_space,
-            "postprocessing": "relu_minmax_bilinear_align_corners_false",
+            "postprocessing": (
+                "relu_minmax_bilinear_align_corners_false"
+                if self._relu_postprocessing
+                else "minmax_bilinear_align_corners_false"
+            ),
             **normalization_metadata,
         }
         if self._uses_gradients and not self._class_agnostic:
@@ -299,11 +328,12 @@ class HiResCAMExplainer(BaseCAMExplainer):
     _explainer_name = "HiResCAM"
     _method_key = "hirescam"
     _canonical_paper_method = True
+    _formula_verified = True
     _reference = "Draelos & Carin (2021), HiResCAM equation"
 
     def _compute_cam(self, activations, gradients, image, target_class):
         del image, target_class
-        return np.sum(gradients * activations, axis=1)[0]
+        return scale_safe_product_sum(gradients, activations, axis=1)[0]
 
     def _method_metadata(self):
         return {
@@ -320,26 +350,112 @@ class XGradCAMExplainer(BaseCAMExplainer):
     _explainer_name = "XGradCAM"
     _method_key = "xgradcam"
     _canonical_paper_method = True
+    _formula_verified = True
     _reference = "Fu et al. (BMVC 2020), equations 7-8"
 
     def _compute_cam(self, activations, gradients, image, target_class):
         del image, target_class
-        denominator = np.sum(activations, axis=(2, 3))
-        absolute_sum = np.sum(np.abs(activations), axis=(2, 3))
-        tolerance = np.finfo(np.float64).eps * np.maximum(1.0, absolute_sum) * 16.0
-        near_zero = np.abs(denominator) <= tolerance
-        nonzero_maps = absolute_sum > tolerance
-        if np.any(near_zero & nonzero_maps):
+        activation_scale = np.max(np.abs(activations), axis=(2, 3))
+        safe_activation_scale = np.where(activation_scale == 0, 1, activation_scale)
+        normalized_activations = activations / safe_activation_scale[:, :, None, None]
+        stable_denominator = scale_safe_sum(activations, axis=(2, 3))
+        normalized_denominator = stable_denominator / safe_activation_scale
+        zero_denominator = stable_denominator == 0.0
+        nonzero_maps = activation_scale > 0
+        if np.any(zero_denominator & nonzero_maps):
             raise ValueError(
                 "XGrad-CAM is undefined for a nonzero activation channel whose "
                 "spatial activation sum is zero"
             )
 
-        safe_denominator = np.where(near_zero, 1.0, denominator)
-        numerator = np.sum(gradients * activations, axis=(2, 3))
-        weights = numerator / safe_denominator
-        weights = np.where(near_zero, 0.0, weights)
-        return np.sum(weights[:, :, None, None] * activations, axis=1)[0]
+        gradient_scale = np.max(np.abs(gradients), axis=(2, 3))
+        safe_gradient_scale = np.where(gradient_scale == 0, 1, gradient_scale)
+        normalized_gradients = gradients / safe_gradient_scale[:, :, None, None]
+        normalized_numerator = scale_safe_product_sum(
+            normalized_gradients, normalized_activations, axis=(2, 3)
+        )
+        safe_denominator = np.where(zero_denominator, 1.0, normalized_denominator)
+        normalized_ratio = normalized_numerator / safe_denominator
+        with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+            direct_denominator = np.sum(activations, axis=(2, 3))
+            direct_numerator = np.sum(gradients * activations, axis=(2, 3))
+            direct_weights = direct_numerator / direct_denominator
+        lost_denominator = (direct_denominator == 0.0) & (stable_denominator != 0.0)
+        lost_numerator = (
+            (direct_numerator == 0.0)
+            & (normalized_numerator != 0.0)
+            & (gradient_scale != 0.0)
+            & (activation_scale != 0.0)
+        )
+        direct_safe = (
+            ~zero_denominator
+            & ~lost_denominator
+            & ~lost_numerator
+            & np.isfinite(direct_denominator)
+            & np.isfinite(direct_numerator)
+            & np.isfinite(direct_weights)
+        )
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            direct_weighted_activations = direct_weights[:, :, None, None] * activations
+            activation_over_direct_denominator = activations / direct_denominator[:, :, None, None]
+            factored_direct_activations = (
+                direct_numerator[:, :, None, None] * activation_over_direct_denominator
+            )
+        fallback_weighted_activations = scale_safe_product(
+            normalized_ratio[:, :, None, None],
+            gradient_scale[:, :, None, None],
+            activation_scale[:, :, None, None],
+            normalized_activations,
+        )
+        direct_map_safe = direct_safe[:, :, None, None] & np.isfinite(direct_weighted_activations)
+        factored_direct_safe = (
+            (~zero_denominator & ~lost_denominator & ~lost_numerator)[:, :, None, None]
+            & np.isfinite(direct_denominator)[:, :, None, None]
+            & np.isfinite(direct_numerator)[:, :, None, None]
+            & np.isfinite(activation_over_direct_denominator)
+            & np.isfinite(factored_direct_activations)
+        )
+        # Preserve ordinary-range reference rounding; fully factored normalized
+        # coordinates are used where the channel weight cannot itself be
+        # represented even though its weighted activation map can.
+        weighted_activations = np.where(
+            direct_map_safe,
+            direct_weighted_activations,
+            np.where(
+                factored_direct_safe,
+                factored_direct_activations,
+                fallback_weighted_activations,
+            ),
+        )
+        weighted_activations = np.where(
+            zero_denominator[:, :, None, None], 0.0, weighted_activations
+        )
+        fallback_nonzero_factors = (
+            (normalized_ratio[:, :, None, None] != 0.0)
+            & (gradient_scale[:, :, None, None] != 0.0)
+            & (activation_scale[:, :, None, None] != 0.0)
+            & (normalized_activations != 0.0)
+        )
+        fallback_underflow = (fallback_weighted_activations == 0.0) & fallback_nonzero_factors
+        unstable_channel = (lost_denominator | lost_numerator)[:, :, None, None]
+        needs_fused_fallback = np.any(
+            fallback_underflow | (unstable_channel & (normalized_activations != 0.0)),
+            axis=1,
+        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            direct_cam = np.sum(weighted_activations, axis=1)
+        stable_cam = scale_safe_sum(weighted_activations, axis=1)
+        cam = np.where(np.isfinite(direct_cam), direct_cam, stable_cam)
+        if np.any(needs_fused_fallback):
+            fused_cam = scale_safe_multi_product_sum(
+                normalized_ratio[:, :, None, None],
+                gradient_scale[:, :, None, None],
+                activation_scale[:, :, None, None],
+                normalized_activations,
+                axis=1,
+            )
+            cam = np.where(needs_fused_fallback, fused_cam, cam)
+        return cam[0]
 
     def _method_metadata(self):
         return {
@@ -354,11 +470,12 @@ class LayerCAMExplainer(BaseCAMExplainer):
     _explainer_name = "LayerCAM"
     _method_key = "layercam"
     _canonical_paper_method = True
+    _formula_verified = True
     _reference = "Jiang et al. (IEEE TIP 2021), LayerCAM equation"
 
     def _compute_cam(self, activations, gradients, image, target_class):
         del image, target_class
-        return np.sum(np.maximum(gradients, 0.0) * activations, axis=1)[0]
+        return scale_safe_product_sum(np.maximum(gradients, 0.0), activations, axis=1)[0]
 
 
 class EigenCAMExplainer(BaseCAMExplainer):
@@ -369,6 +486,8 @@ class EigenCAMExplainer(BaseCAMExplainer):
     _uses_gradients = False
     _class_agnostic = True
     _canonical_paper_method = True
+    _formula_verified = True
+    _relu_postprocessing = False
     _reference = "Muhammad & Yeasin (IJCNN 2020), equations 2-3"
 
     def _compute_cam(self, activations, gradients, image, target_class):
@@ -398,6 +517,7 @@ class ScoreCAMExplainer(BaseCAMExplainer):
     _method_key = "scorecam"
     _uses_gradients = False
     _canonical_paper_method = False
+    _formula_verified = True
     _reference = "Wang et al. (CVPRW 2020), Algorithm 1 transcription"
 
     def __init__(
@@ -436,10 +556,14 @@ class ScoreCAMExplainer(BaseCAMExplainer):
         activation_maps = activations[0]
         channels, _, _ = activation_maps.shape
         input_height, input_width = image.shape[-2:]
-        masks = np.empty((channels, input_height, input_width), dtype=np.float32)
+        # Score-CAM's normalized activation masks participate directly in a
+        # model forward pass. Preserve the prepared image/model-aligned dtype:
+        # narrowing float64 masks can collapse channel-score differences that
+        # are small in input space but material after model scaling.
+        masks = np.empty((channels, input_height, input_width), dtype=image.dtype)
         for channel in range(channels):
             upsampled = _resize_2d(activation_maps[channel], (input_height, input_width))
-            masks[channel] = _normalize_cam(upsampled).astype(np.float32)
+            masks[channel] = _normalize_cam(upsampled).astype(image.dtype, copy=False)
 
         scores = np.empty(channels, dtype=np.float64)
         original_image = image[0]
@@ -462,7 +586,7 @@ class ScoreCAMExplainer(BaseCAMExplainer):
         shifted = scores - np.max(scores)
         exponentials = np.exp(shifted)
         weights = exponentials / np.sum(exponentials)
-        return np.sum(weights[:, None, None] * activation_maps, axis=0)
+        return scale_safe_product_sum(weights[:, None, None], activation_maps, axis=0)
 
     def _method_metadata(self):
         declared_space = getattr(self.model, "raw_model_output_space", "unspecified")
@@ -486,6 +610,7 @@ class EigenGradCAMExplainer(BaseCAMExplainer):
     _explainer_name = "EigenGradCAM (library variant)"
     _method_key = "eigengradcam_library_variant"
     _canonical_paper_method = False
+    _formula_verified = True
     _reference = "jacobgil/pytorch-grad-cam eigen_grad_cam.py"
 
     def _compute_cam(self, activations, gradients, image, target_class):
@@ -507,11 +632,12 @@ class GradCAMElementWiseExplainer(BaseCAMExplainer):
     _explainer_name = "GradCAMElementWise (library variant)"
     _method_key = "gradcam_elementwise_library_variant"
     _canonical_paper_method = False
+    _formula_verified = True
     _reference = "jacobgil/pytorch-grad-cam grad_cam_elementwise.py"
 
     def _compute_cam(self, activations, gradients, image, target_class):
         del image, target_class
-        return np.sum(np.maximum(gradients * activations, 0.0), axis=1)[0]
+        return scale_safe_sum(np.maximum(gradients * activations, 0.0), axis=1)[0]
 
     def _method_metadata(self):
         return {"variant_origin": "pytorch-grad-cam library", "paper_attribution": None}
@@ -529,6 +655,7 @@ class AblationCAMExplainer(BaseCAMExplainer):
     _method_key = "ablationcam"
     _uses_gradients = False
     _canonical_paper_method = True
+    _formula_verified = True
     _reference = "Desai & Ramaswamy (WACV 2020), equations 3-4"
 
     def __init__(
@@ -619,7 +746,7 @@ class AblationCAMExplainer(BaseCAMExplainer):
             ablated_scores[start:stop] = scores[:, target_class]
 
         weights = (original_score - ablated_scores) / original_score
-        return np.sum(weights[:, None, None] * activation_maps, axis=0)
+        return scale_safe_product_sum(weights[:, None, None], activation_maps, axis=0)
 
     def _method_metadata(self):
         declared_space = getattr(self.model, "raw_model_output_space", "unspecified")

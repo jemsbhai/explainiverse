@@ -36,10 +36,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -80,10 +82,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.10
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.10"
           cache: pip
@@ -96,37 +100,38 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             --constraint .github/constraints/python310-min-direct.txt \
-            --editable ".[all]" "pytest>=8,<9" "pytest-cov>=4.1,<8"
+            --editable ".[all]" \
+            "pytest>=8,<9" \
+            "pytest-cov>=4.1,<8" \
+            "grad-cam>=1.5.5,<2" \
+            "nbformat>=5.10,<6" \
+            "nbclient>=0.10,<1" \
+            "ipykernel>=6.29,<8"
 
       - name: Validate the minimum dependency graph
         run: python -m pip check
 
-      - name: Exercise minimum-version public and optional contracts
-        run: >-
-          python -m pytest --strict-config --strict-markers
-          tests/test_public_api_accuracy.py
-          tests/test_base_contracts_accuracy.py
-          tests/test_explainer_registry.py
-          tests/test_pytorch_adapter.py
-          tests/test_lime_accuracy.py
-          tests/test_kernelshap_accuracy.py
-          tests/test_treeshap_accuracy.py
-          tests/test_localisation.py
-          tests/reference/test_ref_ig.py
-          tests/reference/test_ref_saliency.py
-          -k "not xgboost_31_vector_intercept"
+      - name: Exercise the complete minimum-version runtime surface
+        run: python -m pytest --strict-config --strict-markers -m "not quantus_reference"
+
+      # Quantus 0.6 requires pandas>=1.5.3, while the supported runtime floor is
+      # pandas 1.5.0. Official Quantus comparisons run in the all-extras jobs;
+      # this job preserves the exact runtime floor and excludes only tests
+      # carrying the registered quantus_reference marker.
 
   base-install:
-    name: Base install without optional dependencies
+    name: Base distribution contract (without Torch/Captum extras)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
@@ -140,6 +145,7 @@ jobs:
       - name: Validate optional-dependency fallbacks and package discovery
         run: |
           python -m pip check
+          python -c "import importlib.util; assert importlib.util.find_spec('skimage'); assert importlib.util.find_spec('torch') is None; assert importlib.util.find_spec('captum') is None"
           python scripts/verify_installed_package.py
 
   quality-and-package:
@@ -151,12 +157,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
@@ -186,9 +193,11 @@ jobs:
 
       - name: Enforce changed-line coverage on pull requests
         if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: >-
           poetry run diff-cover coverage.xml
-          --compare-branch "origin/${{ github.base_ref }}"
+          --compare-branch "origin/$BASE_REF"
           --fail-under=80
 
       - name: Check Black formatting

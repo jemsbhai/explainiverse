@@ -14,6 +14,8 @@ import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.evaluation.robustness import (
+    _finite_mean,
+    _finite_std,
     _generate_perturbations_l2,
     _generate_perturbations_linf,
     _get_explanation_vector,
@@ -22,6 +24,8 @@ from explainiverse.evaluation.robustness import (
     _validate_instance,
     _validate_norm_order,
     _validate_sampling_parameters,
+    _vector_difference,
+    _vector_norm_ratio,
     compute_relative_input_stability,
     compute_relative_output_stability,
 )
@@ -167,8 +171,8 @@ def compute_lipschitz_estimate(
 
     ratios = []
     for neighbour in neighbours:
-        denominator = np.linalg.norm(instance - neighbour, ord=norm_ord)
-        if denominator == 0:
+        denominator_vector = _vector_difference(instance, neighbour, "Lipschitz input")
+        if not np.any(denominator_vector):
             continue
         perturbed = _get_explanation_vector(
             explainer,
@@ -177,8 +181,10 @@ def compute_lipschitz_estimate(
             target_class=target_class,
             expected_target=explained_target,
         )
-        numerator = np.linalg.norm(original - perturbed, ord=norm_ord)
-        ratios.append(float(numerator / denominator))
+        numerator_vector = _vector_difference(original, perturbed, "Lipschitz attribution")
+        ratios.append(
+            _vector_norm_ratio(numerator_vector, denominator_vector, norm_ord, "Lipschitz")
+        )
     if not ratios:
         raise ValueError("No nonzero perturbation denominator was sampled.")
     return float(np.max(ratios))
@@ -328,7 +334,11 @@ def compute_batch_stability(
         defined = values[np.isfinite(values)]
         if defined.size == 0:
             return float("nan"), float("nan"), 0
-        return float(np.mean(defined)), float(np.std(defined)), int(defined.size)
+        return (
+            _finite_mean(defined, "batch stability"),
+            _finite_std(defined, "batch stability"),
+            int(defined.size),
+        )
 
     mean_ris, std_ris, n_valid_ris = summarise_defined(ris_scores)
     mean_lipschitz, std_lipschitz, n_valid_lipschitz = summarise_defined(lip_scores)

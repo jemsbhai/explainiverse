@@ -64,6 +64,7 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._input import scale_safe_product_sum
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 # Check if sklearn is available for linear classifier
@@ -100,6 +101,23 @@ def _check_scipy():
             "scipy is required for TCAV repeated-run inference. "
             "Install it with: pip install scipy"
         )
+
+
+def _normalize_cav_vector(vector: np.ndarray) -> np.ndarray:
+    """Normalize one finite non-zero CAV without norm under/overflow."""
+
+    scale = float(np.max(np.abs(vector)))
+    if scale == 0.0:
+        raise ValueError("CAV vector must be non-zero")
+    scaled = vector / scale
+    scaled_norm_squared = float(scale_safe_product_sum(scaled, scaled, axis=0))
+    scaled_norm = float(np.sqrt(scaled_norm_squared))
+    if not np.isfinite(scaled_norm) or scaled_norm == 0.0:
+        raise ValueError("CAV vector must have a finite non-zero direction")
+    normalized = scaled / scaled_norm
+    if not np.all(np.isfinite(normalized)):
+        raise ValueError("CAV vector normalization produced non-finite values")
+    return normalized
 
 
 class ConceptActivationVector:
@@ -142,9 +160,7 @@ class ConceptActivationVector:
         )
         if vector_array.ndim != 1 or vector_array.size == 0:
             raise ValueError("CAV vector must be a non-empty one-dimensional array")
-        norm = float(np.linalg.norm(vector_array))
-        if not np.isfinite(norm) or norm == 0.0:
-            raise ValueError("CAV vector must be non-zero")
+        normalized_vector = _normalize_cav_vector(vector_array)
 
         accuracy_value = float(accuracy)
         if not np.isfinite(accuracy_value) or not 0.0 <= accuracy_value <= 1.0:
@@ -152,7 +168,7 @@ class ConceptActivationVector:
 
         self.concept_name: str = concept_name
         self.layer_name: str = layer_name
-        self.vector: np.ndarray = vector_array / norm
+        self.vector: np.ndarray = normalized_vector
         self.classifier: Any = classifier
         self.accuracy: float = accuracy_value
         self.metadata: Dict[str, Any] = dict(metadata) if metadata is not None else {}
@@ -234,8 +250,7 @@ class TCAVExplainer(BaseExplainer):
             raise ValueError("layer_name must be a non-empty string")
         if cav_classifier not in {"logistic", "sgd"}:
             raise ValueError("cav_classifier must be 'logistic' or 'sgd'")
-        if not isinstance(random_seed, Integral) or isinstance(random_seed, bool):
-            raise TypeError("random_seed must be an integer")
+        random_seed = self._validate_random_seed(random_seed)
         if not isinstance(require_logit_scores, (bool, np.bool_)):
             raise TypeError("require_logit_scores must be a boolean")
         validated_classes = validate_name_sequence(
@@ -247,7 +262,7 @@ class TCAVExplainer(BaseExplainer):
         self.layer_name: str = layer_name
         self.class_names: Optional[List[str]] = validated_classes
         self.cav_classifier: str = cav_classifier
-        self.random_seed: int = int(random_seed)
+        self.random_seed: int = random_seed
         self.require_logit_scores: bool = bool(require_logit_scores)
         self.last_target_score_space: Optional[str] = None
         self.last_tcav_variant: Optional[str] = None
@@ -281,6 +296,22 @@ class TCAVExplainer(BaseExplainer):
                 raise ValueError(
                     f"Layer '{layer_name}' not found. " f"Available layers: {available_layers}"
                 )
+
+    @staticmethod
+    def _validate_random_seed(value, *, name: str = "random_seed") -> int:
+        """Normalize a seed accepted by NumPy RandomState and scikit-learn."""
+        if not isinstance(value, Integral) or isinstance(value, bool):
+            raise TypeError(f"{name} must be an integer")
+        seed = int(value)
+        maximum = int(np.iinfo(np.uint32).max)
+        if seed < 0 or seed > maximum:
+            raise ValueError(f"{name} must be in [0, {maximum}]")
+        return seed
+
+    def _derived_seed(self, offset: int) -> int:
+        """Derive a reproducible RandomState seed without range overflow."""
+        modulus = int(np.iinfo(np.uint32).max) + 1
+        return (self.random_seed + int(offset)) % modulus
 
     def _get_activations(self, inputs: np.ndarray) -> np.ndarray:
         """
@@ -389,7 +420,7 @@ class TCAVExplainer(BaseExplainer):
             Tuple of (cav_vector, classifier, accuracy)
             Note: accuracy is returned as Python float, not numpy.float64
         """
-        seed = self.random_seed if random_seed is None else int(random_seed)
+        seed = self.random_seed if random_seed is None else self._validate_random_seed(random_seed)
         if not 0.0 <= float(test_size) < 1.0:
             raise ValueError("test_size must be in [0, 1)")
 
@@ -476,7 +507,7 @@ class TCAVExplainer(BaseExplainer):
         # Extract CAV (normal vector to separating hyperplane)
         # For linear classifiers, this is the coefficient vector
         cav_vector = np.asarray(classifier.coef_, dtype=np.float64).reshape(-1)
-        if not np.all(np.isfinite(cav_vector)) or np.linalg.norm(cav_vector) == 0:
+        if not np.all(np.isfinite(cav_vector)) or np.max(np.abs(cav_vector)) == 0:
             raise ValueError("Linear classifier did not learn a finite non-zero CAV")
 
         return cav_vector, classifier, accuracy
@@ -627,7 +658,7 @@ class TCAVExplainer(BaseExplainer):
             raise ValueError("At least four examples are required for random splits")
 
         for i in range(int(n_random)):
-            seed = self.random_seed + i
+            seed = self._derived_seed(i)
             rng = np.random.RandomState(seed)
             # Randomly split into two groups
             indices = rng.permutation(n_samples)
@@ -711,7 +742,9 @@ class TCAVExplainer(BaseExplainer):
 
         # Compute dot product with CAV
         # S_C,k(x) = ∇h_l,k(x) · v_C
-        directional_derivatives = gradients @ cav.vector
+        directional_derivatives = scale_safe_product_sum(gradients, cav.vector, axis=1)
+        if not np.all(np.isfinite(directional_derivatives)):
+            raise FloatingPointError("TCAV directional derivatives must be finite")
 
         return directional_derivatives
 
@@ -771,6 +804,8 @@ class TCAVExplainer(BaseExplainer):
             If return_derivatives=True, returns (score, derivatives) where
             score is Python float and derivatives is numpy array.
         """
+        if not isinstance(return_derivatives, (bool, np.bool_)):
+            raise TypeError("return_derivatives must be a boolean")
         if concept_name not in self.concepts:
             raise ValueError(
                 f"Concept '{concept_name}' not found. "
@@ -956,7 +991,7 @@ class TCAVExplainer(BaseExplainer):
                 concept_activations,
                 random_activations,
                 test_size=float(cav_test_size),
-                random_seed=self.random_seed + run_index,
+                random_seed=self._derived_seed(run_index),
             )
             cav = ConceptActivationVector(
                 concept_name=concept_name,
@@ -991,7 +1026,7 @@ class TCAVExplainer(BaseExplainer):
                 random_activation_sets[left_index],
                 random_activation_sets[right_index],
                 test_size=float(cav_test_size),
-                random_seed=self.random_seed + n_random + pair_index,
+                random_seed=self._derived_seed(n_random + pair_index),
             )
             cav = ConceptActivationVector(
                 concept_name=f"_random_{left_index}_vs_{right_index}",
@@ -1112,6 +1147,13 @@ class TCAVExplainer(BaseExplainer):
         Returns:
             Explanation object with TCAV scores for each concept.
         """
+        if not isinstance(run_significance_test, (bool, np.bool_)):
+            raise TypeError("run_significance_test must be a boolean")
+        if concept_names is not None:
+            validated_concepts = validate_name_sequence(concept_names, name="concept_names")
+            assert validated_concepts is not None
+            concept_names = validated_concepts
+
         test_inputs = as_real_array(
             test_inputs,
             name="test_inputs",
@@ -1155,7 +1197,6 @@ class TCAVExplainer(BaseExplainer):
         if concept_names is None:
             concept_names = list(self.concepts.keys())
         else:
-            concept_names = list(concept_names)
             missing = [name for name in concept_names if name not in self.concepts]
             if missing:
                 raise ValueError(f"Unknown concepts requested: {missing}")
@@ -1195,7 +1236,7 @@ class TCAVExplainer(BaseExplainer):
                 significance_results[concept_name] = sig_result
 
         # Determine class name
-        if self.class_names and target_class is not None:
+        if self.class_names is not None and target_class is not None:
             label_name = self.class_names[target_class]
         else:
             label_name = f"class_{target_class}"

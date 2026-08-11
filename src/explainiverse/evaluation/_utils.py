@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable, Sequence
+from decimal import ROUND_FLOOR, Decimal, localcontext
 from numbers import Integral, Real
 from typing import Any, Optional, Union
 
@@ -148,6 +150,492 @@ def _finite_numeric_array(value: Any, name: str, ndim: int) -> np.ndarray:
     return array
 
 
+def _stable_reduction(values: np.ndarray, axis: int, divisor: int) -> np.ndarray:
+    """Reduce finite binary64 columns with compensated/exact fallback arithmetic."""
+    array = np.asarray(values, dtype=np.float64)
+    if array.shape[axis] == 0:
+        raise ValueError("values must not be empty along the reduction axis")
+    moved = np.moveaxis(array, axis, 0)
+    reduction_size = moved.shape[0]
+    flattened = moved.reshape(reduction_size, -1)
+
+    def reduce_column(column: np.ndarray) -> float:
+        def exact_reduction() -> float:
+            with localcontext() as context:
+                context.prec = 1500 + len(str(reduction_size))
+                total = sum(
+                    (Decimal.from_float(float(value)) for value in column),
+                    start=Decimal(0),
+                )
+                exact = total / Decimal(divisor)
+                reduced = float(exact)
+            if not np.isfinite(reduced) or (reduced == 0.0 and exact != 0):
+                raise FloatingPointError("reduction result is not representable")
+            return reduced
+
+        if divisor != 1:
+            # Rounding the sum to binary64 and then dividing can differ by an
+            # ulp from rounding the exact arithmetic mean once.
+            return exact_reduction()
+        try:
+            result = math.fsum(float(value) for value in column) / divisor
+        except OverflowError:
+            return exact_reduction()
+        if not np.isfinite(result) or (result == 0.0 and np.any(column != 0.0)):
+            # Distinguish exact cancellation from a non-zero exact result that
+            # binary64 cannot represent after the optional division.
+            return exact_reduction()
+        return result
+
+    result = np.fromiter(
+        (reduce_column(flattened[:, index]) for index in range(flattened.shape[1])),
+        dtype=np.float64,
+        count=flattened.shape[1],
+    )
+    return result.reshape(moved.shape[1:])
+
+
+def _stable_sum(values: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Compute an order-independent sum, preserving representable cancellation."""
+    return _stable_reduction(values, axis=axis, divisor=1)
+
+
+def _stable_mean(values: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Compute an order-independent mean without erasing finite residuals.
+
+    ``math.fsum`` preserves compensated cancellation such as
+    ``[1e308, 1, -1e308]``. If its internal finite accumulator overflows before
+    later cancellation, an exact float-to-Decimal fallback evaluates that rare
+    slice with enough precision to retain every binary64 input digit. Division
+    happens before conversion back to float, so a representable mean of an
+    otherwise unrepresentable sum remains available.
+    """
+    array = np.asarray(values, dtype=np.float64)
+    return _stable_reduction(array, axis=axis, divisor=array.shape[axis])
+
+
+def _stable_std(values: np.ndarray, axis: int = 0, ddof: int = 0) -> np.ndarray:
+    """Compute a correctly centered standard deviation along one axis.
+
+    Exact Decimal centering is required here: materializing a rounded mean can
+    turn two adjacent binary64 values into deviations ``[0, -ulp]`` instead of
+    the exact ``[+ulp/2, -ulp/2]`` and misstate their variance by a factor of
+    two.  Conversion back to binary64 happens only after the square root.
+    """
+    array = np.asarray(values, dtype=np.float64)
+    count = array.shape[axis]
+    if isinstance(ddof, bool) or not isinstance(ddof, int) or ddof < 0 or ddof >= count:
+        raise ValueError("ddof must be an integer in [0, reduction size)")
+    if not np.all(np.isfinite(array)):
+        raise ValueError("standard-deviation inputs must contain only finite values")
+    moved = np.moveaxis(array, axis, 0)
+    flattened = moved.reshape(count, -1)
+
+    def exact_column(column: np.ndarray) -> float:
+        with localcontext() as context:
+            context.prec = 3000 + len(str(count))
+            decimal_values = [Decimal.from_float(float(value)) for value in column]
+            mean = sum(decimal_values, start=Decimal(0)) / Decimal(count)
+            variance = sum(
+                ((value - mean) * (value - mean) for value in decimal_values),
+                start=Decimal(0),
+            ) / Decimal(count - ddof)
+            exact = variance.sqrt()
+            result = float(exact)
+        if not np.isfinite(result) or (result == 0.0 and exact != 0):
+            raise FloatingPointError("standard deviation is not representable")
+        return result
+
+    result = np.fromiter(
+        (exact_column(flattened[:, index]) for index in range(flattened.shape[1])),
+        dtype=np.float64,
+        count=flattened.shape[1],
+    )
+    return result.reshape(moved.shape[1:])
+
+
+def _stable_median(values: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Compute a median without overflowing the even-count midpoint average."""
+    array = np.asarray(values, dtype=np.float64)
+    count = array.shape[axis]
+    if count == 0:
+        raise ValueError("values must not be empty along the reduction axis")
+    ordered = np.sort(array, axis=axis)
+    midpoint = count // 2
+    if count % 2:
+        return np.asarray(np.take(ordered, midpoint, axis=axis), dtype=np.float64)
+    middle = np.take(ordered, [midpoint - 1, midpoint], axis=axis)
+    return _stable_mean(middle, axis=axis)
+
+
+def _exact_percentile(values: np.ndarray, percentile: float) -> Decimal:
+    """Return one linear percentile as an exact Decimal expression."""
+    array = np.asarray(values, dtype=np.float64).reshape(-1)
+    if (
+        array.size == 0
+        or not np.all(np.isfinite(array))
+        or not np.isfinite(percentile)
+        or not 0.0 <= percentile <= 100.0
+    ):
+        raise ValueError("percentile inputs must be finite and percentile in [0, 100]")
+    ordered = np.sort(array)
+    with localcontext() as context:
+        context.prec = 2500 + len(str(ordered.size))
+        rank = Decimal.from_float(float(percentile)) * Decimal(ordered.size - 1) / Decimal(100)
+        lower = int(rank.to_integral_value(rounding=ROUND_FLOOR))
+        upper = min(lower + 1, ordered.size - 1)
+        weight = rank - Decimal(lower)
+        exact = (
+            Decimal.from_float(float(ordered[lower])) * (Decimal(1) - weight)
+            + Decimal.from_float(float(ordered[upper])) * weight
+        )
+    return exact
+
+
+def _stable_percentile(values: np.ndarray, percentile: float) -> float:
+    """Evaluate one linear percentile with one checked binary64 rounding."""
+    exact = _exact_percentile(values, percentile)
+    with localcontext() as context:
+        context.prec = 2500
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("percentile result is not representable")
+    return result
+
+
+def _percentile_mask(
+    values: np.ndarray,
+    percentile: float,
+    *,
+    comparison: str,
+) -> np.ndarray:
+    """Compare binary64 observations to an exact interpolated percentile."""
+    array = np.asarray(values, dtype=np.float64)
+    exact = _exact_percentile(array, percentile)
+    decimal_values = np.asarray(
+        [Decimal.from_float(float(value)) for value in array.reshape(-1)], dtype=object
+    ).reshape(array.shape)
+    if comparison == "above":
+        return decimal_values > exact
+    if comparison == "at_or_below":
+        return decimal_values <= exact
+    raise ValueError("percentile comparison must be 'above' or 'at_or_below'")
+
+
+def _stable_dot(left: np.ndarray, right: np.ndarray) -> float:
+    """Compute a finite-input dot product with exact extreme-range fallback."""
+    left_values = np.asarray(left, dtype=np.float64).reshape(-1)
+    right_values = np.asarray(right, dtype=np.float64).reshape(-1)
+    if left_values.shape != right_values.shape or left_values.size == 0:
+        raise ValueError("dot-product inputs must be non-empty and have equal shape")
+    if not np.all(np.isfinite(left_values)) or not np.all(np.isfinite(right_values)):
+        raise ValueError("dot-product inputs must contain only finite values")
+
+    # Do not first materialize binary64 products.  Even when every rounded
+    # product is finite, multiplication rounding can destroy a residual that
+    # later cancellation would make observable; individually underflowed
+    # products can likewise add back to a representable subnormal.  Evaluating
+    # the products of the exact binary64 operands in Decimal gives the dot
+    # product one final rounding at this public numeric boundary.
+    with localcontext() as context:
+        context.prec = 2500 + len(str(left_values.size))
+        total = sum(
+            (
+                Decimal.from_float(float(left_value)) * Decimal.from_float(float(right_value))
+                for left_value, right_value in zip(left_values, right_values)
+            ),
+            start=Decimal(0),
+        )
+        result = float(total)
+    if not np.isfinite(result) or (result == 0.0 and total != 0):
+        raise FloatingPointError("dot product is not representable")
+    return result
+
+
+def _stable_mean_square(values: np.ndarray) -> float:
+    """Compute a mean square when the mean is finite but a square may not be."""
+    array = np.asarray(values, dtype=np.float64).reshape(-1)
+    if array.size == 0 or not np.all(np.isfinite(array)):
+        raise ValueError("mean-square inputs must be non-empty and finite")
+    with localcontext() as context:
+        context.prec = 3000 + len(str(array.size))
+        exact = sum(
+            (
+                Decimal.from_float(float(value)) * Decimal.from_float(float(value))
+                for value in array
+            ),
+            start=Decimal(0),
+        ) / Decimal(array.size)
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("mean square is not representable")
+    return result
+
+
+def _stable_mean_difference(anchor: float, values: np.ndarray) -> float:
+    """Compute ``mean(anchor - values)`` with one final binary64 rounding."""
+    array = np.asarray(values, dtype=np.float64).reshape(-1)
+    if array.size == 0 or not np.all(np.isfinite(array)) or not np.isfinite(anchor):
+        raise ValueError("mean-difference inputs must be non-empty and finite")
+    with localcontext() as context:
+        context.prec = 1600 + len(str(array.size))
+        exact = Decimal.from_float(float(anchor)) - sum(
+            (Decimal.from_float(float(value)) for value in array),
+            start=Decimal(0),
+        ) / Decimal(array.size)
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("mean difference is not representable")
+    return result
+
+
+def _stable_difference_of_means(left: np.ndarray, right: np.ndarray) -> float:
+    """Compute ``mean(left) - mean(right)`` before one binary64 rounding."""
+    left_values = np.asarray(left, dtype=np.float64).reshape(-1)
+    right_values = np.asarray(right, dtype=np.float64).reshape(-1)
+    if (
+        left_values.size == 0
+        or right_values.size == 0
+        or not np.all(np.isfinite(left_values))
+        or not np.all(np.isfinite(right_values))
+    ):
+        raise ValueError("mean-difference inputs must be non-empty and finite")
+    with localcontext() as context:
+        context.prec = 2500 + len(str(max(left_values.size, right_values.size)))
+        left_mean = sum(
+            (Decimal.from_float(float(value)) for value in left_values),
+            start=Decimal(0),
+        ) / Decimal(left_values.size)
+        right_mean = sum(
+            (Decimal.from_float(float(value)) for value in right_values),
+            start=Decimal(0),
+        ) / Decimal(right_values.size)
+        exact = left_mean - right_mean
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("difference of means is not representable")
+    return result
+
+
+def _stable_ratio_of_means(numerator: np.ndarray, denominator: np.ndarray) -> float:
+    """Compute ``mean(numerator) / mean(denominator)`` without double rounding."""
+    numerator_values = np.asarray(numerator, dtype=np.float64).reshape(-1)
+    denominator_values = np.asarray(denominator, dtype=np.float64).reshape(-1)
+    if (
+        numerator_values.size == 0
+        or denominator_values.size == 0
+        or not np.all(np.isfinite(numerator_values))
+        or not np.all(np.isfinite(denominator_values))
+    ):
+        raise ValueError("ratio-of-means inputs must be non-empty and finite")
+    with localcontext() as context:
+        context.prec = 2500 + len(str(max(numerator_values.size, denominator_values.size)))
+        numerator_mean = sum(
+            (Decimal.from_float(float(value)) for value in numerator_values),
+            start=Decimal(0),
+        ) / Decimal(numerator_values.size)
+        denominator_mean = sum(
+            (Decimal.from_float(float(value)) for value in denominator_values),
+            start=Decimal(0),
+        ) / Decimal(denominator_values.size)
+        if denominator_mean == 0:
+            raise ValueError("ratio of means is undefined because the denominator mean is zero")
+        exact = numerator_mean / denominator_mean
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("ratio of means is not representable")
+    return result
+
+
+def _pearson_from_decimal(
+    left_decimal: Sequence[Decimal], right_decimal: Sequence[Decimal]
+) -> float:
+    """Evaluate Pearson's coefficient from exact decimal observations."""
+    if len(left_decimal) != len(right_decimal) or len(left_decimal) < 2:
+        raise ValueError("Pearson inputs must contain at least two paired values")
+    with localcontext() as context:
+        context.prec = 3000 + len(str(len(left_decimal)))
+        count = Decimal(len(left_decimal))
+        sum_left = sum(left_decimal, start=Decimal(0))
+        sum_right = sum(right_decimal, start=Decimal(0))
+        cross = sum(
+            (
+                left_value * right_value
+                for left_value, right_value in zip(left_decimal, right_decimal)
+            ),
+            start=Decimal(0),
+        )
+        left_square = sum((value * value for value in left_decimal), start=Decimal(0))
+        right_square = sum((value * value for value in right_decimal), start=Decimal(0))
+        covariance = count * cross - sum_left * sum_right
+        left_variance = count * left_square - sum_left * sum_left
+        right_variance = count * right_square - sum_right * sum_right
+        if left_variance <= 0 or right_variance <= 0:
+            raise ValueError("Pearson correlation is undefined for a constant input")
+        exact = covariance / (left_variance * right_variance).sqrt()
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("Pearson correlation is not representable")
+    return float(np.clip(result, -1.0, 1.0))
+
+
+def _stable_pearson(left: np.ndarray, right: np.ndarray) -> float:
+    """Compute Pearson correlation with exact binary64 centering arithmetic."""
+    left_values = np.asarray(left, dtype=np.float64).reshape(-1)
+    right_values = np.asarray(right, dtype=np.float64).reshape(-1)
+    if (
+        left_values.shape != right_values.shape
+        or left_values.size < 2
+        or not np.all(np.isfinite(left_values))
+        or not np.all(np.isfinite(right_values))
+    ):
+        raise ValueError("Pearson inputs must be paired finite vectors of length at least two")
+    return _pearson_from_decimal(
+        [Decimal.from_float(float(value)) for value in left_values],
+        [Decimal.from_float(float(value)) for value in right_values],
+    )
+
+
+def _stable_pearson_affine(
+    left: np.ndarray,
+    anchor: float,
+    values: np.ndarray,
+    *,
+    absolute: bool = False,
+) -> float:
+    """Correlate ``left`` with exact ``anchor - values`` observations."""
+    left_values = np.asarray(left, dtype=np.float64).reshape(-1)
+    right_values = np.asarray(values, dtype=np.float64).reshape(-1)
+    if (
+        left_values.shape != right_values.shape
+        or left_values.size < 2
+        or not np.isfinite(anchor)
+        or not np.all(np.isfinite(left_values))
+        or not np.all(np.isfinite(right_values))
+    ):
+        raise ValueError("affine Pearson inputs must be paired finite vectors")
+    anchor_decimal = Decimal.from_float(float(anchor))
+    differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
+    if absolute:
+        differences = [abs(value) for value in differences]
+    return _pearson_from_decimal(
+        [Decimal.from_float(float(value)) for value in left_values], differences
+    )
+
+
+def _stable_pearson_decimal_affine(
+    left: Sequence[Decimal],
+    anchor: float,
+    values: np.ndarray,
+) -> float:
+    """Correlate exact aggregate observations with ``anchor - values``."""
+    right_values = np.asarray(values, dtype=np.float64).reshape(-1)
+    if (
+        len(left) != right_values.size
+        or len(left) < 2
+        or not np.isfinite(anchor)
+        or not np.all(np.isfinite(right_values))
+    ):
+        raise ValueError("decimal affine Pearson inputs must be paired and finite")
+    anchor_decimal = Decimal.from_float(float(anchor))
+    differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
+    return _pearson_from_decimal(list(left), differences)
+
+
+def _decimal_ranks(values: Sequence[Decimal]) -> np.ndarray:
+    """Return one-based average ranks using exact Decimal comparisons."""
+    order = sorted(range(len(values)), key=values.__getitem__)
+    ranks = np.empty(len(values), dtype=np.float64)
+    start = 0
+    while start < len(order):
+        end = start + 1
+        while end < len(order) and values[order[end]] == values[order[start]]:
+            end += 1
+        average_rank = (start + 1 + end) / 2.0
+        for position in range(start, end):
+            ranks[order[position]] = average_rank
+        start = end
+    return ranks
+
+
+def _stable_spearman(left: np.ndarray, right: np.ndarray) -> float:
+    """Compute Spearman correlation from exact ranks and stable Pearson."""
+    left_values = np.asarray(left, dtype=np.float64).reshape(-1)
+    right_values = np.asarray(right, dtype=np.float64).reshape(-1)
+    if (
+        left_values.shape != right_values.shape
+        or left_values.size < 2
+        or not np.all(np.isfinite(left_values))
+        or not np.all(np.isfinite(right_values))
+    ):
+        raise ValueError("Spearman inputs must be paired finite vectors of length at least two")
+    return _stable_pearson(
+        _decimal_ranks([Decimal.from_float(float(value)) for value in left_values]),
+        _decimal_ranks([Decimal.from_float(float(value)) for value in right_values]),
+    )
+
+
+def _stable_spearman_affine(
+    left: np.ndarray,
+    anchor: float,
+    values: np.ndarray,
+    *,
+    absolute: bool = False,
+) -> float:
+    """Rank exact ``anchor - values`` observations before correlation."""
+    left_values = np.asarray(left, dtype=np.float64).reshape(-1)
+    right_values = np.asarray(values, dtype=np.float64).reshape(-1)
+    if (
+        left_values.shape != right_values.shape
+        or left_values.size < 2
+        or not np.isfinite(anchor)
+        or not np.all(np.isfinite(left_values))
+        or not np.all(np.isfinite(right_values))
+    ):
+        raise ValueError("affine Spearman inputs must be paired finite vectors")
+    anchor_decimal = Decimal.from_float(float(anchor))
+    differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
+    if absolute:
+        differences = [abs(value) for value in differences]
+    return _stable_pearson(
+        _decimal_ranks([Decimal.from_float(float(value)) for value in left_values]),
+        _decimal_ranks(differences),
+    )
+
+
+def _stable_cosine(left: np.ndarray, right: np.ndarray) -> float:
+    """Compute cosine similarity without erasing cross-exponent residuals."""
+    left_values = np.asarray(left, dtype=np.float64).reshape(-1)
+    right_values = np.asarray(right, dtype=np.float64).reshape(-1)
+    if (
+        left_values.shape != right_values.shape
+        or left_values.size == 0
+        or not np.all(np.isfinite(left_values))
+        or not np.all(np.isfinite(right_values))
+    ):
+        raise ValueError("cosine inputs must be paired non-empty finite vectors")
+    with localcontext() as context:
+        context.prec = 3000 + len(str(left_values.size))
+        left_decimal = [Decimal.from_float(float(value)) for value in left_values]
+        right_decimal = [Decimal.from_float(float(value)) for value in right_values]
+        dot = sum(
+            (
+                left_value * right_value
+                for left_value, right_value in zip(left_decimal, right_decimal)
+            ),
+            start=Decimal(0),
+        )
+        left_square = sum((value * value for value in left_decimal), start=Decimal(0))
+        right_square = sum((value * value for value in right_decimal), start=Decimal(0))
+        if left_square == 0 or right_square == 0:
+            raise ValueError("cosine similarity is undefined for a zero vector")
+        exact = dot / (left_square * right_square).sqrt()
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("cosine similarity is not representable")
+    return float(np.clip(result, -1.0, 1.0))
+
+
 def compute_baseline_values(
     baseline: Union[str, float, np.ndarray, Callable[[np.ndarray], Any]],
     background_data: Optional[np.ndarray] = None,
@@ -173,9 +661,9 @@ def compute_baseline_values(
     if isinstance(baseline, str):
         assert background is not None
         if baseline == "mean":
-            result = np.mean(background, axis=0)
+            result = _stable_mean(background, axis=0)
         elif baseline == "median":
-            result = np.median(background, axis=0)
+            result = _stable_median(background, axis=0)
         else:
             raise ValueError("baseline string must be 'mean' or 'median'")
     elif callable(baseline):
@@ -198,7 +686,8 @@ def compute_baseline_values(
     values = _finite_numeric_array(result, "resolved baseline", ndim=1)
     if expected_features is not None and values.size != expected_features:
         raise ValueError(
-            f"baseline must resolve to shape ({expected_features},); got {values.shape}"
+            f"baseline must resolve to shape ({expected_features},); provide "
+            f"exactly one value per feature; got {values.shape}"
         )
     if background is not None and values.size != background.shape[1]:
         raise ValueError("resolved baseline length must equal background_data columns")
@@ -543,9 +1032,22 @@ def compute_prediction_change(
 
     original_value = float(original_outputs[original_index])
     perturbed_value = float(perturbed_outputs[original_index])
-    numerator = abs(original_value - perturbed_value)
+    with localcontext() as context:
+        context.prec = 2500
+        exact_numerator = abs(
+            Decimal.from_float(original_value) - Decimal.from_float(perturbed_value)
+        )
     if metric == "absolute":
+        numerator = float(exact_numerator)
+        if not np.isfinite(numerator) or (numerator == 0.0 and exact_numerator != 0):
+            raise FloatingPointError("absolute prediction change is not representable")
         return numerator
     if original_value == 0.0:
-        return float("nan") if numerator == 0.0 else float("inf")
-    return numerator / abs(original_value)
+        return float("nan") if exact_numerator == 0 else float("inf")
+    with localcontext() as context:
+        context.prec = 2500
+        exact_relative = exact_numerator / abs(Decimal.from_float(original_value))
+        relative = float(exact_relative)
+    if not np.isfinite(relative) or (relative == 0.0 and exact_relative != 0):
+        raise FloatingPointError("relative prediction change is not representable")
+    return relative

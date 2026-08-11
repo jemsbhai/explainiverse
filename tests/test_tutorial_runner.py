@@ -141,6 +141,29 @@ def test_published_output_cannot_disclose_checkout_path():
         runner._validate_published_outputs(path, changed)
 
 
+def test_clean_execution_must_reproduce_published_outputs():
+    path = Path("deterministic.ipynb")
+    published = _notebook_with_code("print('fresh deterministic value')")
+    published.cells[0].execution_count = 1
+    published.cells[0].outputs = [
+        nbformat.v4.new_output("stream", name="stdout", text="stale value\n")
+    ]
+    executed = copy.deepcopy(published)
+    executed.cells[0].outputs = [
+        nbformat.v4.new_output(
+            "stream",
+            name="stdout",
+            text="fresh deterministic value\n",
+        )
+    ]
+
+    with pytest.raises(ValueError, match="no longer matches the published outputs"):
+        runner._validate_reexecuted_outputs(path, published, executed)
+
+    published.cells[0].outputs = copy.deepcopy(executed.cells[0].outputs)
+    runner._validate_reexecuted_outputs(path, published, executed)
+
+
 def test_checkout_import_and_hashes_are_current_and_stable():
     runner._assert_checkout_import()
     assert runner._lock_digest() == runner._lock_digest()

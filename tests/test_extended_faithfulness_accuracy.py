@@ -31,6 +31,13 @@ from explainiverse.evaluation.faithfulness_extended import (
 )
 
 
+def _manual_trapezoid(values, coordinates):
+    """Independent NumPy-1.24-compatible trapezoidal integration oracle."""
+    y = np.asarray(values, dtype=np.float64)
+    x = np.asarray(coordinates, dtype=np.float64)
+    return float(np.sum((y[:-1] + y[1:]) * np.diff(x) / 2.0))
+
+
 class LinearScalarModel:
     """Finite scalar oracle f(x) = intercept + x dot weights."""
 
@@ -69,9 +76,9 @@ def test_petsiuk_vector_adaptations_integrate_raw_output_curves():
     insertion_curve = np.array([0.1, 0.5, 0.7, 0.8])
     fractions = np.linspace(0.0, 1.0, 4)
     assert deletion["curve"] == pytest.approx(deletion_curve)
-    assert deletion["auc"] == pytest.approx(np.trapezoid(deletion_curve, fractions))
+    assert deletion["auc"] == pytest.approx(_manual_trapezoid(deletion_curve, fractions))
     assert insertion["curve"] == pytest.approx(insertion_curve)
-    assert insertion["auc"] == pytest.approx(np.trapezoid(insertion_curve, fractions))
+    assert insertion["auc"] == pytest.approx(_manual_trapezoid(insertion_curve, fractions))
 
 
 def test_unspecified_ranking_ties_use_stable_feature_index_order():
@@ -98,7 +105,7 @@ def test_pixel_flipping_uses_raw_recorded_function_values():
 
     expected = np.array([0.8, 0.4, 0.2, 0.1])
     assert result["curve"] == pytest.approx(expected)
-    assert result["auc"] == pytest.approx(np.trapezoid(expected, np.linspace(0.0, 1.0, 4)))
+    assert result["auc"] == pytest.approx(_manual_trapezoid(expected, np.linspace(0.0, 1.0, 4)))
 
 
 def test_aix360_faithfulness_proxy_uses_signed_drops():
@@ -168,7 +175,9 @@ def test_irof_uses_original_score_normalized_aoc():
     expected_curve = 1.0 - predictions / predictions[0]
     assert details["normalised_predictions"] == pytest.approx(predictions / predictions[0])
     assert details["curve"] == pytest.approx(expected_curve)
-    assert details["aoc"] == pytest.approx(np.trapezoid(expected_curve, np.linspace(0.0, 1.0, 4)))
+    assert details["aoc"] == pytest.approx(
+        _manual_trapezoid(expected_curve, np.linspace(0.0, 1.0, 4))
+    )
 
 
 def test_irof_default_segment_importance_is_mean_l1_relevance():

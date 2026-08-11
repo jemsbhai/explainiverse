@@ -82,6 +82,10 @@ class PyTorchAdapter(BaseModelAdapter):
         output_activation: Optional activation function for outputs
         raw_model_output_space: Declared semantic space of the wrapped
             module's untransformed output
+        prediction_output_kind: ``"probabilities"`` when the adapter applies
+            a classification activation, ``"regression_values"`` for
+            regression, and ``None`` for the deliberately ambiguous
+            multi-output ``output_activation='none'`` classification path.
         gradient_output: Requested score space for gradient computations
         last_gradient_output_space: Effective score space of the latest
             gradient computation
@@ -166,7 +170,15 @@ class PyTorchAdapter(BaseModelAdapter):
         if int(batch_size) <= 0:
             raise ValueError("batch_size must be a positive integer")
 
-        super().__init__(model, feature_names)
+        super().__init__(
+            model,
+            feature_names,
+            prediction_output_kind=(
+                "probabilities"
+                if task == "classification" and output_activation in {"auto", "softmax", "sigmoid"}
+                else "regression_values" if task == "regression" else None
+            ),
+        )
 
         self.task: str = task
         self.class_names = self._normalize_class_names(class_names, task)
@@ -315,22 +327,50 @@ class PyTorchAdapter(BaseModelAdapter):
         return array_values
 
     def _to_tensor(self, data) -> "torch.Tensor":
-        """Convert input under the configured dtype and device policy."""
+        """Convert input under the configured dtype and device policy.
+
+        The returned tensor always owns distinct storage.  ``torch.as_tensor``
+        can otherwise alias a CPU NumPy array, allowing an in-place model
+        operation to mutate the caller's input as an undocumented side effect.
+        """
         tensor = (
             data.to(self.device)
             if isinstance(data, torch.Tensor)
             else torch.as_tensor(data, device=self.device)
         )
         if isinstance(self.input_dtype, torch.dtype):
-            return tensor.to(dtype=self.input_dtype)
-        if self.input_dtype == "preserve" or not tensor.is_floating_point():
-            return tensor
-        model_dtype = self._model_floating_dtype()
-        return tensor.to(dtype=model_dtype) if model_dtype is not None else tensor
+            converted = tensor.to(dtype=self.input_dtype)
+        elif self.input_dtype == "preserve" or not tensor.is_floating_point():
+            converted = tensor
+        else:
+            model_dtype = self._model_floating_dtype()
+            converted = tensor.to(dtype=model_dtype) if model_dtype is not None else tensor
+        return converted.clone()
 
     def _to_numpy(self, tensor: "torch.Tensor") -> np.ndarray:
-        """Convert tensor to numpy array."""
-        return tensor.detach().cpu().numpy()
+        """Convert a tensor to NumPy, bridging Torch-only floating dtypes.
+
+        NumPy has no native bfloat16 dtype.  Preserve the represented values by
+        widening bfloat16 at the public NumPy boundary instead of failing after
+        an otherwise valid model computation.
+        """
+        detached = tensor.detach().cpu()
+        if detached.dtype == torch.bfloat16:
+            detached = detached.to(dtype=torch.float32)
+        return detached.numpy()
+
+    def _resolve_layer(self, layer_name: str) -> "nn.Module":
+        """Return one named module with a stable, actionable error contract."""
+        if not isinstance(layer_name, str):
+            raise TypeError("layer_name must be a non-empty string")
+        if not layer_name.strip():
+            raise ValueError("layer_name must be a non-empty string")
+        modules = dict(self.model.named_modules())
+        layer = modules.get(layer_name)
+        if layer is None:
+            available = [name for name in modules if name]
+            raise ValueError(f"Layer {layer_name!r} not found. Available layers: {available}")
+        return layer
 
     def _apply_activation(self, output: "torch.Tensor") -> "torch.Tensor":
         """Apply output activation function."""
@@ -454,7 +494,9 @@ class PyTorchAdapter(BaseModelAdapter):
 
         Returns:
             Predictions as numpy array:
-            - Classification: probabilities of shape (n_samples, n_classes)
+            - Classification: probabilities of shape (n_samples, n_classes),
+              except that ``output_activation='none'`` preserves multi-output
+              model values, which may instead be arbitrary class scores.
             - Regression: values of shape (n_samples, n_outputs)
         """
         prepared_data = self._prepare_input(data)
@@ -594,10 +636,15 @@ class PyTorchAdapter(BaseModelAdapter):
         # Convert to tensor with gradient tracking
         # Never toggle ``requires_grad`` or attach history to a caller-owned
         # tensor when conversion is a no-op on dtype/device.
-        tensor_data = self._to_tensor(prepared_data).detach().clone()
-        if not tensor_data.is_floating_point():
+        tensor_leaf = self._to_tensor(prepared_data).detach().clone()
+        if not tensor_leaf.is_floating_point():
             raise TypeError("input gradients require a floating-point input dtype")
-        tensor_data.requires_grad_(True)
+        tensor_leaf.requires_grad_(True)
+        # A caller model may legitimately mutate its input in place. PyTorch
+        # forbids that operation on a leaf requiring gradients, so pass a
+        # differentiable non-leaf clone while retaining the leaf as the
+        # derivative root.
+        tensor_data = tensor_leaf.clone()
 
         # Forward pass
         output = self.model(tensor_data)
@@ -609,11 +656,20 @@ class PyTorchAdapter(BaseModelAdapter):
         )
         self.last_gradient_output_space = output_space
         target_scores = self._select_target_scores(score_output, target_class)
-        gradients = torch.autograd.grad(target_scores.sum(), tensor_data)[0]
+        gradients = torch.autograd.grad(target_scores.sum(), tensor_leaf)[0]
 
         return (self._to_numpy(score_output), self._to_numpy(gradients))
 
     def get_layer_output(self, data: np.ndarray, layer_name: str) -> np.ndarray:
+        """Return one target-layer activation while serializing model hooks."""
+        # Import lazily to avoid making adapter module import depend on the
+        # gradient explainer package during initialization.
+        from explainiverse.explainers.gradient._model_state import adapter_model_operation_lock
+
+        with adapter_model_operation_lock(self.model):
+            return self._get_layer_output_unlocked(data, layer_name)
+
+    def _get_layer_output_unlocked(self, data: np.ndarray, layer_name: str) -> np.ndarray:
         """
         Get intermediate layer activations.
 
@@ -629,15 +685,27 @@ class PyTorchAdapter(BaseModelAdapter):
         prepared_data = self._prepare_input(data)
 
         activations: Dict[str, "torch.Tensor"] = {}
+        hook_calls = 0
 
         def hook_fn(module, input, output):
-            activations["output"] = output
+            del module, input
+            nonlocal hook_calls
+            hook_calls += 1
+            if hook_calls > 1:
+                raise RuntimeError(
+                    f"Layer {layer_name!r} executed more than once in one forward pass. "
+                    "Shared or recurrent target layers require explicit occurrence "
+                    "selection, which this API does not currently expose."
+                )
+            if not isinstance(output, torch.Tensor):
+                raise TypeError("get_layer_output requires the target layer to return one tensor")
+            # Snapshot the exact pre-downstream value without replacing the
+            # tensor consumed by the model.  Replacing it with an identity clone
+            # changes valid alias-sensitive forward semantics when the target
+            # module retains its returned object.
+            activations["snapshot"] = output.detach().clone()
 
-        # Find and hook the layer
-        layer = dict(self.model.named_modules()).get(layer_name)
-        if layer is None:
-            available = list(dict(self.model.named_modules()).keys())
-            raise ValueError(f"Layer '{layer_name}' not found. Available layers: {available}")
+        layer = self._resolve_layer(layer_name)
 
         handle = layer.register_forward_hook(hook_fn)
 
@@ -648,9 +716,23 @@ class PyTorchAdapter(BaseModelAdapter):
         finally:
             handle.remove()
 
-        return self._to_numpy(activations["output"])
+        if "snapshot" not in activations:
+            raise RuntimeError(f"Layer {layer_name!r} did not run during the model forward pass")
+        return self._to_numpy(activations["snapshot"])
 
     def get_layer_gradients(
+        self,
+        data: np.ndarray,
+        layer_name: str,
+        target_class: Optional[Union[int, np.integer, np.ndarray, "torch.Tensor"]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return target-layer activations/gradients while serializing hooks."""
+        from explainiverse.explainers.gradient._model_state import adapter_model_operation_lock
+
+        with adapter_model_operation_lock(self.model):
+            return self._get_layer_gradients_unlocked(data, layer_name, target_class)
+
+    def _get_layer_gradients_unlocked(
         self,
         data: np.ndarray,
         layer_name: str,
@@ -674,25 +756,46 @@ class PyTorchAdapter(BaseModelAdapter):
         prepared_data = self._prepare_input(data)
 
         activations: Dict[str, "torch.Tensor"] = {}
+        captured_gradients: Dict[str, "torch.Tensor"] = {}
+        tensor_hook_handles = []
+        hook_calls = 0
+
+        def tensor_gradient_hook(gradient: "torch.Tensor") -> None:
+            # Tensor hooks registered before a downstream in-place operation
+            # observe the derivative with respect to the pre-operation value.
+            captured_gradients["snapshot"] = gradient.detach().clone()
 
         def forward_hook(module, input, output):
+            del module, input
+            nonlocal hook_calls
+            hook_calls += 1
+            if hook_calls > 1:
+                raise RuntimeError(
+                    f"Layer {layer_name!r} executed more than once in one forward pass. "
+                    "Shared or recurrent target layers require explicit occurrence "
+                    "selection, which this API does not currently expose."
+                )
             if not isinstance(output, torch.Tensor):
                 raise TypeError(
                     "get_layer_gradients requires the target layer to return " "one torch.Tensor"
                 )
-            activations["output"] = output
+            activations["snapshot"] = output.detach().clone()
+            if not output.requires_grad:
+                raise RuntimeError(
+                    f"Layer {layer_name!r} output does not require gradients; "
+                    "layer gradients are undefined for this model path."
+                )
+            tensor_hook_handles.append(output.register_hook(tensor_gradient_hook))
 
-        # Find and hook the layer
-        layer = dict(self.model.named_modules()).get(layer_name)
-        if layer is None:
-            available = list(dict(self.model.named_modules()).keys())
-            raise ValueError(f"Layer '{layer_name}' not found. Available layers: {available}")
+        layer = self._resolve_layer(layer_name)
 
         # Module-level full backward hooks wrap outputs in an autograd view and
         # therefore fail for the common Conv -> ReLU(inplace=True) pattern.
-        # Capture the forward tensor and differentiate the selected score with
-        # respect to that tensor directly instead.  ``autograd.grad`` also
-        # avoids accumulating gradients into model parameters.
+        # Capture the forward tensor and attach a tensor gradient hook before
+        # downstream computation.  Unlike replacing the module output with a
+        # clone, this preserves alias-sensitive model semantics. ``autograd.grad``
+        # drives the graph from ordinary leaves and avoids accumulating into
+        # model parameters.
         forward_handle = layer.register_forward_hook(forward_hook)
         modules = list(self.model.modules())
         training_states = [bool(module.training) for module in modules]
@@ -708,12 +811,15 @@ class PyTorchAdapter(BaseModelAdapter):
         try:
             # Keep caller tensor state/history isolated from this gradient
             # graph even when dtype and device conversion would be a no-op.
-            tensor_data = self._to_tensor(prepared_data).detach().clone()
-            if tensor_data.is_floating_point():
-                tensor_data.requires_grad_(True)
+            tensor_leaf = self._to_tensor(prepared_data).detach().clone()
+            if tensor_leaf.is_floating_point():
+                tensor_leaf.requires_grad_(True)
+                tensor_data = tensor_leaf.clone()
+            else:
+                tensor_data = tensor_leaf
 
             output = self.model(tensor_data)
-            if "output" not in activations:
+            if "snapshot" not in activations:
                 raise RuntimeError(
                     f"Layer '{layer_name}' did not run during the model forward pass"
                 )
@@ -723,18 +829,33 @@ class PyTorchAdapter(BaseModelAdapter):
             )
             self.last_gradient_output_space = output_space
             target_scores = self._select_target_scores(score_output, target_class)
-            layer_output = activations["output"]
-            layer_gradients = torch.autograd.grad(
+            gradient_roots: List["torch.Tensor"] = []
+            if tensor_leaf.requires_grad:
+                gradient_roots.append(tensor_leaf)
+            gradient_roots.extend(parameter for parameter in parameters if parameter.requires_grad)
+            if not gradient_roots:
+                raise RuntimeError(
+                    "The model has no differentiable input or parameter from which "
+                    "to compute layer gradients"
+                )
+            torch.autograd.grad(
                 target_scores.sum(),
-                layer_output,
+                gradient_roots,
                 retain_graph=False,
                 create_graph=False,
-                allow_unused=False,
-            )[0]
-            activation_values = self._to_numpy(layer_output)
-            gradient_values = self._to_numpy(layer_gradients)
+                allow_unused=True,
+            )
+            if "snapshot" not in captured_gradients:
+                raise RuntimeError(
+                    f"The selected target score does not depend on layer {layer_name!r}; "
+                    "layer gradients are undefined for this model path."
+                )
+            activation_values = self._to_numpy(activations["snapshot"])
+            gradient_values = self._to_numpy(captured_gradients["snapshot"])
         finally:
             forward_handle.remove()
+            for tensor_hook_handle in tensor_hook_handles:
+                tensor_hook_handle.remove()
             # ``autograd.grad`` normally leaves parameter ``.grad`` untouched.
             # Restore both value and object identity defensively in case model
             # hooks or custom autograd functions wrote to them.
@@ -748,6 +869,8 @@ class PyTorchAdapter(BaseModelAdapter):
                         original.copy_(cast("torch.Tensor", saved))
                         parameter.grad = original
                 for buffer, saved in zip(buffers, saved_buffer_values):
+                    if tuple(buffer.size()) != tuple(saved.size()):
+                        buffer.resize_as_(saved)
                     buffer.copy_(saved)
             # Direct assignment preserves mixed parent/child training states.
             for module, training in zip(modules, training_states):
@@ -774,8 +897,25 @@ class PyTorchAdapter(BaseModelAdapter):
         Returns:
             Self for chaining.
         """
-        self.device = torch.device(device)
-        self.model = self.model.to(self.device)
+        target_device = torch.device(device)
+        previous_device = self.device
+        try:
+            moved_model = self.model.to(target_device)
+        except Exception as move_error:
+            # nn.Module.to mutates in place. Most failures happen before any
+            # tensor moves; attempt a best-effort rollback for custom modules
+            # that mutate and then raise, while never poisoning adapter.device.
+            try:
+                self.model.to(previous_device)
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "Model device move failed and rollback failed; adapter/model "
+                    "state may be inconsistent. Reconstruct the model and adapter "
+                    "before further use."
+                ) from rollback_error
+            raise
+        self.model = moved_model
+        self.device = target_device
         return self
 
     def train_mode(self) -> "PyTorchAdapter":

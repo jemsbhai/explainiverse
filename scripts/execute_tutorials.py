@@ -337,6 +337,23 @@ def _validate_published_outputs(path: Path, notebook: NotebookNode) -> None:
             raise ValueError(f"{path.name}: code cell {index + 1} contains a published error")
 
 
+def _validate_reexecuted_outputs(
+    path: Path,
+    published: NotebookNode,
+    executed: NotebookNode,
+) -> None:
+    """Require a clean execution to reproduce the reviewed stored outputs."""
+    _validate_published_outputs(path, executed)
+    published_digest = _published_outputs_digest(published)
+    executed_digest = _published_outputs_digest(executed)
+    if executed_digest != published_digest:
+        raise ValueError(
+            f"{path.name}: clean execution no longer matches the published outputs; "
+            "review the numerical/API change and run scripts/execute_tutorials.py --write "
+            "to publish intentionally updated outputs"
+        )
+
+
 def _validate_published_provenance(path: Path, notebook: NotebookNode) -> None:
     spec = SPEC_BY_FILENAME[path.name]
     record = notebook.metadata.get("explainiverse_execution", {})
@@ -508,6 +525,7 @@ def main() -> int:
         executed = _execute(copy.deepcopy(notebook), args.timeout)
         executions.append((path, executed))
         if not args.write:
+            _validate_reexecuted_outputs(path, notebook, executed)
             print(f"verified {path.relative_to(ROOT)}")
 
     # Execute the entire selected set successfully before changing any notebook.

@@ -42,15 +42,22 @@ References:
     Parameter Randomisation Test. XAI in Action (xAI 2024).
     https://arxiv.org/abs/2401.06465
 """
+
 import copy
 import re
 from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Tuple, TypedDict, Union
 
 import numpy as np
 from scipy import stats
-from scipy.spatial.distance import cosine as scipy_cosine_distance
 
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import (
+    _stable_cosine,
+    _stable_mean,
+    _stable_mean_square,
+    _stable_pearson,
+    _stable_spearman,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -62,6 +69,13 @@ if TYPE_CHECKING:
 
 # Type alias for similarity functions: f(a, b) -> float
 SimilarityFunc = Callable[[np.ndarray, np.ndarray], float]
+
+
+def _finite_mean(values, context: str) -> float:
+    result = float(_stable_mean(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} mean is not representable")
+    return result
 
 
 class MPRTResult(TypedDict):
@@ -106,12 +120,12 @@ def _spearman_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
     if a.size < 2 or b.size < 2:
         raise ValueError("Spearman correlation requires at least two values per attribution.")
-    if np.ptp(a) == 0.0 or np.ptp(b) == 0.0:
+    if np.min(a) == np.max(a) or np.min(b) == np.max(b):
         raise ValueError("Spearman correlation is undefined for constant attributions.")
-    corr, _ = stats.spearmanr(a, b)
-    if np.isnan(corr):
-        raise ValueError("Spearman correlation is undefined for these attributions.")
-    return float(corr)
+    try:
+        return _stable_spearman(a, b)
+    except ValueError as exc:
+        raise ValueError("Spearman correlation is undefined for these attributions.") from exc
 
 
 def _pearson_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -131,12 +145,10 @@ def _pearson_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
     if a.size < 2 or b.size < 2:
         raise ValueError("Pearson correlation requires at least two values per attribution.")
-    if np.ptp(a) == 0.0 or np.ptp(b) == 0.0:
-        raise ValueError("Pearson correlation is undefined for constant attributions.")
-    corr, _ = stats.pearsonr(a, b)
-    if np.isnan(corr):
-        raise ValueError("Pearson correlation is undefined for these attributions.")
-    return float(corr)
+    try:
+        return _stable_pearson(a, b)
+    except ValueError as exc:
+        raise ValueError("Pearson correlation is undefined for constant attributions.") from exc
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -155,12 +167,10 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     Returns:
         Cosine similarity.
     """
-    if np.linalg.norm(a) < 1e-12 or np.linalg.norm(b) < 1e-12:
-        raise ValueError("Cosine similarity is undefined for zero-norm attributions.")
-    dist = scipy_cosine_distance(a, b)
-    if np.isnan(dist):
-        raise ValueError("Cosine similarity is undefined for these attributions.")
-    return float(1.0 - dist)
+    try:
+        return _stable_cosine(a, b)
+    except ValueError as exc:
+        raise ValueError("Cosine similarity is undefined for zero-norm attributions.") from exc
 
 
 def _ssim_similarity(
@@ -172,7 +182,7 @@ def _ssim_similarity(
     """
     Structural Similarity Index (SSIM) between two attribution maps.
 
-    Requires scikit-image (optional dependency) and 2-D or 3-D image maps.
+    Requires the package's scikit-image runtime dependency and 2-D or 3-D image maps.
     The built-in ``"ssim"`` similarity contract interprets every 3-D map as
     channel-first ``(C, H, W)``, matching the image-attribution layout emitted
     by the gradient explainers. Direct callers may pass another
@@ -205,7 +215,7 @@ def _ssim_similarity(
     except ImportError:
         raise ImportError(
             "scikit-image is required for SSIM similarity. "
-            "Install it with: pip install explainiverse[image]"
+            "Install or repair Explainiverse with: pip install explainiverse"
         )
 
     a = np.asarray(a)
@@ -241,7 +251,35 @@ def _ssim_similarity(
     if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
         raise ValueError("SSIM attribution maps must contain only finite values.")
 
-    data_range = float(max(np.max(a), np.max(b)) - min(np.min(a), np.min(b)))
+    spatial_axes = (
+        tuple(range(a.ndim))
+        if resolved_channel_axis is None
+        else tuple(axis for axis in range(a.ndim) if axis != resolved_channel_axis % a.ndim)
+    )
+    minimum_spatial_extent = min(a.shape[axis] for axis in spatial_axes)
+    if minimum_spatial_extent < 3:
+        raise ValueError(
+            "SSIM requires every spatial dimension to contain at least 3 values; "
+            f"got spatial shape {tuple(a.shape[axis] for axis in spatial_axes)}."
+        )
+    # Own the backend contract instead of relying on scikit-image's changing
+    # default. Seven is its historical default; smaller maps use the largest
+    # valid odd window down to three.
+    win_size = min(7, minimum_spatial_extent)
+    if win_size % 2 == 0:
+        win_size -= 1
+
+    # SSIM is invariant to a shared positive scaling when data_range is scaled
+    # with the maps. Normalize first so max-min cannot overflow for finite maps
+    # spanning values near both ends of the float range.
+    value_scale = float(max(np.max(np.abs(a)), np.max(np.abs(b))))
+    if value_scale == 0.0:
+        return 1.0
+    scaled_a = a / value_scale
+    scaled_b = b / value_scale
+    data_range = float(
+        max(np.max(scaled_a), np.max(scaled_b)) - min(np.min(scaled_a), np.min(scaled_b))
+    )
     if data_range == 0.0:
         # A zero range over the union means both finite maps contain the same
         # single value. Different constant maps have a nonzero union range.
@@ -249,10 +287,11 @@ def _ssim_similarity(
 
     score = float(
         structural_similarity(
-            a,
-            b,
+            scaled_a,
+            scaled_b,
             data_range=data_range,
             channel_axis=resolved_channel_axis,
+            win_size=win_size,
         )
     )
     # SSIM is strictly below one for unequal maps, but floating-point
@@ -277,7 +316,11 @@ def _mse_similarity(a: np.ndarray, b: np.ndarray) -> float:
     Returns:
         Negative MSE.
     """
-    return -float(np.mean((a - b) ** 2))
+    with np.errstate(over="ignore", invalid="ignore"):
+        differences = np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64)
+    if not np.all(np.isfinite(differences)):
+        raise FloatingPointError("MSE residual is not representable")
+    return -_stable_mean_square(differences)
 
 
 # Registry of built-in similarity functions
@@ -465,6 +508,8 @@ def _extract_attribution_array(
             raise ValueError("Explanation feature attributions must be numeric.") from exc
 
     elif isinstance(attributions, np.ndarray):
+        if np.iscomplexobj(attributions):
+            raise TypeError("Attributions must contain real, not complex, values.")
         result = attributions.astype(np.float64)
 
     else:
@@ -625,16 +670,20 @@ def _randomise_layer_parameters(
         return
 
     seed = int(rng.integers(0, 2**31))
-    cuda_devices = sorted(
-        {
-            parameter.device.index
-            for parameter in direct_parameters
-            if parameter.device.type == "cuda" and parameter.device.index is not None
-        }
-    )
-    with torch.random.fork_rng(devices=cuda_devices, enabled=True):
-        torch.manual_seed(seed)
-        reset_parameters()
+    # torch.manual_seed seeds the CPU generator and *every* CUDA generator,
+    # including CUDA devices unrelated to the randomized layer. Asking
+    # fork_rng to snapshot all visible devices is therefore required even for
+    # a CPU-resident module on a CUDA host.
+    # ``fork_rng`` snapshots process-global default generators. Overlapping
+    # forks in different threads can otherwise restore one another's seeded
+    # intermediate state. Reuse the gradient subsystem's global lock domain so
+    # every Explainiverse Torch RNG snapshot is serialized in one order.
+    from explainiverse.explainers.gradient._model_state import adapter_model_operation_lock
+
+    with adapter_model_operation_lock(model):
+        with torch.random.fork_rng(devices=None, enabled=True):
+            torch.manual_seed(seed)
+            reset_parameters()
 
 
 def _discrete_entropy(attributions: np.ndarray, n_bins: int = 100) -> float:
@@ -665,7 +714,8 @@ def _discrete_entropy(attributions: np.ndarray, n_bins: int = 100) -> float:
         raise ValueError("attributions must not be empty")
     if not np.all(np.isfinite(flat)):
         raise ValueError("attributions must contain only finite values")
-    histogram, _ = np.histogram(flat, bins=int(n_bins))
+    scale = float(np.max(np.abs(flat)))
+    histogram, _ = np.histogram(flat if scale == 0.0 else flat / scale, bins=int(n_bins))
     occupied = histogram[histogram > 0].astype(np.float64)
     probabilities = occupied / occupied.sum()
     return float(-np.sum(probabilities * np.log(probabilities)))
@@ -692,10 +742,31 @@ def _add_noise_to_input(
     Returns:
         Noisy copy of x (same shape).
     """
-    data_range = x.max() - x.min()
-    std = noise_magnitude * data_range
+    maximum = float(np.max(x))
+    minimum = float(np.min(x))
+    if not np.isfinite(maximum) or not np.isfinite(minimum):
+        raise ValueError("x must contain only finite values")
+
+    if noise_magnitude == 0.0:
+        std = 0.0
+    else:
+        with np.errstate(over="ignore", invalid="ignore"):
+            data_range = maximum - minimum
+            std = noise_magnitude * data_range
+        if not np.isfinite(std):
+            # A finite range can overflow before a small noise fraction is
+            # applied. Distribute the multiplication so representable
+            # standard deviations remain available (for example,
+            # [-1e308, 1e308] at magnitude 1e-308 has std approximately 2).
+            with np.errstate(over="ignore", invalid="ignore"):
+                std = noise_magnitude * maximum - noise_magnitude * minimum
+    if not np.isfinite(std):
+        raise FloatingPointError("Smooth MPRT noise standard deviation is not representable")
     noise = rng.normal(0.0, std, size=x.shape)
-    return x + noise
+    noisy = np.asarray(x) + noise
+    if not np.all(np.isfinite(noisy)):
+        raise FloatingPointError("Smooth MPRT produced non-finite perturbed inputs")
+    return noisy
 
 
 # =============================================================================
@@ -786,7 +857,7 @@ def compute_mprt_score(
     return {
         "layer_scores": scores,
         "layer_names": names,
-        "mean_score": float(np.mean(scores)),
+        "mean_score": _finite_mean(scores, "MPRT layer score"),
     }
 
 
@@ -930,7 +1001,7 @@ def compute_mprt(
     for i in range(batch_size):
         x_single = x_batch[i : i + 1]
         y_single = y_batch[i]
-        attr = explain_func(original_model, x_single, y_single)
+        attr = explain_func(original_model, x_single.copy(), y_single)
         original_attrs_list.append(_extract_attribution_array(attr))
 
     # For each layer, randomise and compute explanations
@@ -951,20 +1022,20 @@ def compute_mprt(
         for i in range(batch_size):
             x_single = x_batch[i : i + 1]
             y_single = y_batch[i]
-            rand_attr = explain_func(model_copy, x_single, y_single)
+            rand_attr = explain_func(model_copy, x_single.copy(), y_single)
             rand_attr = _extract_attribution_array(rand_attr)
             score = _finite_scalar_similarity(original_attrs_list[i], rand_attr, similarity_func)
             sample_scores.append(score)
 
         # Average across batch
-        mean_score = float(np.mean(sample_scores))
+        mean_score = _finite_mean(sample_scores, "MPRT sample score")
         all_layer_scores.append(mean_score)
         all_layer_names.append(layer_name)
 
     return {
         "layer_scores": all_layer_scores,
         "layer_names": all_layer_names,
-        "mean_score": float(np.mean(all_layer_scores)),
+        "mean_score": _finite_mean(all_layer_scores, "MPRT layer score"),
     }
 
 
@@ -1050,7 +1121,10 @@ def _model_input_tensor(model, x_batch: np.ndarray):
     if reference_tensor is None:
         reference_tensor = next(model.buffers(), None)
 
-    x_tensor = torch.as_tensor(x_batch)
+    # ``torch.as_tensor`` may alias a NumPy input. Validation executes
+    # arbitrary caller-supplied modules, including legitimate in-place models,
+    # so isolate the tensor before any forward pass can mutate caller state.
+    x_tensor = torch.as_tensor(x_batch).detach().clone()
     if reference_tensor is not None:
         x_tensor = x_tensor.to(device=reference_tensor.device)
         if reference_tensor.is_floating_point():
@@ -1304,7 +1378,7 @@ def compute_random_logit(
         y_true = int(targets[i])
 
         # Explanation for true class
-        attr_true = explain_func(model_eval, x_single, y_true)
+        attr_true = explain_func(model_eval, x_single.copy(), y_true)
         attr_true = _extract_attribution_array(attr_true)
 
         # Sample a random different class
@@ -1314,13 +1388,13 @@ def compute_random_logit(
             y_random += 1
 
         # Explanation for random class
-        attr_random = explain_func(model_eval, x_single, y_random)
+        attr_random = explain_func(model_eval, x_single.copy(), y_random)
         attr_random = _extract_attribution_array(attr_random)
 
         score = _finite_scalar_similarity(attr_true, attr_random, similarity_func)
         scores.append(score)
 
-    return float(np.mean(scores))
+    return _finite_mean(scores, "randomisation score")
 
 
 def compute_batch_random_logit(
@@ -1388,14 +1462,14 @@ def compute_batch_random_logit(
         x_single = x_batch[i : i + 1]
         y_true = int(targets[i])
 
-        attr_true = explain_func(model_eval, x_single, y_true)
+        attr_true = explain_func(model_eval, x_single.copy(), y_true)
         attr_true = _extract_attribution_array(attr_true)
 
         y_random = int(rng.integers(0, num_classes - 1))
         if y_random >= y_true:
             y_random += 1
 
-        attr_random = explain_func(model_eval, x_single, y_random)
+        attr_random = explain_func(model_eval, x_single.copy(), y_random)
         attr_random = _extract_attribution_array(attr_random)
 
         score = _finite_scalar_similarity(attr_true, attr_random, similarity_func)
@@ -1554,19 +1628,24 @@ def compute_smooth_mprt(
 
     def _smooth_explain(mdl, smoothing_inputs, y_single) -> np.ndarray:
         """Average explanations over a fixed, paired set of inputs."""
-        accum: Optional[np.ndarray] = None
+        samples: list[np.ndarray] = []
+        expected_shape: Optional[tuple[int, ...]] = None
         for x_noisy in smoothing_inputs:
             # A third-party explainer is not allowed to mutate the stored
             # perturbation and thereby unpair later model comparisons.
             attr = explain_func(mdl, x_noisy.copy(), y_single)
             attr = _extract_attribution_array(attr)
-            if accum is None:
-                accum = attr.copy()
-            else:
-                accum += attr
-        if accum is None:  # Defensive guard; nr_samples is validated as positive above.
+            if expected_shape is None:
+                expected_shape = attr.shape
+            elif attr.shape != expected_shape:
+                raise ValueError("Smooth MPRT explanation shape changed across smoothing samples")
+            samples.append(attr.copy())
+        if not samples:  # Defensive guard; nr_samples is validated as positive above.
             raise RuntimeError("Smooth MPRT produced no attribution samples")
-        return accum / nr_samples
+        mean = _stable_mean(np.stack(samples, axis=0), axis=0)
+        if not np.all(np.isfinite(mean)):
+            raise FloatingPointError("Smooth MPRT attribution mean is not representable")
+        return mean
 
     paired_smoothing_inputs: list[list[np.ndarray]] = []
     for i in range(batch_size):
@@ -1606,13 +1685,13 @@ def compute_smooth_mprt(
             )
             sample_scores.append(score)
 
-        all_layer_scores.append(float(np.mean(sample_scores)))
+        all_layer_scores.append(_finite_mean(sample_scores, "Smooth MPRT sample score"))
         all_layer_names.append(layer_name)
 
     return {
         "layer_scores": all_layer_scores,
         "layer_names": all_layer_names,
-        "mean_score": float(np.mean(all_layer_scores)),
+        "mean_score": _finite_mean(all_layer_scores, "Smooth MPRT layer score"),
         "variant": "smooth_mprt_paired",
         "randomisation_order": order,
         "nr_samples": nr_samples,
@@ -1788,12 +1867,12 @@ def compute_efficient_mprt(
         y_single = y_batch[i]
 
         # Original explanation entropy
-        attr_orig = explain_func(original_model, x_single, y_single)
+        attr_orig = explain_func(original_model, x_single.copy(), y_single)
         attr_orig = _extract_attribution_array(attr_orig)
         entropy_orig = _discrete_entropy(attr_orig, n_bins=n_bins)
 
         # Randomised explanation entropy
-        attr_rand = explain_func(random_model, x_single, y_single)
+        attr_rand = explain_func(random_model, x_single.copy(), y_single)
         attr_rand = _extract_attribution_array(attr_rand)
         if attr_rand.shape != attr_orig.shape:
             raise ValueError("Original and randomised attributions must have the same shape")
@@ -1808,7 +1887,7 @@ def compute_efficient_mprt(
 
         scores.append(float(score))
 
-    return float(np.mean(scores))
+    return _finite_mean(scores, "randomisation score")
 
 
 def compute_batch_efficient_mprt(
@@ -1865,11 +1944,11 @@ def compute_batch_efficient_mprt(
         x_single = x_batch[i : i + 1]
         y_single = y_batch[i]
 
-        attr_orig = explain_func(original_model, x_single, y_single)
+        attr_orig = explain_func(original_model, x_single.copy(), y_single)
         attr_orig = _extract_attribution_array(attr_orig)
         entropy_orig = _discrete_entropy(attr_orig, n_bins=n_bins)
 
-        attr_rand = explain_func(random_model, x_single, y_single)
+        attr_rand = explain_func(random_model, x_single.copy(), y_single)
         attr_rand = _extract_attribution_array(attr_rand)
         if attr_rand.shape != attr_orig.shape:
             raise ValueError("Original and randomised attributions must have the same shape")
@@ -2092,16 +2171,16 @@ def compute_data_randomisation(
         x_single = x_batch[i : i + 1]
         y_single = int(targets[i])
 
-        attr_trained = explain_func(model_a, x_single, y_single)
+        attr_trained = explain_func(model_a, x_single.copy(), y_single)
         attr_trained = _extract_attribution_array(attr_trained)
 
-        attr_random = explain_func(model_b, x_single, y_single)
+        attr_random = explain_func(model_b, x_single.copy(), y_single)
         attr_random = _extract_attribution_array(attr_random)
 
         score = _finite_scalar_similarity(attr_trained, attr_random, similarity_func)
         scores.append(score)
 
-    return float(np.mean(scores))
+    return _finite_mean(scores, "randomisation score")
 
 
 def compute_batch_data_randomisation(
@@ -2147,10 +2226,10 @@ def compute_batch_data_randomisation(
         x_single = x_batch[i : i + 1]
         y_single = int(targets[i])
 
-        attr_trained = explain_func(model_a, x_single, y_single)
+        attr_trained = explain_func(model_a, x_single.copy(), y_single)
         attr_trained = _extract_attribution_array(attr_trained)
 
-        attr_random = explain_func(model_b, x_single, y_single)
+        attr_random = explain_func(model_b, x_single.copy(), y_single)
         attr_random = _extract_attribution_array(attr_random)
 
         score = _finite_scalar_similarity(attr_trained, attr_random, similarity_func)

@@ -1,9 +1,10 @@
 # Explainiverse tutorials
 
-The first three tutorials are verified, deterministic, offline examples for the tagged
-`v0.14.0` release. They were reviewed and published from the locked environment on
-2026-08-10. The remaining entries on this page are curriculum plans, not implemented
-capabilities.
+The first three tutorials are verified, deterministic, offline examples for the current
+unreleased `0.15.0.dev0` source tree. They were reviewed and published from the locked
+environment on 2026-08-10. Their source/package/lock digests bind them to this checkout; they
+must not be attributed to the older `v0.14.0` tag. The remaining entries on this page are
+curriculum plans, not implemented capabilities.
 
 ## Reproduce the verified notebooks
 

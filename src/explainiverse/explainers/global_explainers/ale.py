@@ -111,20 +111,29 @@ class ALEExplainer(BaseExplainer):
         percentiles = np.linspace(0.0, 100.0, self.n_bins + 1)
         return np.unique(np.percentile(values, percentiles, method="inverted_cdf"))
 
-    def _selected_predictions(self, X: np.ndarray, output_index: int) -> np.ndarray:
+    def _selected_predictions(
+        self,
+        X: np.ndarray,
+        output_index: int,
+        expected_n_outputs: int,
+    ) -> np.ndarray:
         predictions = _normalize_predictions(self.model.predict(X), X.shape[0])
-        return _select_prediction_output(predictions, self.task, output_index)
+        return _select_prediction_output(
+            predictions,
+            self.task,
+            output_index,
+            expected_n_outputs=expected_n_outputs,
+        )
 
     def _compute_ale_details(
         self,
         feature_idx: int,
-        target_class: Optional[int] = None,
+        output_index: int,
+        expected_n_outputs: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return edge grid, centered ALE, local effects, counts, and centers."""
         values = self._numeric_feature_values(feature_idx)
         bin_edges = self._compute_quantile_bins(values)
-        reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
-        output_index = _resolve_output_index(reference, self.task, target_class)
 
         if len(bin_edges) == 1:
             # No finite difference can be defined for a constant feature.
@@ -168,8 +177,10 @@ class ALEExplainer(BaseExplainer):
         X_upper[:, feature_idx] = bin_edges[bin_indices + 1]
 
         prediction_differences = self._selected_predictions(
-            X_upper, output_index
-        ) - self._selected_predictions(X_lower, output_index)
+            X_upper,
+            output_index,
+            expected_n_outputs,
+        ) - self._selected_predictions(X_lower, output_index, expected_n_outputs)
         local_effects = (
             np.bincount(bin_indices, weights=prediction_differences, minlength=n_intervals)
             / bin_counts
@@ -202,7 +213,13 @@ class ALEExplainer(BaseExplainer):
         target_class: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Backward-compatible private wrapper returning aligned edge values."""
-        grid_values, ale_values, _, _, _ = self._compute_ale_details(feature_idx, target_class)
+        reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
+        output_index = _resolve_output_index(reference, self.task, target_class)
+        grid_values, ale_values, _, _, _ = self._compute_ale_details(
+            feature_idx,
+            output_index,
+            int(reference.shape[1]),
+        )
         return grid_values, ale_values, grid_values.copy()
 
     def explain(  # type: ignore[override]
@@ -218,13 +235,18 @@ class ALEExplainer(BaseExplainer):
         feature_idx = self._get_feature_idx(feature)
         reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
         output_index = _resolve_output_index(reference, self.task, target_class)
+        expected_n_outputs = int(reference.shape[1])
         (
             grid_values,
             ale_values,
             local_effects,
             bin_counts,
             bin_centers,
-        ) = self._compute_ale_details(feature_idx, output_index)
+        ) = self._compute_ale_details(
+            feature_idx,
+            output_index,
+            expected_n_outputs,
+        )
 
         if len(ale_values) == 1:
             ale_at_bin_centers = np.array([0.0])

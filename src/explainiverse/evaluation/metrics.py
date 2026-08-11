@@ -26,17 +26,47 @@ Networks", NeurIPS 2019.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, localcontext
 from numbers import Integral, Real
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union, cast
 
 import numpy as np
 from sklearn.base import clone, is_classifier, is_regressor
-from sklearn.metrics import accuracy_score, r2_score
+from sklearn.metrics import accuracy_score
 
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import (
+    _stable_difference_of_means,
+    _stable_mean,
+    _stable_mean_difference,
+    _stable_std,
+    _stable_sum,
+    compute_baseline_values,
+)
 
 Baseline = Union[str, float, np.ndarray, Callable[[np.ndarray], np.ndarray]]
 Target = Optional[Union[int, float, str]]
+
+
+def _finite_mean(values, context: str) -> float:
+    result = float(_stable_mean(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} mean is not representable")
+    return result
+
+
+def _finite_std(values, context: str) -> float:
+    result = float(_stable_std(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} standard deviation is not representable")
+    return result
+
+
+def _finite_difference(left: float, right: float, context: str) -> float:
+    result = float(_stable_sum(np.asarray([left, -right], dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} is not representable")
+    return result
 
 
 def _extract_feature_index(
@@ -326,43 +356,14 @@ def _baseline_values(
     n_features: int,
     background_data: Optional[np.ndarray],
 ) -> np.ndarray:
-    if isinstance(baseline_value, str):
-        if baseline_value not in {"mean", "median"}:
-            raise ValueError("baseline_value string must be 'mean' or 'median'")
-        if background_data is None:
-            raise ValueError(f"background_data is required for baseline_value={baseline_value!r}")
-        background = np.asarray(background_data)
-        if background.ndim != 2 or background.shape[1] != n_features:
-            raise ValueError("background_data must have one column per feature")
-        if background.shape[0] == 0:
-            raise ValueError("background_data must contain at least one row")
-        reducer = np.mean if baseline_value == "mean" else np.median
-        values = reducer(background, axis=0)
-    elif callable(baseline_value):
-        if background_data is None:
-            raise ValueError("background_data is required for a callable baseline_value")
-        # A baseline callback is not authorized to mutate the caller's training
-        # or background data as a side effect.
-        values = baseline_value(np.asarray(background_data).copy())
-    elif isinstance(baseline_value, np.ndarray):
-        values = baseline_value
-    elif isinstance(baseline_value, Real) and not isinstance(baseline_value, bool):
-        values = np.full(n_features, float(baseline_value))
-    else:
-        raise TypeError(
-            "baseline_value must be a scalar, per-feature array, 'mean', 'median', or callable"
-        )
-
-    values = np.asarray(values)
-    if values.ndim != 1 or values.shape[0] != n_features:
-        raise ValueError("baseline_value must provide exactly one value per feature")
     try:
-        values = values.astype(float)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("baseline values must be numerical") from exc
-    if not np.all(np.isfinite(values)):
-        raise ValueError("baseline values must be finite")
-    return values
+        return compute_baseline_values(baseline_value, background_data, n_features)
+    except ValueError as exc:
+        if "baseline must resolve to shape" in str(exc):
+            raise ValueError(
+                f"baseline_value must provide exactly one value per feature; {exc}"
+            ) from exc
+        raise
 
 
 def _validate_ranking(ranking: str) -> str:
@@ -453,6 +454,9 @@ def compute_aopc(
     For the paper's dataset-level quantity, use :func:`compute_batch_aopc`,
     which averages these per-input contributions.
     """
+    if not isinstance(return_details, (bool, np.bool_)):
+        raise TypeError("return_details must be a boolean")
+    return_details = bool(return_details)
     instance = np.asarray(instance)
     if instance.ndim != 1 or instance.size == 0:
         raise ValueError("instance must be a non-empty one-dimensional array")
@@ -484,7 +488,6 @@ def compute_aopc(
     original_value = float(original_matrix[0, target_index])
 
     prediction_values = [original_value]
-    prediction_drops = [0.0]
     modified = instance.copy()
     for index in feature_order[:effective_steps]:
         modified[index] = baseline[index]
@@ -497,13 +500,23 @@ def compute_aopc(
             raise ValueError("model output count changed after perturbation")
         value = float(matrix[0, target_index])
         prediction_values.append(value)
-        prediction_drops.append(original_value - value)
 
     # Equation 12 includes k=0.  Its drop is zero but it contributes to the
-    # L+1 denominator; np.mean over [0, drop_1, ..., drop_L] is exact.
-    aopc = float(np.mean(prediction_drops))
+    # L+1 denominator. Aggregate predictions before subtracting so an
+    # out-of-range individual drop cannot hide a representable signed mean.
+    aopc = _stable_mean_difference(original_value, np.asarray(prediction_values))
     if not return_details:
         return aopc
+
+    try:
+        prediction_drops = [
+            _finite_difference(original_value, value, "AOPC drop") for value in prediction_values
+        ]
+    except FloatingPointError as exc:
+        raise FloatingPointError(
+            "return_details cannot represent an individual AOPC prediction_drop; "
+            "use return_details=False for the representable aggregate"
+        ) from exc
 
     return {
         "aopc": aopc,
@@ -579,7 +592,7 @@ def compute_batch_aopc(
             )
             for row in range(len(X))
         ]
-        results[explainer_name] = float(np.mean(scores))
+        results[explainer_name] = _finite_mean(scores, f"AOPC for {explainer_name!r}")
     return results
 
 
@@ -736,7 +749,7 @@ def _score_predictions(
         elif name == "r2":
             if task != "regression":
                 raise ValueError("r2 scoring is only valid for regression")
-            value = r2_score(y_true, predictions)
+            value = _stable_r2_score(y_true, predictions)
         else:
             raise ValueError("scoring must be None, 'accuracy', 'r2', or a callable")
         greater_is_better = True
@@ -744,6 +757,49 @@ def _score_predictions(
     if not np.isfinite(value):
         raise ValueError(f"scoring function {name!r} returned a non-finite value")
     return value, str(name), greater_is_better
+
+
+def _stable_r2_score(y_true: np.ndarray, predictions: np.ndarray) -> float:
+    """Match sklearn's uniform-average, force-finite R2 without square overflow."""
+    actual = np.asarray(y_true, dtype=np.float64)
+    predicted = np.asarray(predictions, dtype=np.float64)
+    if actual.shape != predicted.shape or actual.ndim not in (1, 2) or actual.shape[0] < 2:
+        raise ValueError("r2 inputs must have equal 1-D/2-D shape with at least two rows")
+    if not np.all(np.isfinite(actual)) or not np.all(np.isfinite(predicted)):
+        raise ValueError("r2 inputs must contain only finite values")
+    if actual.ndim == 1:
+        actual = actual[:, None]
+        predicted = predicted[:, None]
+
+    with localcontext() as context:
+        context.prec = 3000 + len(str(actual.shape[0]))
+        scores = []
+        for output_index in range(actual.shape[1]):
+            actual_values = [Decimal.from_float(float(value)) for value in actual[:, output_index]]
+            predicted_values = [
+                Decimal.from_float(float(value)) for value in predicted[:, output_index]
+            ]
+            mean = sum(actual_values, start=Decimal(0)) / Decimal(len(actual_values))
+            residual_sum = sum(
+                (
+                    (actual_value - predicted_value) * (actual_value - predicted_value)
+                    for actual_value, predicted_value in zip(actual_values, predicted_values)
+                ),
+                start=Decimal(0),
+            )
+            total_sum = sum(
+                ((value - mean) * (value - mean) for value in actual_values),
+                start=Decimal(0),
+            )
+            if total_sum == 0:
+                scores.append(Decimal(1) if residual_sum == 0 else Decimal(0))
+            else:
+                scores.append(Decimal(1) - residual_sum / total_sum)
+        exact = sum(scores, start=Decimal(0)) / Decimal(len(scores))
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("r2 score is not representable")
+    return result
 
 
 def compute_roar(
@@ -780,6 +836,9 @@ def compute_roar(
     five independent retraining runs, and compare against a random-ranking
     control.  ``return_details=True`` exposes whether those contracts were met.
     """
+    if not isinstance(return_details, (bool, np.bool_)):
+        raise TypeError("return_details must be a boolean")
+    return_details = bool(return_details)
     X_train, y_train, X_test, y_test = _validate_roar_arrays(X_train, y_train, X_test, y_test)
     if test_explanations is None:
         raise ValueError(
@@ -854,12 +913,14 @@ def compute_roar(
         baseline_scores.append(clean_score)
         retrained_scores.append(masked_score)
 
-    baseline_mean = float(np.mean(baseline_scores))
-    retrained_mean = float(np.mean(retrained_scores))
+    baseline_mean = _finite_mean(baseline_scores, "ROAR baseline score")
+    retrained_mean = _finite_mean(retrained_scores, "ROAR retrained score")
     if scoring_direction is None:  # Defensive: n_repeats is validated positive.
         raise RuntimeError("ROAR scoring direction was not resolved")
     score_drop = (
-        baseline_mean - retrained_mean if scoring_direction else retrained_mean - baseline_mean
+        _stable_difference_of_means(np.asarray(baseline_scores), np.asarray(retrained_scores))
+        if scoring_direction
+        else _stable_difference_of_means(np.asarray(retrained_scores), np.asarray(baseline_scores))
     )
     if not return_details:
         return float(score_drop)
@@ -870,8 +931,8 @@ def compute_roar(
         "retrained_score": retrained_mean,
         "baseline_scores": baseline_scores,
         "retrained_scores": retrained_scores,
-        "baseline_score_std": float(np.std(baseline_scores)),
-        "retrained_score_std": float(np.std(retrained_scores)),
+        "baseline_score_std": _finite_std(baseline_scores, "ROAR baseline score"),
+        "retrained_score_std": _finite_std(retrained_scores, "ROAR retrained score"),
         "scoring": scoring_name,
         "scoring_greater_is_better": scoring_direction,
         "score_drop_semantics": "positive_means_masking_hurt_performance",
