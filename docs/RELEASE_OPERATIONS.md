@@ -153,10 +153,47 @@ legacy disclosure decision; it cannot be represented as a successful recovery dr
 
 ## CUDA capacity acceptance
 
+The checked-in event/actor guard is defense in depth, not the authority boundary for a
+repository-scoped self-hosted runner. A user with repository write access can create a branch
+whose workflow targets a known runner label and dispatch that branch. Before either runner
+variable is set or any runner is registered, the repository administrator must therefore:
+
+1. Capture all effective human collaborators and pending invitations through the authenticated
+   repository API. Temporarily remove every non-owner collaborator and require zero pending
+   invitations. A retained read collaborator may still be treated as a repository member and
+   bypass the `all_external_contributors` fork-workflow approval policy, so a downgrade is not
+   sufficient. For the audited personal repository, this means recording and temporarily removing
+   `b-urge` at `write`. Coordinate restoration before starting: re-adding a personal-repository
+   collaborator can require that user to accept a new invitation. The release-control policy
+   rejects a snapshot unless `jemsbhai` is the sole collaborator, retains effective write
+   authority, and the invitation list is empty.
+2. Keep fork approval at `all_external_contributors`; require no untrusted open pull request and no
+   queued or in-progress job targeting either custom label. Under an owner-authenticated browser
+   session, export and review the repository's installed GitHub Apps and automation grants; require
+   no non-owner-equivalent principal able to modify workflows and dispatch Actions, or temporarily
+   suspend/restrict it. Retain that export and its SHA-256. The collaborator API cannot certify
+   this App boundary, so an absent authenticated App-permission record remains a blocker. Cancel
+   and archive any unexpected queued job before capacity appears.
+3. Set the exact variables, then have the owner dispatch the reviewed ref while no custom runner is
+   registered. Verify the resulting run ID, ref, SHA, actor, triggering actor, and the complete set
+   of expected queued custom-label jobs. Only then register fresh just-in-time runners on clean,
+   isolated VMs. Each runner may accept at most one job. Record the exact runner ID, labels, VM
+   identity, device inventory, and registration time.
+4. Retain sole-writer authority through the accepted PR and final-main CUDA dispatches and the two
+   fresh single-GPU publication jobs. On success, failure, or cancellation, remove both variables,
+   delete every runner/VM/disk, and prove the relevant queues and resource inventories returned to
+   zero. After publication/recovery succeeds—or immediately after a failed window is cleaned up—
+   re-invite each collaborator at the exact prior permission with a before/after record and retain
+   the later acceptance record. Restoration is not complete merely because an invitation exists.
+
+Do not remove a collaborator merely while capacity is unavailable: without runner variables or
+registered runners there is no self-hosted execution surface. Removal is a short, coordinated,
+evidenced release window, and accepted restoration is part of cleanup.
+
 Set `CUDA_SINGLE_RUNNER` and `CUDA_TWO_RUNNER` only to GitHub-managed GPU runners or isolated,
-ephemeral runners approved for public-repository code. With variables absent or incorrect, a
-hosted reporter fails the routing contract before checkout, dependency installation, or hardware
-execution; it cannot produce CUDA evidence. Require both single-GPU Torch
+ephemeral runners approved for public-repository code after the authority checks above pass. With
+variables absent or incorrect, a hosted reporter fails the routing contract before checkout,
+dependency installation, or hardware execution; it cannot produce CUDA evidence. Require both single-GPU Torch
 minimum/latest contexts on `main`; run both two-GPU edges on the scheduled workflow. A green gate
 means the checked-in exact node manifest matched collection and all 15 CUDA tests ran with zero
 skips, including adapter prediction/gradients, every vector and CAM gradient family,
@@ -171,9 +208,13 @@ exact device count; the repository administrator must still retain the infrastru
 record establishing that the selected self-hosted runners are isolated and approved.
 
 As of the 2026-08-11 audit, the repository API reported zero Actions variables and zero registered
-runners. Both variables are therefore unset and no live GPU acceptance exists. A repository
-administrator must provision approved capacity, set both variables, dispatch `cuda-ci.yml` on the
-exact release commit, and retain a green four-job run before the preflight can succeed. The
-`tests_cuda` session hook converts every runtime or collection skip into a failed job and rejects
-missing, extra, reordered, or duplicate release nodes when manifest enforcement is enabled. A
-local one-GPU diagnostic, even if green, does not substitute for this hosted four-job evidence.
+runners, zero pending invitations, owner `jemsbhai` at `admin`, and `b-urge` at `write`. There is
+therefore no current self-hosted execution surface, but the authority policy is deliberately not
+release-ready and `b-urge` must be removed only when an approved, restoration-coordinated runner
+window can begin. A
+repository administrator must provision approved capacity, complete the authority sequence above,
+set both variables, dispatch `cuda-ci.yml` on the exact release commit, and retain a green four-job
+run before the preflight can succeed. The `tests_cuda` session hook converts every runtime or
+collection skip into a failed job and rejects missing, extra, reordered, or duplicate release nodes
+when manifest enforcement is enabled. A local one-GPU diagnostic, even if green, does not substitute
+for this hosted four-job evidence.

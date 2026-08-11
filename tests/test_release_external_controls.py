@@ -90,6 +90,16 @@ def _matching_observation():
         "repository": policy["repository"],
         "default_branch": policy["default_branch"],
         "capture_principal": "jemsbhai",
+        "release_runner_authority": {
+            "collaborators": [
+                {
+                    "login": "jemsbhai",
+                    "role_name": "admin",
+                    "permissions": {"admin": True, "maintain": True, "push": True},
+                }
+            ],
+            "pending_invitations": [],
+        },
         "release_tag": "v0.15.0",
         "release_commit": SHA,
         "tag_exists": False,
@@ -295,6 +305,28 @@ def test_immutable_release_observation_requires_explicit_json_true(replacement):
             lambda value: value.update(environment_secret_names=["PYPI_API_TOKEN"]),
             "environment_secret_names",
         ),
+        (
+            lambda value: value["release_runner_authority"]["collaborators"].append(
+                {
+                    "login": "read-collaborator",
+                    "role_name": "read",
+                    "permissions": {"admin": False, "maintain": False, "push": False},
+                }
+            ),
+            "allowed_collaborator_logins",
+        ),
+        (
+            lambda value: value["release_runner_authority"]["pending_invitations"].append(
+                {"id": 9, "invitee": "pending-writer", "permissions": "push"}
+            ),
+            "pending_invitations",
+        ),
+        (
+            lambda value: value["release_runner_authority"]["collaborators"][0][
+                "permissions"
+            ].update(admin=False, maintain=False, push=False),
+            "required_write_logins",
+        ),
     ],
 )
 def test_control_policy_fails_closed_on_each_security_regression(mutation, match):
@@ -332,6 +364,20 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
         },
         f"{root}/actions/secrets": {"secrets": []},
         f"{root}/environments/pypi/secrets": {"secrets": []},
+        f"{root}/collaborators?affiliation=all&per_page=100": [
+            {
+                "login": "jemsbhai",
+                "role_name": "admin",
+                "permissions": {
+                    "admin": True,
+                    "maintain": True,
+                    "push": True,
+                    "triage": True,
+                    "pull": True,
+                },
+            }
+        ],
+        f"{root}/invitations?per_page=100": [],
         f"{root}/commits/{SHA}/check-runs?per_page=100": {
             "total_count": len(observation["check_runs"]),
             "check_runs": observation["check_runs"],
@@ -367,6 +413,63 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
     if immutable_not_found:
         violations = controls.evaluate_controls(policy, captured)
         assert any("immutable_releases.enabled" in value for value in violations)
+
+
+def test_release_runner_authority_rejects_malformed_and_duplicate_collaborators():
+    policy, _ = _policy()
+    observation = _matching_observation()
+    observation["release_runner_authority"]["collaborators"][0]["permissions"]["push"] = "true"
+    observation["release_runner_authority"]["collaborators"].append(
+        {
+            "login": "jemsbhai",
+            "role_name": "admin",
+            "permissions": {"admin": True, "maintain": True, "push": True},
+        }
+    )
+
+    violations = controls.evaluate_controls(policy, observation)
+
+    assert any("permission 'push' must be boolean" in value for value in violations)
+    assert any("collaborator 'jemsbhai' is duplicated" in value for value in violations)
+
+
+@pytest.mark.parametrize("full_page", ["collaborators", "invitations"])
+def test_capture_observation_rejects_authority_pages_that_may_be_incomplete(full_page):
+    policy, _ = _policy()
+    root = f"repos/{policy['repository']}"
+    responses = {
+        f"{root}/immutable-releases": {"enabled": True},
+        f"{root}/rulesets": [],
+        f"{root}/environments/pypi/deployment-branch-policies": {"branch_policies": []},
+        f"{root}/actions/secrets": {"secrets": []},
+        f"{root}/environments/pypi/secrets": {"secrets": []},
+        f"{root}/collaborators?affiliation=all&per_page=100": [],
+        f"{root}/invitations?per_page=100": [],
+    }
+    if full_page == "collaborators":
+        responses[f"{root}/collaborators?affiliation=all&per_page=100"] = [
+            {"login": f"user-{index}"} for index in range(100)
+        ]
+    else:
+        responses[f"{root}/invitations?per_page=100"] = [{"id": index} for index in range(100)]
+
+    with pytest.raises(ValueError, match=f"repository {full_page} capture may be incomplete"):
+        controls.capture_observation(
+            policy=policy,
+            release_tag="v0.15.0",
+            release_commit=SHA,
+            get_json=responses.__getitem__,
+        )
+
+
+def test_release_runner_authority_policy_cannot_approve_pending_invitations():
+    policy, _ = _policy()
+    policy = copy.deepcopy(policy)
+    policy["release_runner_authority"]["pending_invitations"] = ["pending-writer"]
+
+    violations = controls.evaluate_controls(policy, _matching_observation())
+
+    assert any("policy must be an empty array" in value for value in violations)
 
 
 def test_snapshot_is_bound_to_exact_policy_repository_tag_and_commit():

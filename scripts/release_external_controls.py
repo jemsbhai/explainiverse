@@ -100,6 +100,89 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
             f"got {observation.get('capture_principal')!r}"
         )
 
+    authority_policy = _mapping(
+        policy.get("release_runner_authority"), "release runner authority policy"
+    )
+    expected_collaborator_logins = _canonical_names(
+        _sequence(
+            authority_policy.get("allowed_collaborator_logins"),
+            "release runner allowed collaborator logins",
+        ),
+        "release runner allowed collaborator logins",
+    )
+    expected_invitations = list(
+        _sequence(
+            authority_policy.get("pending_invitations"),
+            "release runner pending invitations policy",
+        )
+    )
+    if expected_invitations:
+        violations.append(
+            "release_runner_authority.pending_invitations policy must be an empty array"
+        )
+
+    authority = _mapping(
+        observation.get("release_runner_authority"),
+        "release runner authority observation",
+    )
+    actual_collaborator_logins: list[str] = []
+    actual_write_logins: list[str] = []
+    seen_collaborators: set[str] = set()
+    for raw_collaborator in _sequence(
+        authority.get("collaborators"), "release runner collaborators"
+    ):
+        collaborator = _mapping(raw_collaborator, "release runner collaborator")
+        login = collaborator.get("login")
+        if not isinstance(login, str) or not login:
+            violations.append("release runner collaborator login must be a non-empty string")
+            continue
+        if login in seen_collaborators:
+            violations.append(f"release runner collaborator {login!r} is duplicated")
+            continue
+        seen_collaborators.add(login)
+        actual_collaborator_logins.append(login)
+        permissions = _mapping(
+            collaborator.get("permissions"),
+            f"release runner collaborator {login!r} permissions",
+        )
+        effective_write = False
+        for permission_name in ("admin", "maintain", "push"):
+            permission_value = permissions.get(permission_name)
+            if not isinstance(permission_value, bool):
+                violations.append(
+                    f"release runner collaborator {login!r} permission "
+                    f"{permission_name!r} must be boolean"
+                )
+            elif permission_value:
+                effective_write = True
+        if effective_write:
+            actual_write_logins.append(login)
+    actual_collaborator_logins.sort()
+    actual_write_logins.sort()
+    if actual_collaborator_logins != expected_collaborator_logins:
+        violations.append(
+            "release_runner_authority.allowed_collaborator_logins: expected "
+            f"{expected_collaborator_logins!r}, got {actual_collaborator_logins!r}"
+        )
+    missing_write_logins = sorted(set(expected_collaborator_logins) - set(actual_write_logins))
+    if missing_write_logins:
+        violations.append(
+            "release_runner_authority.required_write_logins: expected effective write for "
+            f"{expected_collaborator_logins!r}, missing {missing_write_logins!r}"
+        )
+
+    pending_invitations = list(
+        _sequence(
+            authority.get("pending_invitations"),
+            "release runner pending invitations",
+        )
+    )
+    if pending_invitations != expected_invitations:
+        violations.append(
+            "release_runner_authority.pending_invitations: expected "
+            f"{expected_invitations!r}, got {pending_invitations!r}"
+        )
+
     branch = _mapping(observation.get("branch_protection"), "branch_protection")
     branch_policy = _mapping(policy.get("branch_protection"), "branch_protection policy")
     branch_fields = {
@@ -440,6 +523,26 @@ def capture_observation(
         get_json(f"{root}/environments/{environment_name}/secrets"),
         "environment secrets response",
     )
+    raw_collaborators = list(
+        _sequence(
+            get_json(f"{root}/collaborators?affiliation=all&per_page=100"),
+            "repository collaborators response",
+        )
+    )
+    if len(raw_collaborators) >= 100:
+        raise ValueError(
+            "repository collaborators capture may be incomplete at the 100-entry page limit"
+        )
+    raw_invitations = list(
+        _sequence(
+            get_json(f"{root}/invitations?per_page=100"),
+            "repository invitations response",
+        )
+    )
+    if len(raw_invitations) >= 100:
+        raise ValueError(
+            "repository invitations capture may be incomplete at the 100-entry page limit"
+        )
     check_response = _mapping(
         get_json(f"{root}/commits/{release_commit}/check-runs?per_page=100"),
         "check runs response",
@@ -466,6 +569,34 @@ def capture_observation(
             str(_mapping(value, "secret metadata")["name"])
             for value in _sequence(response.get("secrets"), "secret metadata")
         )
+
+    normalized_collaborators = []
+    for raw_value in raw_collaborators:
+        value = _mapping(raw_value, "repository collaborator")
+        permissions = _mapping(value.get("permissions"), "repository collaborator permissions")
+        normalized_collaborators.append(
+            {
+                "login": value.get("login"),
+                "role_name": value.get("role_name"),
+                "permissions": {
+                    name: permissions.get(name) for name in ("admin", "maintain", "push")
+                },
+            }
+        )
+    normalized_collaborators.sort(key=lambda value: str(value["login"]))
+
+    normalized_invitations = []
+    for raw_value in raw_invitations:
+        value = _mapping(raw_value, "repository invitation")
+        invitee = _mapping(value.get("invitee"), "repository invitation invitee")
+        normalized_invitations.append(
+            {
+                "id": value.get("id"),
+                "invitee": invitee.get("login"),
+                "permissions": value.get("permissions"),
+            }
+        )
+    normalized_invitations.sort(key=lambda value: (str(value["invitee"]), str(value["id"])))
 
     raw_branch = _mapping(
         get_json(f"{root}/branches/{branch}/protection"), "branch protection response"
@@ -613,6 +744,10 @@ def capture_observation(
         "repository": repository,
         "default_branch": branch,
         "capture_principal": principal,
+        "release_runner_authority": {
+            "collaborators": normalized_collaborators,
+            "pending_invitations": normalized_invitations,
+        },
         "release_tag": release_tag,
         "release_commit": release_commit,
         "tag_exists": tag_exists,

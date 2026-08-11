@@ -670,6 +670,10 @@ def test_required_context_policy_matches_new_p0_and_preserved_p1_gates():
     )
     assert policy["immutable_releases"] == {"enabled": True}
     assert policy["admin_snapshot_principals"] == ["jemsbhai"]
+    assert policy["release_runner_authority"] == {
+        "allowed_collaborator_logins": ["jemsbhai"],
+        "pending_invitations": [],
+    }
     assert set(policy["cuda_evidence"]["required_jobs"]) == {
         "CUDA single-GPU (Torch minimum)",
         "CUDA single-GPU (Torch latest)",
@@ -852,3 +856,14 @@ def test_release_runbook_dispatches_recovery_from_the_tag_and_defers_to_assets()
     assert "gh workflow run recover-github-release.yml --ref $releaseTag" in runbook
     assert "release notes remain mutable" in runbook
     assert "governance assets are authoritative" in runbook
+
+
+def test_release_runbook_requires_external_authority_for_mutable_workflows():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    assert "guard is defense in depth, not the authority boundary" in runbook
+    assert "is the sole collaborator" in runbook
+    assert "zero pending invitations" in runbook
+    assert "queued or in-progress job targeting either custom label" in runbook
+    assert "re-invite each collaborator at the exact prior permission" in runbook
+    assert "Restoration is not complete" in runbook
+    assert "Only then register fresh just-in-time runners" in runbook
