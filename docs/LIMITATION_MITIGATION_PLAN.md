@@ -6,8 +6,8 @@ software; their mitigation is disclosure, sensitivity analysis, and refusal to m
 claim.
 
 The B01-B11 audit began from clean commit
-`dd76815c79076c43d88568ae10f43be7bb546d9c` and was refreshed after the authorized draft-PR
-rehearsals on 2026-08-11. It is tracked in
+`dd76815c79076c43d88568ae10f43be7bb546d9c` and was refreshed through the authorized rehearsal
+of predecessor head `9408f5c63c8accab2611658422b768990ead42d5` on 2026-08-11. It is tracked in
 [`RELEASE_BLOCKER_CLOSURE_MATRIX.md`](RELEASE_BLOCKER_CLOSURE_MATRIX.md). That ledger supersedes
 older observation timestamps and counts below when deciding whether a stable release is
 supportable; the answer remains **no** until its applicable executable stable-gate rows are green.
@@ -46,22 +46,22 @@ detailed row remains the source of the acceptance criterion.
 | ID | Priority | Tracked limitation | Status / evidence |
 |---|---|---|---|
 | ENG-P0-01 | P0 | PyPI Trusted Publisher registration | **BLOCKED — external.** The workflow is OIDC-only, token-free, version-absence guarded, and policy-bound. PyPI has no public settings read API; no authenticated owner capture or successful authorized OIDC publication exists. See blocker B01. |
-| ENG-P0-02 | P0 | Live GitHub branch/tag/environment controls | **BLOCKED — live controls.** Authenticated snapshot `d66a648b…da3808be` has `repository_controls_accepted=false`: live protection has 10 contexts versus the policy's 23, 16 provider-bound exact-candidate checks are absent, and repository-level immutable Releases are disabled. Draft PR #2 registered all 23 names under the expected Actions app. Its 21 non-CUDA successes are not the required `push`/`main` evidence; its two CUDA failures require successful `workflow_dispatch`/`main` hardware evidence. See B02 and the fresh closure matrix. |
+| ENG-P0-02 | P0 | Live GitHub branch/tag/environment controls | **BLOCKED — live controls.** Authenticated snapshot `e2f704a4…c9121fc1e` has `repository_controls_accepted=false`: live protection has 10 contexts versus the policy's 23, 16 provider-bound exact-candidate checks are absent, and repository-level immutable Releases are disabled. Draft PR #2 registered all 23 names under the expected Actions app. Its 21 non-CUDA successes are not the required `push`/`main` evidence; its two CUDA failures require successful `workflow_dispatch`/`main` hardware evidence. See B02 and the fresh closure matrix. |
 | ENG-P0-03 | P0 | Non-atomic PyPI/GitHub release recovery | **BLOCKED — authorized drill.** Downstream-only recovery, all-attempt exactly-once inspection, immutable-tag execution binding, cross-service hash equality, retained evidence, and no-republish guards are implemented and tested. No real staged post-PyPI failure/recovery exists; legacy `0.14.0` lacks the required attested source run. See B03. |
-| ENG-P0-04 | P0 | Real CUDA and multi-GPU coverage | **BLOCKED — hosted hardware.** The min/latest one- and two-GPU workflow, exact topology-specific custom runner labels, exact 15-node manifest, exact-commit attestation, exact visible-device topology, and zero-skip hook exist. Live Actions variables and registered runners are both zero. PR run `31510953066` failed at routing before checkout/install/hardware/tests, proving the guard without producing or representing GPU evidence. See B04. |
-| ENG-P0-05 | P0 | Dependency resolver/version matrix | **BLOCKED — accepted push/live-main evidence; hosted PR rehearsal green.** PR run `31510953157` passed all six direct-floor/latest, Captum, and SHAP/XGBoost jobs; Python run `31510953062` passed full-quality, minimum-direct, and every supported-platform job. These runs were associated with head `6c507db…` and executed merge checkout `1a3f183…`. The workflows are not landed or required on `origin/main`, so policy-bound `push` evidence remains required. See B05. |
-| ENG-P0-06 | P0 | Quantus versus pandas-floor separation | **BLOCKED — accepted push/live-main evidence; hosted PR rehearsal green.** The exact marker manifest, minimum-lane exclusion audit, explicit Quantus import, and zero-skip reference job are implemented. PR run `31510953062` imported Quantus 0.6.0 and passed exactly 9/9 comparisons; the required landed `push` context remains absent. See B05. |
+| ENG-P0-04 | P0 | Real CUDA and multi-GPU coverage | **BLOCKED — hosted hardware.** The min/latest one- and two-GPU workflow, exact topology-specific custom runner labels, exact 15-node manifest, exact-commit attestation, exact visible-device topology, and zero-skip hook exist. Live Actions variables and registered runners are both zero. PR run `31513520981` failed at routing before checkout/install/hardware/tests, proving the guard without producing or representing GPU evidence. See B04. |
+| ENG-P0-05 | P0 | Dependency resolver/version matrix | **BLOCKED — accepted push/live-main evidence; hosted PR rehearsal green.** PR run `31513520975` passed all six direct-floor/latest, Captum, and SHAP/XGBoost jobs; Python run `31513521028` passed full-quality, minimum-direct, and every supported-platform job. These runs were associated with head `9408f5c…` and executed merge checkout `0d5ca699…`. The workflows are not landed or required on `origin/main`, so policy-bound `push` evidence remains required. See B05. |
+| ENG-P0-06 | P0 | Quantus versus pandas-floor separation | **BLOCKED — accepted push/live-main evidence; hosted PR rehearsal green.** The exact marker manifest, minimum-lane exclusion audit, explicit Quantus import, and zero-skip reference job are implemented. PR run `31513521028` imported Quantus 0.6.0 and passed exactly 9/9 comparisons; the required landed `push` context remains absent. See B05. |
 | ENG-P1-01 | P1 | Model-state ownership and extra RNG/state | **RETIRED — declared repository contract; residual boundary permanent.** Adversarial gates cover registered-state traversal, default/injected RNG, callbacks, protocol/fingerprint state, success/error restoration, and serialized adapter operations. Python/NumPy RNG, processes, distributed workers, external mutation, and nondeterministic kernels remain explicitly outside the claim. |
 | ENG-P1-02 | P1 | Shared explainer-instance mutation | **RETIRED — repository gate.** All built-in public explainer operations use per-instance re-entrant synchronization; barrier tests cover IG atomic shape commit, DeepSHAP background mutation, TCAV concept mutation, success, and failure. |
-| ENG-P1-03 | P1 | Hashed release tools and artifact reproducibility | **BLOCKED — accepted push-event/publish binding; hosted PR rehearsal green.** PR run `31510953097` built merge checkout `1a3f183389434a1f2166cf314bd2594fac5705e3` on two distinct clean Ubuntu jobs with matching image identity and byte-identical wheel/sdist; comparator report artifact `9109070952` was retained. The reviewed policy requires a landed `push` run, and a future clean-checkout publish distribution must still match that exact accepted run before upload. See B06 and the gate ledger. |
+| ENG-P1-03 | P1 | Hashed release tools and artifact reproducibility | **BLOCKED — accepted push-event/publish binding; hosted PR rehearsal green.** PR run `31513521096` attempt 2 built merge checkout `0d5ca6996e548e6ffb4d89e83aac7fc524ba5dbd` on two distinct clean Ubuntu jobs with matching image identity and byte-identical wheel/sdist; comparator report artifact `9110345374` with digest `sha256:ae02222d908d820ca12e5aac0c765fe51a0e267cca70fca4befae01e81ab183e` was retained. The reviewed policy requires a landed `push` run, and a future clean-checkout publish distribution must still match that exact accepted run before upload. See B06 and the gate ledger. |
 | ENG-P1-04 | P1 | bfloat16 tensor result path | **RETIRED — repository gate.** Owned tensor and DLPack endpoints preserve bfloat16 dtype/values and lifetime; NumPy widening remains explicit and unchanged. |
 | ENG-P1-05 | P1 | Failed custom `nn.Module.to()` rollback | **RETIRED — fail-closed repository gate.** Meta moves/models reject before mutation. Standard inherited rollback is tested; failed custom `to`, `_apply`, traversal, or registered-state semantics poison/fail before every later public adapter operation even when rollback returns. No universal atomicity claim remains. |
 | ENG-P1-06 | P1 | Explicit image layout/channel axis | **RETIRED — repository gate.** `hw/chw/hwc/nchw/nhwc`, NHW batching, custom channels, metadata, and pre-model rank errors are covered without size heuristics. |
 | ENG-P1-07 | P1 | Reused target-layer occurrence selection | **RETIRED — repository gate.** Immutable per-call traces, first/middle/last analytical oracles, dynamic/out-of-range rejection, cleanup, TCAV occurrence identity, and shared-adapter CAM races are covered. Legacy `last_layer_*` fields are compatibility state, not result evidence. |
-| ENG-P1-08 | P1 | Captum operator/graph/version support | **RETIRED — declared surface; accepted push binding blocked.** The support matrix, canonical per-call graph-integrity checks, direct unsupported/dynamic-graph rejection, DeepLIFT reused-nonlinear rejection, LRP shared-module rejection, private-rule dependency, and five-file parity suite are explicit. PR run `31510953157` explicitly imported Captum 0.8.0 and 0.9.0 and passed each exact 306-test surface with zero skips; the required landed `push` contexts remain open. See B07. |
-| ENG-P1-09 | P1 | Versioned Python/JavaScript wire schema | **RETIRED — repository gate; accepted push contexts pending.** The separate v1 finite-JSON API, shared accept/reject fixtures, true Python→Node→Python bridge, target/safe-number parity, and 88-test JS suite are green. PR run `31510953069` passed exact Node 20.11.0 and Node 22, React 18, and browser jobs; the reviewed `push` event/live-main binding is not yet satisfied. |
+| ENG-P1-08 | P1 | Captum operator/graph/version support | **RETIRED — declared surface; accepted push binding blocked.** The support matrix, canonical per-call graph-integrity checks, direct unsupported/dynamic-graph rejection, DeepLIFT reused-nonlinear rejection, LRP shared-module rejection, private-rule dependency, and five-file parity suite are explicit. PR run `31513520975` explicitly imported Captum 0.8.0 and 0.9.0 and passed each exact 306-test surface with zero skips; the required landed `push` contexts remain open. See B07. |
+| ENG-P1-09 | P1 | Versioned Python/JavaScript wire schema | **RETIRED — repository gate; accepted push contexts pending.** The separate v1 finite-JSON API, shared accept/reject fixtures, true Python→Node→Python bridge, target/safe-number parity, and 88-test JS suite are green. PR run `31513521103` passed exact Node 20.11.0 and Node 22, React 18, and browser jobs; the reviewed `push` event/live-main binding is not yet satisfied. |
 | ENG-P1-10 | P1 | Single-operator release approval | **BLOCKED — external governance.** The live environment has only reviewer `jemsbhai` and permits self-review. The publish/recovery paths now generate and retain a validated single-operator governance disclosure with the attested preflight, but neither two-principal approval nor an actual future release record exists. See B08. |
-| ENG-P1-11 | P1 | macOS ARM, typing, browser, and accessibility certification | **MIXED — hosted PR rehearsal green; accepted push/claim evidence open.** PR Python run `31510953062` passed macOS 15 ARM64/OpenMP, 3,630 tests with four owned skips, and `pip check`; PR JS run `31510953069` passed React 18 and zero-retry Playwright 9/9 on three engines. Those are not the required landed `push` contexts. Typing remains **BLOCKED** at 1,375 strict-mypy errors in 44 files and 0% Pyright completeness; physical NVDA/VoiceOver evidence remains **BLOCKED — external/manual**. See B09. |
+| ENG-P1-11 | P1 | macOS ARM, typing, browser, and accessibility certification | **MIXED — hosted PR rehearsal green; accepted push/claim evidence open.** PR Python run `31513521028` passed macOS 15 ARM64/OpenMP, 3,630 tests with four owned skips, and `pip check`; PR JS run `31513521103` passed React 18 and zero-retry Playwright 9/9 on three engines. Those are not the required landed `push` contexts. Typing remains **BLOCKED** at 1,375 strict-mypy errors in 44 files and 0% Pyright completeness; physical NVDA/VoiceOver evidence remains **BLOCKED — external/manual**. See B09. |
 | ENG-P1-12 | P1 | scikit-image next-major compatibility | **BLOCKED FOR WIDENING — upstream/hosted.** The `<1.0` cap remains. Discovery archives exact PyPI metadata and fails while no real non-yanked 1.x prerelease exists; only a separate, explicitly source-only candidate job can produce localisation/LIME/package/tutorial evidence without misrepresenting the capped wheel or a dependency-only graph as 1.x distribution support. See B10. |
 | NUM-PERM-01 | Permanent | Finite-real and representability boundary | **ACCEPTED — permanent.** Exact/high-precision near-max, subnormal, cancellation, safe-conversion, and true-out-of-range gates preserve every owned representable case and reject unrepresentable values; the finite-real boundary is not retired. |
 | NUM-P1-01 | P1 | Extreme-value CAM variant numerics | **RETIRED — numerical gate only.** LayerCAM, GradCAMElementWise, and EigenGradCAM ordinary/extreme paths match independent high-precision amplitude/projection oracles and reject true overflow without NaN/infinity. CAP-P2-03 remains quarantined. |
@@ -108,27 +108,27 @@ by an exact node manifest and zero-skip policy, but no hardware result is repres
 - JavaScript passed 88 tests, typecheck, lint, build, demo, exact 16-file package-boundary, and
   `npm audit --audit-level=high` with zero vulnerabilities on Node 20.11.1. Chromium, Firefox,
   and WebKit passed all nine browser/axe tests with zero retries. Bundle size was 213,136 bytes
-  total and 66,362 gzip bytes of JavaScript. PR run `31510953069` repeated the Node 20/22,
+  total and 66,362 gzip bytes of JavaScript. PR run `31513521103` repeated the Node 20/22,
   React 18, and three-engine browser gates successfully.
 - All four notebooks were regenerated after source freeze, replayed from fresh kernels, and
   passed the 22-test provenance/output contract. Actionlint and pinned Prettier passed every
   workflow/policy file. Focused release/security/adversarial suites passed. Structural CUDA
   tests proved manifest, topology, class-agnostic EigenCAM, and
   fail-closed collection contracts without claiming hardware acceptance.
-- Draft-PR artifact run `31510953097` used two distinct clean Ubuntu jobs with matching image
-  identity to build merge checkout `1a3f183389434a1f2166cf314bd2594fac5705e3`, producing
+- Draft-PR artifact run `31513521096` attempt 2 used two distinct clean Ubuntu jobs with matching image
+  identity to build merge checkout `0d5ca6996e548e6ffb4d89e83aac7fc524ba5dbd`, producing
   byte-identical distributions. The wheel is 377,159 bytes, SHA-256
-  `65a3bb6b67374b6d14d803a0f2e8d99ad022b6f90e811fb3ff0fb9548476c1be`; the sdist is
-  335,187 bytes, SHA-256
-  `0c958cc1d09f1bd6953d0ea60e11378a20810bbc404d6e315e792e2af65deeab`.
+  `56bd9d021b19ddc0ec4a49cdea67c142ace4b2faaa9df7213d9e94009a7b8746`; the sdist is
+  335,201 bytes, SHA-256
+  `5e51f2f1bf59bfea28a3f3b84a910709e673dcef34e66a42bb8fffdc1ca850a3`.
   The required landed `push` event and later publish-byte binding remain B06.
 
 ### Live evidence and blocker ledger
 
 The latest authenticated read-only capture was made as repository administrator `jemsbhai` at
-`2026-08-11T16:26:22.639028+00:00` against `origin/main`
+`2026-08-11T17:16:13.612560+00:00` against `origin/main`
 `49e962c090e90e62f315837067e5adc3e3f04d1c`. Its JSON SHA-256 is
-`d66a648bb24c0d2bb2318b17fe8bb0c4d31d02a1e712162498bc42c2da3808be`; its reviewed-policy
+`e2f704a4996056de8dda2c7977f55c4dd55135c7054b6ecbf0ac721c9121fc1e`; its reviewed-policy
 SHA-256 is `e6d8e4de111f5efdcecfef726e9c4f4a526eebd0d16520c426d9405aca03a443`.
 It reports 19 violations: live protection has 10 contexts versus the reviewed policy's 23,
 16 required provider-bound exact-commit check runs are missing, and repository-level immutable
@@ -136,15 +136,15 @@ Releases are disabled. All 10 live branch contexts are bound to GitHub Actions a
 Repository and `pypi`-environment secret-name inventories are empty. The branch/tag/environment
 controls not implicated by those violations match the policy.
 
-Separate authenticated read-only API observations at `2026-08-11T16:32:57.3929406Z` report
+Separate authenticated read-only API observations at `2026-08-11T17:17:51.9860715Z` report
 Actions variables `total_count: 0`, registered runners `total_count: 0`, and six active
 repository-level workflow registrations. Only the original three workflow files are present in
 the `main` tree; PR execution registered the three additional files.
 
 Explicitly authorized branch pushes and draft-PR creation/updates produced these rehearsals. The
-runs were associated with head `6c507db7872395eceeccbf6fc96d7569b257288e` and executed merge checkout
-`1a3f183389434a1f2166cf314bd2594fac5705e3`. All 21 non-CUDA policy names completed
-successfully, but their reviewed acceptance event is `push` on `main`. CUDA run `31510953066`
+runs were associated with head `9408f5c63c8accab2611658422b768990ead42d5` and executed merge checkout
+`0d5ca6996e548e6ffb4d89e83aac7fc524ba5dbd`. All 21 non-CUDA policy names completed
+successfully, but their reviewed acceptance event is `push` on `main`. CUDA run `31513520981`
 terminated both required CUDA contexts in failure before checkout because the runner variables
 are absent; their reviewed acceptance requires `workflow_dispatch` on `main` and approved
 hardware. No merge, external settings mutation, tag, publication, release, recovery drill, or

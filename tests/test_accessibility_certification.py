@@ -137,3 +137,32 @@ def test_stale_or_future_evidence_is_rejected(tmp_path):
     evidence["completed_at"] = "2026-08-11T00:00:00Z"
     with pytest.raises(accessibility.AccessibilityEvidenceError, match="future"):
         _validate(tmp_path, evidence)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("age", "profiles", "scenarios", "artifacts"),
+)
+def test_manual_evidence_policy_cannot_redirect_canonical_boundaries(tmp_path, mutation):
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    if mutation == "age":
+        policy["max_evidence_age_days"] = 9999
+    elif mutation == "profiles":
+        policy["required_profiles"][0]["platform"] = "Emulated macOS"
+    elif mutation == "scenarios":
+        policy["required_scenarios"] = ["disclosure-and-landmarks"]
+    else:
+        policy["required_artifact_kinds"] = ["interaction-transcript"]
+
+    policy_path = tmp_path / "accessibility-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(_valid_evidence()), encoding="utf-8")
+
+    with pytest.raises(accessibility.AccessibilityEvidenceError, match="canonical"):
+        accessibility.validate_evidence(
+            policy_path,
+            evidence_path,
+            expected_commit="1" * 40,
+            now=NOW,
+        )

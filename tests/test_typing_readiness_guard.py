@@ -131,3 +131,22 @@ def test_policy_cannot_redirect_the_canonical_typing_boundaries(tmp_path, field,
 
     with pytest.raises(typing_audit.TypingReadinessError, match="canonical boundary"):
         _audit(tmp_path, policy=policy_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("mypy", "true"),
+        ("pyright", "true"),
+        ("required_result", "No strict consumer evidence required."),
+    ],
+)
+def test_policy_cannot_redirect_the_canonical_typing_acceptance(tmp_path, field, replacement):
+    _untyped_project(tmp_path)
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    policy["acceptance"][field] = replacement
+    policy_path = tmp_path / "typing-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    with pytest.raises(typing_audit.TypingReadinessError, match="canonical strict consumer"):
+        _audit(tmp_path, policy=policy_path)
