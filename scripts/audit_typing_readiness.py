@@ -7,8 +7,14 @@ import json
 import sys
 import tarfile
 import zipfile
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path, PurePosixPath
 from typing import Sequence
+
+_CANONICAL_PACKAGE = "explainiverse"
+_CANONICAL_MARKER = "src/explainiverse/py.typed"
+_CANONICAL_CLASSIFIER = "Typing :: Typed"
 
 
 class TypingReadinessError(ValueError):
@@ -30,6 +36,34 @@ def _archive_members(path: Path) -> list[str]:
     raise TypingReadinessError(f"unsupported distribution archive: {path}")
 
 
+def _archive_metadata(path: Path) -> dict[str, bytes]:
+    def is_metadata(name: str) -> bool:
+        normalized = PurePosixPath(name.replace("\\", "/"))
+        return normalized.name in {"METADATA", "PKG-INFO"}
+
+    if path.suffix in {".whl", ".zip"}:
+        with zipfile.ZipFile(path) as zip_archive:
+            return {
+                name: zip_archive.read(name)
+                for name in zip_archive.namelist()
+                if is_metadata(name) and not name.endswith("/")
+            }
+    if path.name.endswith(".tar.gz") or path.suffix in {".tar", ".tgz"}:
+        metadata: dict[str, bytes] = {}
+        with tarfile.open(path) as tar_archive:
+            for member in tar_archive.getmembers():
+                if not member.isfile() or not is_metadata(member.name):
+                    continue
+                stream = tar_archive.extractfile(member)
+                if stream is None:
+                    raise TypingReadinessError(
+                        f"cannot read distribution metadata {member.name!r} from {path}"
+                    )
+                metadata[member.name] = stream.read()
+        return metadata
+    raise TypingReadinessError(f"unsupported distribution archive: {path}")
+
+
 def load_blocked_policy(path: Path) -> dict[str, object]:
     try:
         policy = json.loads(path.read_text(encoding="utf-8"))
@@ -42,8 +76,17 @@ def load_blocked_policy(path: Path) -> dict[str, object]:
             "this guard only permits the audited blocked state; replace it with green strict "
             "consumer certification before declaring typed support"
         )
-    if policy.get("package") != "explainiverse":
+    if policy.get("package") != _CANONICAL_PACKAGE:
         raise TypingReadinessError("typing policy package must remain 'explainiverse'")
+    expected_boundaries = {
+        "forbidden_marker": _CANONICAL_MARKER,
+        "forbidden_classifier": _CANONICAL_CLASSIFIER,
+    }
+    for field, expected in expected_boundaries.items():
+        if policy.get(field) != expected:
+            raise TypingReadinessError(
+                f"typing policy {field} must remain the canonical boundary {expected!r}"
+            )
     return policy
 
 
@@ -56,20 +99,15 @@ def audit_blocked_distribution(
 ) -> dict[str, object]:
     """Assert that neither source metadata nor built archives claim PEP 561 support."""
     policy = load_blocked_policy(policy_path)
-    marker_value = policy.get("forbidden_marker")
-    classifier_value = policy.get("forbidden_classifier")
-    if not isinstance(marker_value, str) or not isinstance(classifier_value, str):
-        raise TypingReadinessError("typing policy is missing its forbidden claim boundaries")
-
-    marker = repository_root / marker_value
+    marker = repository_root / _CANONICAL_MARKER
     if marker.exists():
-        raise TypingReadinessError(f"blocked typing marker exists: {marker_value}")
+        raise TypingReadinessError(f"blocked typing marker exists: {_CANONICAL_MARKER}")
     try:
         project_text = project_file.read_text(encoding="utf-8")
     except OSError as exc:
         raise TypingReadinessError(f"cannot read project metadata {project_file}: {exc}") from exc
-    if classifier_value in project_text:
-        raise TypingReadinessError(f"blocked typing classifier exists: {classifier_value}")
+    if _CANONICAL_CLASSIFIER in project_text:
+        raise TypingReadinessError(f"blocked typing classifier exists: {_CANONICAL_CLASSIFIER}")
 
     package = str(policy["package"])
     checked_archives: list[str] = []
@@ -82,6 +120,21 @@ def audit_blocked_distribution(
         if marker_members:
             raise TypingReadinessError(
                 f"blocked typing marker shipped in {distribution}: {marker_members!r}"
+            )
+        metadata = _archive_metadata(distribution)
+        if not metadata:
+            raise TypingReadinessError(
+                f"distribution contains no auditable METADATA or PKG-INFO: {distribution}"
+            )
+        typed_metadata = []
+        for name, payload in metadata.items():
+            parsed = BytesParser(policy=default).parsebytes(payload)
+            classifiers = parsed.get_all("Classifier", [])
+            if any(str(value).strip() == _CANONICAL_CLASSIFIER for value in classifiers):
+                typed_metadata.append(name)
+        if typed_metadata:
+            raise TypingReadinessError(
+                f"blocked typing classifier shipped in {distribution}: {typed_metadata!r}"
             )
         checked_archives.append(str(distribution))
 

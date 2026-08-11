@@ -137,6 +137,60 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
             f"main.required_checks: expected {expected_checks!r}, got {actual_checks!r}"
         )
 
+    provider_policy = _mapping(
+        policy.get("required_check_provider"), "required_check_provider policy"
+    )
+    expected_app_id = provider_policy.get("app_id")
+    expected_app_slug = provider_policy.get("slug")
+    if not isinstance(expected_app_id, int) or expected_app_id <= 0:
+        violations.append("required_check_provider.app_id must be a positive integer")
+    if not isinstance(expected_app_slug, str) or not expected_app_slug:
+        violations.append("required_check_provider.slug must be a non-empty string")
+    try:
+        branch_bindings = [
+            _mapping(value, "branch required check binding")
+            for value in _sequence(
+                _nested(branch, "required_status_checks", "checks"),
+                "branch required check bindings",
+            )
+        ]
+        actual_bindings = sorted(
+            (value.get("context"), value.get("app_id")) for value in branch_bindings
+        )
+    except (KeyError, ValueError) as exc:
+        violations.append(f"main.required_check_bindings: invalid or missing ({exc})")
+        actual_bindings = []
+    expected_bindings = sorted((name, expected_app_id) for name in expected_checks)
+    if actual_bindings != expected_bindings:
+        violations.append(
+            f"main.required_check_bindings: expected {expected_bindings!r}, "
+            f"got {actual_bindings!r}"
+        )
+
+    workflow_policy = _mapping(
+        policy.get("required_check_workflows"), "required check workflows policy"
+    )
+    if set(workflow_policy) != set(expected_checks):
+        violations.append(
+            "required_check_workflows: keys must exactly match required_checks; "
+            f"expected {sorted(expected_checks)!r}, got {sorted(workflow_policy)!r}"
+        )
+
+    immutable_policy = _mapping(policy.get("immutable_releases"), "immutable releases policy")
+    immutable_releases = _mapping(
+        observation.get("immutable_releases"), "immutable releases observation"
+    )
+    if immutable_policy.get("enabled") is not True:
+        violations.append(
+            "immutable_releases policy.enabled must be the JSON boolean true; "
+            f"got {immutable_policy.get('enabled')!r}"
+        )
+    if immutable_releases.get("enabled") is not True:
+        violations.append(
+            "immutable_releases.enabled: expected true, got "
+            f"{immutable_releases.get('enabled')!r}"
+        )
+
     latest_checks: dict[str, Mapping[str, Any]] = {}
     for raw_check in _sequence(observation.get("check_runs"), "check_runs"):
         check = _mapping(raw_check, "check run")
@@ -154,6 +208,41 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
                 f"release commit check {name!r}: expected completed/success, got "
                 f"{latest_check.get('status')!r}/{latest_check.get('conclusion')!r}"
             )
+        else:
+            app = latest_check.get("app")
+            if not isinstance(app, Mapping):
+                violations.append(f"release commit check {name!r}: missing check provider app")
+            elif app.get("id") != expected_app_id or app.get("slug") != expected_app_slug:
+                violations.append(
+                    f"release commit check {name!r}: expected provider "
+                    f"{expected_app_slug!r}/{expected_app_id!r}, got "
+                    f"{app.get('slug')!r}/{app.get('id')!r}"
+                )
+            else:
+                expected_workflow = _mapping(
+                    workflow_policy.get(name), f"required workflow policy for {name!r}"
+                )
+                workflow_run = latest_check.get("workflow_run")
+                if not isinstance(workflow_run, Mapping):
+                    violations.append(
+                        f"release commit check {name!r}: missing bound Actions workflow run"
+                    )
+                    continue
+                expected_run_fields = {
+                    "repository": policy.get("repository"),
+                    "path": expected_workflow.get("path"),
+                    "event": expected_workflow.get("event"),
+                    "head_branch": expected_workflow.get("head_branch"),
+                    "head_sha": observation.get("release_commit"),
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+                for field, expected in expected_run_fields.items():
+                    if workflow_run.get(field) != expected:
+                        violations.append(
+                            f"release commit check {name!r}: workflow run {field} expected "
+                            f"{expected!r}, got {workflow_run.get(field)!r}"
+                        )
 
     tag_policy = _mapping(policy.get("tag_ruleset"), "tag_ruleset policy")
     matching_rulesets = [
@@ -302,7 +391,7 @@ class GitHubApi:
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {self._token}",
                 "User-Agent": "explainiverse-release-preflight",
-                "X-GitHub-Api-Version": "2022-11-28",
+                "X-GitHub-Api-Version": "2026-03-10",
             },
         )
         try:
@@ -329,6 +418,12 @@ def capture_observation(
     environment_name = str(_mapping(policy["pypi_environment"], "environment")["name"])
     root = f"repos/{repository}"
 
+    try:
+        immutable_releases = _mapping(
+            get_json(f"{root}/immutable-releases"), "immutable releases response"
+        )
+    except ApiNotFoundError:
+        immutable_releases = {"enabled": False, "enforced_by_owner": False}
     ruleset_summaries = _sequence(get_json(f"{root}/rulesets"), "ruleset summaries")
     rulesets = [
         get_json(f"{root}/rulesets/{_mapping(value, 'ruleset summary')['id']}")
@@ -349,6 +444,16 @@ def capture_observation(
         get_json(f"{root}/commits/{release_commit}/check-runs?per_page=100"),
         "check runs response",
     )
+    raw_checks = [
+        _mapping(value, "check run")
+        for value in _sequence(check_response.get("check_runs"), "check runs")
+    ]
+    total_checks = check_response.get("total_count")
+    if total_checks is not None and total_checks != len(raw_checks):
+        raise ValueError(
+            "check-runs capture is incomplete: "
+            f"total_count={total_checks!r}, captured={len(raw_checks)}"
+        )
     try:
         get_json(f"{root}/git/ref/tags/{urllib.parse.quote(release_tag, safe='')}")
     except ApiNotFoundError:
@@ -384,6 +489,7 @@ def capture_observation(
         "required_status_checks": {
             "strict": required_status_checks.get("strict"),
             "contexts": required_status_checks.get("contexts"),
+            "checks": required_status_checks.get("checks"),
         },
         "required_conversation_resolution": enabled_field("required_conversation_resolution"),
         "allow_force_pushes": enabled_field("allow_force_pushes"),
@@ -440,18 +546,68 @@ def capture_observation(
         "deployment_branch_policy": raw_environment.get("deployment_branch_policy"),
         "protection_rules": normalized_protection_rules,
     }
-    normalized_checks = [
-        {
-            "name": check.get("name"),
-            "status": check.get("status"),
-            "conclusion": check.get("conclusion"),
-            "completed_at": check.get("completed_at"),
-        }
-        for check in (
-            _mapping(value, "check run")
-            for value in _sequence(check_response.get("check_runs"), "check runs")
+    required_names = set(
+        _canonical_names(
+            _sequence(policy.get("required_checks"), "required checks policy"),
+            "required checks policy",
         )
-    ]
+    )
+    actions_run_cache: dict[str, Mapping[str, Any]] = {}
+    normalized_checks = []
+    details_pattern = re.compile(
+        rf"^https://github\.com/{re.escape(repository)}/actions/runs/([1-9][0-9]*)(?:/job/[1-9][0-9]*)?(?:\?.*)?$"
+    )
+    for check in raw_checks:
+        details_url = check.get("details_url")
+        workflow_run = None
+        if check.get("name") in required_names and isinstance(details_url, str):
+            match = details_pattern.fullmatch(details_url)
+            if match is not None:
+                run_id = match.group(1)
+                if run_id not in actions_run_cache:
+                    actions_run_cache[run_id] = _mapping(
+                        get_json(f"{root}/actions/runs/{run_id}"),
+                        "required check Actions run",
+                    )
+                raw_run = actions_run_cache[run_id]
+                raw_repository = raw_run.get("repository")
+                workflow_run = {
+                    "id": raw_run.get("id"),
+                    "repository": (
+                        raw_repository.get("full_name")
+                        if isinstance(raw_repository, Mapping)
+                        else None
+                    ),
+                    "path": raw_run.get("path"),
+                    "event": raw_run.get("event"),
+                    "head_branch": raw_run.get("head_branch"),
+                    "head_sha": raw_run.get("head_sha"),
+                    "status": raw_run.get("status"),
+                    "conclusion": raw_run.get("conclusion"),
+                    "run_attempt": raw_run.get("run_attempt"),
+                }
+        normalized_checks.append(
+            {
+                "name": check.get("name"),
+                "status": check.get("status"),
+                "conclusion": check.get("conclusion"),
+                "completed_at": check.get("completed_at"),
+                "details_url": details_url,
+                "app": {
+                    "id": (
+                        check.get("app", {}).get("id")
+                        if isinstance(check.get("app"), Mapping)
+                        else None
+                    ),
+                    "slug": (
+                        check.get("app", {}).get("slug")
+                        if isinstance(check.get("app"), Mapping)
+                        else None
+                    ),
+                },
+                "workflow_run": workflow_run,
+            }
+        )
 
     return {
         "repository": repository,
@@ -460,6 +616,10 @@ def capture_observation(
         "release_tag": release_tag,
         "release_commit": release_commit,
         "tag_exists": tag_exists,
+        "immutable_releases": {
+            "enabled": immutable_releases.get("enabled"),
+            "enforced_by_owner": immutable_releases.get("enforced_by_owner"),
+        },
         "branch_protection": normalized_branch,
         "rulesets": normalized_rulesets,
         "pypi_environment": normalized_environment,
@@ -689,15 +849,36 @@ def verify_preflight_source_run(
                 f"preflight source run {label} mismatch: expected {expected!r}, got {actual!r}"
             )
     workflow_run = _mapping(snapshot.get("workflow_run"), "snapshot workflow_run")
+    run_attempt = _validated_run_id(
+        workflow_run.get("run_attempt"), "snapshot workflow run attempt"
+    )
+    capture_actor = workflow_run.get("actor")
+    triggering_actor = workflow_run.get("triggering_actor")
+    capture_principal = _mapping(snapshot.get("observation"), "snapshot observation").get(
+        "capture_principal"
+    )
+    if capture_actor != capture_principal or triggering_actor != capture_principal:
+        raise ValueError(
+            "snapshot workflow actor and triggering actor must both match the authenticated "
+            "capture principal"
+        )
+    api_actor = _mapping(run.get("actor"), "preflight source run actor").get("login")
+    api_triggering_actor = _mapping(
+        run.get("triggering_actor"), "preflight source run triggering_actor"
+    ).get("login")
     snapshot_fields = {
         "id": (str(workflow_run.get("id")), str(run_id)),
         "ref": (workflow_run.get("ref"), "refs/heads/main"),
         "sha": (workflow_run.get("sha"), release_commit),
+        "run attempt": (str(run.get("run_attempt")), run_attempt),
+        "actor": (api_actor, capture_actor),
+        "triggering actor": (api_triggering_actor, triggering_actor),
     }
-    for label, (actual, expected) in snapshot_fields.items():
-        if actual != expected:
+    for snapshot_label, (actual_value, expected_value) in snapshot_fields.items():
+        if actual_value != expected_value:
             raise ValueError(
-                f"snapshot workflow run {label} mismatch: expected {expected!r}, got {actual!r}"
+                f"snapshot workflow run {snapshot_label} mismatch: expected "
+                f"{expected_value!r}, got {actual_value!r}"
             )
 
 
@@ -728,11 +909,17 @@ def bind_snapshot_to_workflow(
         max_age=max_age,
     )
     observation = _mapping(snapshot.get("observation"), "snapshot observation")
-    if workflow_run.get("actor") != observation.get("capture_principal"):
+    capture_principal = observation.get("capture_principal")
+    actor = workflow_run.get("actor")
+    triggering_actor = workflow_run.get("triggering_actor")
+    if actor != capture_principal or triggering_actor != capture_principal:
         raise ValueError(
-            "preflight dispatch actor must match the authenticated admin capture principal: "
-            f"{workflow_run.get('actor')!r} != {observation.get('capture_principal')!r}"
+            "preflight dispatch actor and triggering actor must both match the authenticated "
+            "admin capture principal: "
+            f"actor={actor!r}, triggering_actor={triggering_actor!r}, "
+            f"capture_principal={capture_principal!r}"
         )
+    _validated_run_id(workflow_run.get("run_attempt"), "preflight workflow run attempt")
     bound = dict(snapshot)
     bound["workflow_run"] = dict(workflow_run)
     bound["cuda_evidence"] = verify_cuda_evidence(
@@ -779,10 +966,22 @@ def _validated_release_values(tag: str, commit: str) -> tuple[str, str]:
     return tag, normalized_commit
 
 
-def _validated_run_id(value: str, name: str) -> str:
-    if re.fullmatch(r"[1-9][0-9]*", value) is None:
+def _validated_run_id(value: Any, name: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _current_workflow_run() -> Mapping[str, Any]:
+    return {
+        "id": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "ref": os.environ.get("GITHUB_REF"),
+        "sha": os.environ.get("GITHUB_SHA"),
+        "actor": os.environ.get("GITHUB_ACTOR"),
+        "triggering_actor": os.environ.get("GITHUB_TRIGGERING_ACTOR"),
+        "workflow": os.environ.get("GITHUB_WORKFLOW"),
+    }
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -847,13 +1046,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repository=args.repository,
                 release_tag=tag,
                 release_commit=commit,
-                workflow_run={
-                    "id": os.environ.get("GITHUB_RUN_ID"),
-                    "ref": os.environ.get("GITHUB_REF"),
-                    "sha": os.environ.get("GITHUB_SHA"),
-                    "actor": os.environ.get("GITHUB_ACTOR"),
-                    "workflow": os.environ.get("GITHUB_WORKFLOW"),
-                },
+                workflow_run=_current_workflow_run(),
                 cuda_run=cuda_run,
                 cuda_jobs=cuda_jobs,
                 cuda_run_id=cuda_run_id,
@@ -915,13 +1108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             policy=policy,
             policy_sha256=policy_sha256,
             observation=observation,
-            workflow_run={
-                "id": os.environ.get("GITHUB_RUN_ID"),
-                "ref": os.environ.get("GITHUB_REF"),
-                "sha": os.environ.get("GITHUB_SHA"),
-                "actor": os.environ.get("GITHUB_ACTOR"),
-                "workflow": os.environ.get("GITHUB_WORKFLOW"),
-            },
+            workflow_run=_current_workflow_run(),
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"

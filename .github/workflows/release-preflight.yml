@@ -23,6 +23,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: release-preflight-${{ inputs.tag }}
   cancel-in-progress: false
@@ -57,6 +61,14 @@ jobs:
             echo "cuda_run_id must be a positive integer" >&2
             exit 1
           fi
+          if [[ ! "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "GITHUB_RUN_ATTEMPT must be a positive integer" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_ACTOR" != "$GITHUB_TRIGGERING_ACTOR" ]]; then
+            echo "the workflow actor and triggering actor must be identical" >&2
+            exit 1
+          fi
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_SHA" = "$RELEASE_COMMIT"
 
@@ -86,10 +98,8 @@ jobs:
             | jq -s \
               '{query_filter:"all",pagination_complete:true,jobs:.}' \
               > release-preflight/cuda-jobs.json
-          sha256sum \
-            release-preflight/cuda-run.json \
-            release-preflight/cuda-jobs.json \
-            > release-preflight/cuda-evidence.sha256
+          (cd release-preflight && sha256sum cuda-run.json cuda-jobs.json \
+            > cuda-evidence.sha256)
 
       - name: Decode the fresh administrator-authenticated capture
         env:
@@ -98,8 +108,8 @@ jobs:
           mkdir -p release-preflight
           printf '%s' "$ADMIN_SNAPSHOT_BASE64" | base64 --decode \
             > release-preflight/admin-capture.json
-          sha256sum release-preflight/admin-capture.json \
-            > release-preflight/admin-capture.json.sha256
+          (cd release-preflight && sha256sum admin-capture.json \
+            > admin-capture.json.sha256)
 
       - name: Enforce policy, freshness, principal, commit, and tag binding
         id: bind

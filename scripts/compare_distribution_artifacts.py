@@ -11,6 +11,14 @@ from typing import Any
 _DISTRIBUTION_SUFFIXES = (".whl", ".tar.gz")
 
 
+class DistributionComparisonError(ValueError):
+    """A failed comparison that retains both artifact inventories."""
+
+    def __init__(self, message: str, report: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.report = report
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -31,6 +39,15 @@ def distribution_inventory(directory: Path) -> dict[str, dict[str, Any]]:
     )
     if not paths:
         raise ValueError(f"no wheel or source distribution found in {directory}")
+
+    wheels = [path for path in paths if path.name.endswith(".whl")]
+    source_distributions = [path for path in paths if path.name.endswith(".tar.gz")]
+    if len(wheels) != 1 or len(source_distributions) != 1:
+        raise ValueError(
+            "distribution directory must contain exactly one wheel and one source distribution: "
+            f"{directory} has wheels={[path.name for path in wheels]!r}, "
+            f"source_distributions={[path.name for path in source_distributions]!r}"
+        )
 
     inventory: dict[str, dict[str, Any]] = {}
     for path in paths:
@@ -55,9 +72,11 @@ def compare_distribution_directories(first: Path, second: Path) -> dict[str, Any
     if set(first_inventory) != set(second_inventory):
         first_only = sorted(set(first_inventory) - set(second_inventory))
         second_only = sorted(set(second_inventory) - set(first_inventory))
-        raise ValueError(
+        raise DistributionComparisonError(
             "distribution filename sets differ: "
-            f"first_only={first_only}, second_only={second_only}; report={json.dumps(report)}"
+            f"first_only={first_only}, second_only={second_only}; "
+            f"report={json.dumps(report, sort_keys=True)}",
+            report,
         )
 
     differing = [
@@ -66,9 +85,10 @@ def compare_distribution_directories(first: Path, second: Path) -> dict[str, Any
         if first_inventory[filename] != second_inventory[filename]
     ]
     if differing:
-        raise ValueError(
+        raise DistributionComparisonError(
             "independent builds are not byte-identical for "
-            f"{differing}; report={json.dumps(report, sort_keys=True)}"
+            f"{differing}; report={json.dumps(report, sort_keys=True)}",
+            report,
         )
     return report
 
@@ -80,16 +100,29 @@ def main() -> None:
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
 
+    failure: ValueError | None = None
     try:
         report = compare_distribution_directories(args.first, args.second)
+    except DistributionComparisonError as exc:
+        report = dict(exc.report)
+        report["error"] = str(exc)
+        failure = exc
     except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+        report = {
+            "schema_version": 1,
+            "comparison": "byte-identical",
+            "reproducible": False,
+            "error": str(exc),
+        }
+        failure = exc
 
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
+    if failure is not None:
+        raise SystemExit(2) from failure
 
 
 if __name__ == "__main__":

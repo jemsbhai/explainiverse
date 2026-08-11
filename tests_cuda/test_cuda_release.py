@@ -9,6 +9,7 @@ same contracts.
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 
 import numpy as np
 import pytest
@@ -44,8 +45,8 @@ REQUIRED_CUDA_DEVICES = int(os.environ.get("EXPLAINIVERSE_REQUIRED_CUDA_DEVICES"
 def require_real_cuda_hardware():
     assert REQUIRED_CUDA_DEVICES in {1, 2}, "release gate supports exactly one or two GPUs"
     assert torch.cuda.is_available(), "CUDA release gate requires real CUDA kernels"
-    assert torch.cuda.device_count() >= REQUIRED_CUDA_DEVICES, (
-        f"CUDA release gate requires {REQUIRED_CUDA_DEVICES} visible device(s); "
+    assert torch.cuda.device_count() == REQUIRED_CUDA_DEVICES, (
+        f"CUDA release gate requires exactly {REQUIRED_CUDA_DEVICES} visible device(s); "
         f"got {torch.cuda.device_count()}"
     )
     for index in range(REQUIRED_CUDA_DEVICES):
@@ -55,25 +56,28 @@ def require_real_cuda_hardware():
     torch.cuda.synchronize()
 
 
-class _VectorClassifier(nn.Module):
-    def __init__(self, *, dtype=torch.float32):
-        super().__init__()
-        self.bottleneck = nn.Linear(4, 4, dtype=dtype)
-        self.relu = nn.ReLU()
-        self.output = nn.Linear(4, 2, dtype=dtype)
-        with torch.no_grad():
-            self.bottleneck.weight.copy_(torch.eye(4, dtype=dtype))
-            self.bottleneck.bias.fill_(0.25)
-            self.output.weight.copy_(
-                torch.tensor(
-                    [[1.0, -0.5, 0.25, 0.75], [-0.25, 0.5, 1.0, -0.5]],
-                    dtype=dtype,
-                )
+def _vector_classifier(*, dtype=torch.float32):
+    """Return an exact supported Sequential graph for the Captum CUDA edges."""
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("bottleneck", nn.Linear(4, 4, dtype=dtype)),
+                ("relu", nn.ReLU()),
+                ("output", nn.Linear(4, 2, dtype=dtype)),
+            ]
+        )
+    )
+    with torch.no_grad():
+        model.bottleneck.weight.copy_(torch.eye(4, dtype=dtype))
+        model.bottleneck.bias.fill_(0.25)
+        model.output.weight.copy_(
+            torch.tensor(
+                [[1.0, -0.5, 0.25, 0.75], [-0.25, 0.5, 1.0, -0.5]],
+                dtype=dtype,
             )
-            self.output.bias.zero_()
-
-    def forward(self, inputs):
-        return self.output(self.relu(self.bottleneck(inputs)))
+        )
+        model.output.bias.zero_()
+    return model
 
 
 class _ImageClassifier(nn.Module):
@@ -95,9 +99,10 @@ class _ImageClassifier(nn.Module):
 @pytest.mark.parametrize(
     ("dtype", "numpy_dtype"),
     [(torch.float32, np.float32), (torch.float64, np.float64)],
+    ids=["float32", "float64"],
 )
 def test_adapter_prediction_gradients_dtype_and_device_placement(dtype, numpy_dtype):
-    model = _VectorClassifier(dtype=dtype).to("cuda:0")
+    model = _vector_classifier(dtype=dtype).to("cuda:0")
     adapter = PyTorchAdapter(model, task="classification", device="cuda:0")
     inputs = np.asarray([[0.5, 1.0, 1.5, 2.0]], dtype=numpy_dtype)
 
@@ -135,7 +140,7 @@ def _assert_finite_explanation(explanation):
 
 
 def test_every_vector_gradient_family_executes_real_cuda_kernels():
-    model = _VectorClassifier().to("cuda:0")
+    model = _vector_classifier().to("cuda:0")
     adapter = PyTorchAdapter(model, task="classification", device="cuda:0")
     instance = np.array([0.5, 1.0, 1.5, 2.0], dtype=np.float32)
     features = ["a", "b", "c", "d"]
@@ -174,27 +179,31 @@ def test_every_vector_gradient_family_executes_real_cuda_kernels():
     assert np.isfinite(derivatives).all()
 
 
+_CAM_RELEASE_CASES = [
+    (GradCAMExplainer, 1),
+    (HiResCAMExplainer, 1),
+    (XGradCAMExplainer, 1),
+    (LayerCAMExplainer, 1),
+    (EigenCAMExplainer, None),
+    (ScoreCAMExplainer, 1),
+    (EigenGradCAMExplainer, 1),
+    (GradCAMElementWiseExplainer, 1),
+    (AblationCAMExplainer, 1),
+]
+
+
 @pytest.mark.parametrize(
-    "explainer_type",
-    [
-        GradCAMExplainer,
-        HiResCAMExplainer,
-        XGradCAMExplainer,
-        LayerCAMExplainer,
-        EigenCAMExplainer,
-        ScoreCAMExplainer,
-        EigenGradCAMExplainer,
-        GradCAMElementWiseExplainer,
-        AblationCAMExplainer,
-    ],
+    ("explainer_type", "target_class"),
+    _CAM_RELEASE_CASES,
+    ids=[explainer.__name__ for explainer, _ in _CAM_RELEASE_CASES],
 )
-def test_every_cam_family_executes_real_cuda_kernels_and_cleans_hooks(explainer_type):
+def test_every_cam_family_executes_real_cuda_kernels_and_cleans_hooks(explainer_type, target_class):
     model = _ImageClassifier().to("cuda:0")
     adapter = PyTorchAdapter(model, task="classification", device="cuda:0")
     image = np.array([[[0.2, 0.5], [1.0, 0.7]]], dtype=np.float32)
     before = (len(model.conv._forward_hooks), len(model.conv._backward_hooks))
 
-    explanation = explainer_type(adapter, "conv").explain(image, target_class=1)
+    explanation = explainer_type(adapter, "conv").explain(image, target_class=target_class)
 
     _assert_finite_explanation(explanation)
     assert (len(model.conv._forward_hooks), len(model.conv._backward_hooks)) == before
@@ -262,7 +271,8 @@ class _CrossDeviceRandomModel(nn.Module):
         return inputs[:, :1] * self.weight + first + second.to("cuda:0")
 
 
-def test_two_gpu_success_and_failure_restore_each_initialized_device_rng_byte_for_byte():
+def test_visible_gpu_topology_and_cross_device_rng_restoration():
+    assert torch.cuda.device_count() == REQUIRED_CUDA_DEVICES
     if REQUIRED_CUDA_DEVICES == 1:
         return
     model = _CrossDeviceRandomModel()

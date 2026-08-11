@@ -27,11 +27,65 @@ def _policy():
     return controls.load_policy(POLICY_PATH)
 
 
+def _preflight_workflow_run(run_id="123", run_attempt="1", actor="jemsbhai"):
+    return {
+        "id": run_id,
+        "run_attempt": run_attempt,
+        "ref": "refs/heads/main",
+        "sha": SHA,
+        "actor": actor,
+        "triggering_actor": actor,
+        "workflow": "Snapshot mutable controls before a stable tag",
+    }
+
+
+def _preflight_api_run(run_id=123, run_attempt=1, actor="jemsbhai"):
+    policy, _ = _policy()
+    return {
+        "id": run_id,
+        "repository": {"full_name": policy["repository"]},
+        "path": ".github/workflows/release-preflight.yml",
+        "event": "workflow_dispatch",
+        "head_branch": "main",
+        "head_sha": SHA,
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": run_attempt,
+        "actor": {"login": actor},
+        "triggering_actor": {"login": actor},
+    }
+
+
+def test_current_workflow_run_records_attempt_and_triggering_actor(monkeypatch):
+    values = {
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_SHA": SHA,
+        "GITHUB_ACTOR": "jemsbhai",
+        "GITHUB_TRIGGERING_ACTOR": "jemsbhai",
+        "GITHUB_WORKFLOW": "Snapshot mutable controls before a stable tag",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    assert controls._current_workflow_run() == {
+        "id": "123",
+        "run_attempt": "2",
+        "ref": "refs/heads/main",
+        "sha": SHA,
+        "actor": "jemsbhai",
+        "triggering_actor": "jemsbhai",
+        "workflow": "Snapshot mutable controls before a stable tag",
+    }
+
+
 def _matching_observation():
     policy, _ = _policy()
     checks = list(policy["required_checks"])
     tag_policy = policy["tag_ruleset"]
     environment_policy = policy["pypi_environment"]
+    provider = policy["required_check_provider"]
     return {
         "repository": policy["repository"],
         "default_branch": policy["default_branch"],
@@ -39,9 +93,14 @@ def _matching_observation():
         "release_tag": "v0.15.0",
         "release_commit": SHA,
         "tag_exists": False,
+        "immutable_releases": {"enabled": True, "enforced_by_owner": False},
         "branch_protection": {
             "enforce_admins": {"enabled": True},
-            "required_status_checks": {"strict": True, "contexts": checks},
+            "required_status_checks": {
+                "strict": True,
+                "contexts": checks,
+                "checks": [{"context": name, "app_id": provider["app_id"]} for name in checks],
+            },
             "required_conversation_resolution": {"enabled": True},
             "allow_force_pushes": {"enabled": False},
             "allow_deletions": {"enabled": False},
@@ -52,8 +111,22 @@ def _matching_observation():
                 "status": "completed",
                 "conclusion": "success",
                 "completed_at": None,
+                "details_url": (
+                    f"https://github.com/{policy['repository']}/actions/runs/{1000 + index}"
+                    f"/job/{2000 + index}"
+                ),
+                "app": {"id": provider["app_id"], "slug": provider["slug"]},
+                "workflow_run": {
+                    "id": 1000 + index,
+                    "repository": policy["repository"],
+                    **policy["required_check_workflows"][name],
+                    "head_sha": SHA,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "run_attempt": 1,
+                },
             }
-            for name in checks
+            for index, name in enumerate(checks)
         ],
         "rulesets": [
             {
@@ -137,10 +210,39 @@ def test_reviewed_control_policy_has_a_falsifiably_green_fixture():
     assert controls.evaluate_controls(policy, _matching_observation()) == []
 
 
+@pytest.mark.parametrize("replacement", [None, False, 1, "true"])
+def test_immutable_release_policy_requires_explicit_json_true(replacement):
+    policy, _ = _policy()
+    policy = copy.deepcopy(policy)
+    observation = _matching_observation()
+    if replacement is None:
+        policy["immutable_releases"].pop("enabled")
+    else:
+        policy["immutable_releases"]["enabled"] = replacement
+    violations = controls.evaluate_controls(policy, observation)
+    assert any("policy.enabled must be the JSON boolean true" in value for value in violations)
+
+
+@pytest.mark.parametrize("replacement", [None, False, 1, "true"])
+def test_immutable_release_observation_requires_explicit_json_true(replacement):
+    policy, _ = _policy()
+    observation = _matching_observation()
+    if replacement is None:
+        observation["immutable_releases"].pop("enabled")
+    else:
+        observation["immutable_releases"]["enabled"] = replacement
+    violations = controls.evaluate_controls(policy, observation)
+    assert any("immutable_releases.enabled: expected true" in value for value in violations)
+
+
 @pytest.mark.parametrize(
     ("mutation", "match"),
     [
         (lambda value: value.update(tag_exists=True), "must precede tagging"),
+        (
+            lambda value: value["immutable_releases"].update(enabled=False),
+            "immutable_releases.enabled",
+        ),
         (
             lambda value: value["branch_protection"]["enforce_admins"].update(enabled=False),
             "admin_enforcement",
@@ -152,6 +254,12 @@ def test_reviewed_control_policy_has_a_falsifiably_green_fixture():
         (
             lambda value: value["branch_protection"]["required_status_checks"]["contexts"].pop(),
             "required_checks",
+        ),
+        (
+            lambda value: value["branch_protection"]["required_status_checks"]["checks"][0].update(
+                app_id=None
+            ),
+            "required_check_bindings",
         ),
         (
             lambda value: value["check_runs"][0].update(conclusion="failure"),
@@ -168,6 +276,16 @@ def test_reviewed_control_policy_has_a_falsifiably_green_fixture():
         (
             lambda value: value["pypi_environment"]["protection_rules"][0].update(reviewers=[]),
             "reviewers",
+        ),
+        (
+            lambda value: value["check_runs"][0]["app"].update(slug="attacker"),
+            "expected provider",
+        ),
+        (
+            lambda value: value["check_runs"][0]["workflow_run"].update(
+                path=".github/workflows/attacker.yml"
+            ),
+            "workflow run path",
         ),
         (
             lambda value: value.update(environment_secret_names=["PYPI_API_TOKEN"]),
@@ -194,11 +312,15 @@ def test_latest_duplicate_check_run_cannot_be_masked_by_an_older_success():
     assert any(name in violation and "failure" in violation for violation in violations)
 
 
-def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset():
+@pytest.mark.parametrize("immutable_not_found", [False, True])
+def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
+    immutable_not_found,
+):
     policy, _ = _policy()
     observation = _matching_observation()
     root = f"repos/{policy['repository']}"
     responses = {
+        f"{root}/immutable-releases": observation["immutable_releases"],
         f"{root}/rulesets": [{"id": 7, "name": policy["tag_ruleset"]["name"]}],
         f"{root}/rulesets/7": observation["rulesets"][0],
         f"{root}/environments/pypi/deployment-branch-policies": {
@@ -206,14 +328,25 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
         },
         f"{root}/actions/secrets": {"secrets": []},
         f"{root}/environments/pypi/secrets": {"secrets": []},
-        f"{root}/commits/{SHA}/check-runs?per_page=100": {"check_runs": observation["check_runs"]},
+        f"{root}/commits/{SHA}/check-runs?per_page=100": {
+            "total_count": len(observation["check_runs"]),
+            "check_runs": observation["check_runs"],
+        },
         f"{root}/branches/main/protection": observation["branch_protection"],
         f"{root}/environments/pypi": observation["pypi_environment"],
         "user": {"login": "jemsbhai"},
     }
+    for check in observation["check_runs"]:
+        run = check["workflow_run"]
+        responses[f"{root}/actions/runs/{run['id']}"] = {
+            **run,
+            "repository": {"full_name": run["repository"]},
+        }
 
     def get_json(path):
         if path == f"{root}/git/ref/tags/v0.15.0":
+            raise controls.ApiNotFoundError(path)
+        if immutable_not_found and path == f"{root}/immutable-releases":
             raise controls.ApiNotFoundError(path)
         return responses[path]
 
@@ -223,7 +356,13 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
         release_commit=SHA,
         get_json=get_json,
     )
-    assert captured == observation
+    expected = copy.deepcopy(observation)
+    if immutable_not_found:
+        expected["immutable_releases"] = {"enabled": False, "enforced_by_owner": False}
+    assert captured == expected
+    if immutable_not_found:
+        violations = controls.evaluate_controls(policy, captured)
+        assert any("immutable_releases.enabled" in value for value in violations)
 
 
 def test_snapshot_is_bound_to_exact_policy_repository_tag_and_commit():
@@ -270,24 +409,9 @@ def test_snapshot_is_bound_to_its_successful_pre_tag_workflow_run():
         policy=policy,
         policy_sha256=digest,
         observation=_matching_observation(),
-        workflow_run={
-            "id": "123",
-            "ref": "refs/heads/main",
-            "sha": SHA,
-            "actor": "jemsbhai",
-            "workflow": "Snapshot mutable controls before a stable tag",
-        },
+        workflow_run=_preflight_workflow_run(),
     )
-    run = {
-        "id": 123,
-        "repository": {"full_name": policy["repository"]},
-        "path": ".github/workflows/release-preflight.yml",
-        "event": "workflow_dispatch",
-        "head_branch": "main",
-        "head_sha": SHA,
-        "status": "completed",
-        "conclusion": "success",
-    }
+    run = _preflight_api_run()
     controls.verify_preflight_source_run(
         run,
         snapshot,
@@ -313,6 +437,39 @@ def test_snapshot_is_bound_to_its_successful_pre_tag_workflow_run():
                 release_commit=SHA,
             )
 
+    for field, replacement, match in (
+        ("run_attempt", 2, "run attempt"),
+        ("actor", {"login": "someone-else"}, "actor"),
+        ("triggering_actor", {"login": "someone-else"}, "triggering actor"),
+    ):
+        tampered = copy.deepcopy(run)
+        tampered[field] = replacement
+        with pytest.raises(ValueError, match=match):
+            controls.verify_preflight_source_run(
+                tampered,
+                snapshot,
+                run_id="123",
+                repository=policy["repository"],
+                release_commit=SHA,
+            )
+
+    for field, replacement, match in (
+        ("actor", "someone-else", "authenticated capture principal"),
+        ("triggering_actor", "someone-else", "authenticated capture principal"),
+        ("run_attempt", "2", "run attempt"),
+        ("run_attempt", None, "positive integer"),
+    ):
+        tampered = copy.deepcopy(snapshot)
+        tampered["workflow_run"][field] = replacement
+        with pytest.raises(ValueError, match=match):
+            controls.verify_preflight_source_run(
+                run,
+                tampered,
+                run_id="123",
+                repository=policy["repository"],
+                release_commit=SHA,
+            )
+
 
 def test_snapshot_workflow_identity_cannot_be_replayed_from_another_run():
     policy, digest = _policy()
@@ -320,18 +477,9 @@ def test_snapshot_workflow_identity_cannot_be_replayed_from_another_run():
         policy=policy,
         policy_sha256=digest,
         observation=_matching_observation(),
-        workflow_run={"id": "999", "ref": "refs/heads/main", "sha": SHA},
+        workflow_run=_preflight_workflow_run(run_id="999"),
     )
-    run = {
-        "id": 123,
-        "repository": {"full_name": policy["repository"]},
-        "path": ".github/workflows/release-preflight.yml",
-        "event": "workflow_dispatch",
-        "head_branch": "main",
-        "head_sha": SHA,
-        "status": "completed",
-        "conclusion": "success",
-    }
+    run = _preflight_api_run()
     with pytest.raises(ValueError, match="snapshot workflow run id"):
         controls.verify_preflight_source_run(
             run,
@@ -352,13 +500,7 @@ def test_admin_snapshot_binding_requires_freshness_and_same_dispatch_actor():
         workflow_run={"id": None},
     )
     snapshot["observed_at"] = (now - timedelta(minutes=5)).isoformat()
-    workflow_run = {
-        "id": "123",
-        "ref": "refs/heads/main",
-        "sha": SHA,
-        "actor": "jemsbhai",
-        "workflow": "Snapshot mutable controls before a stable tag",
-    }
+    workflow_run = _preflight_workflow_run()
     bound = controls.bind_snapshot_to_workflow(
         policy=policy,
         policy_sha256=digest,
@@ -377,20 +519,27 @@ def test_admin_snapshot_binding_requires_freshness_and_same_dispatch_actor():
         policy["cuda_evidence"]["required_jobs"]
     )
 
-    with pytest.raises(ValueError, match="dispatch actor"):
-        controls.bind_snapshot_to_workflow(
-            policy=policy,
-            policy_sha256=digest,
-            snapshot=snapshot,
-            repository=policy["repository"],
-            release_tag="v0.15.0",
-            release_commit=SHA,
-            workflow_run={**workflow_run, "actor": "someone-else"},
-            cuda_run=_cuda_run(),
-            cuda_jobs=_cuda_jobs(),
-            cuda_run_id="456",
-            now=now,
-        )
+    for mutation, match in (
+        ({"actor": "someone-else"}, "dispatch actor and triggering actor"),
+        ({"triggering_actor": "someone-else"}, "dispatch actor and triggering actor"),
+        ({"triggering_actor": None}, "dispatch actor and triggering actor"),
+        ({"run_attempt": None}, "workflow run attempt"),
+        ({"run_attempt": "0"}, "workflow run attempt"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            controls.bind_snapshot_to_workflow(
+                policy=policy,
+                policy_sha256=digest,
+                snapshot=snapshot,
+                repository=policy["repository"],
+                release_tag="v0.15.0",
+                release_commit=SHA,
+                workflow_run={**workflow_run, **mutation},
+                cuda_run=_cuda_run(),
+                cuda_jobs=_cuda_jobs(),
+                cuda_run_id="456",
+                now=now,
+            )
     with pytest.raises(ValueError, match="stale"):
         controls.bind_snapshot_to_workflow(
             policy=policy,
@@ -489,13 +638,7 @@ def test_publish_requery_must_equal_attested_cuda_evidence():
         repository=policy["repository"],
         release_tag="v0.15.0",
         release_commit=SHA,
-        workflow_run={
-            "id": "123",
-            "ref": "refs/heads/main",
-            "sha": SHA,
-            "actor": "jemsbhai",
-            "workflow": "Snapshot mutable controls before a stable tag",
-        },
+        workflow_run=_preflight_workflow_run(),
         cuda_run=_cuda_run(),
         cuda_jobs=_cuda_jobs(),
         cuda_run_id="456",

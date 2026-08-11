@@ -36,6 +36,8 @@ def test_browser_gate_exercises_security_functionality_and_accessibility():
     assert package["devDependencies"]["@axe-core/playwright"] == "4.12.1"
 
     config = _read("packages/js/playwright.config.ts")
+    assert "retries: 0" in config
+    assert "retries: process.env.CI" not in config
     for engine in ("chromium", "firefox", "webkit"):
         assert f'name: "{engine}"' in config
 
@@ -56,6 +58,49 @@ def test_browser_gate_exercises_security_functionality_and_accessibility():
     assert "connect-src 'none'" in html
     assert "script-src 'self'" in html
     assert 'name="referrer" content="no-referrer"' in html
+
+
+def test_javascript_ci_publish_and_deploy_gates_run_the_high_severity_audit():
+    audited_gates = {
+        ".github/workflows/js-ci.yml": "npm test",
+        ".github/workflows/publish-pypi.yml": "npm test",
+        ".github/workflows/deploy-demo.yml": "npm run build:demo",
+    }
+    command = "npm audit --audit-level=high"
+    for path, downstream_gate in audited_gates.items():
+        workflow = _read(path)
+        assert workflow.count(command) == 1
+        assert workflow.index("npm ci") < workflow.index(command)
+        assert workflow.index(command) < workflow.index(downstream_gate)
+
+
+def test_private_javascript_tarball_and_deployment_evidence_are_fail_closed():
+    package = json.loads(_read("packages/js/package.json"))
+    allowlist = json.loads(_read("packages/js/npm-pack-allowlist.json"))
+    guard = _read("packages/js/scripts/check-package-boundary.mjs")
+    assert package["scripts"]["check:package-boundary"] == (
+        "node scripts/check-package-boundary.mjs"
+    )
+    assert len(allowlist) == 16 and len(allowlist) == len(set(allowlist))
+    assert "publishConfig" in guard
+    assert "FORBIDDEN_LIFECYCLE_SCRIPTS" in guard
+    assert "npm tarball differs from reviewed allowlist" in guard
+    for workflow_path in (
+        ".github/workflows/js-ci.yml",
+        ".github/workflows/publish-pypi.yml",
+        ".github/workflows/deploy-demo.yml",
+    ):
+        assert "npm run check:package-boundary" in _read(workflow_path)
+
+    deploy = _read(".github/workflows/deploy-demo.yml")
+    for command in ("npm test", "npm run typecheck", "npm run lint", "npm run build"):
+        assert deploy.index(command) < deploy.index("npm run build:demo")
+    assert "demo-files.sha256" in deploy
+    assert "demo-tree.sha256" in deploy
+    assert 'test "$demo_file_count" -gt 0' in deploy
+    assert "xargs -0 -r sha256sum" in deploy
+    assert "deployment-evidence.json" in deploy
+    assert "retention-days: 180" in deploy
 
 
 def test_bundle_budget_and_untyped_distribution_guards_fail_closed():
@@ -93,5 +138,13 @@ def test_manual_accessibility_gate_cannot_pass_without_both_at_profiles():
     assert "scripts/validate_accessibility_evidence.py" in workflow
     assert "EXPECTED_COMMIT: ${{ github.sha }}" in workflow
     assert '--expected-commit "$EXPECTED_COMMIT"' in workflow
+    assert "git ls-files --error-unmatch" in workflow
+    assert 'test ! -L "$EVIDENCE_PATH"' in workflow
+    assert 'realpath -- "$EVIDENCE_PATH"' in workflow
+    assert '"$GITHUB_WORKSPACE"/*' in workflow
+    assert "evidence-manifest.json" in workflow
+    assert "accessibility-certification-policy.json" in workflow
+    assert "evidence-files.sha256" in workflow
+    assert "path: artifacts/accessibility/*" in workflow
     assert "retention-days: 180" in workflow
     assert "contents: read" in workflow

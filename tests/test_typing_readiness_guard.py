@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import tarfile
@@ -77,6 +78,25 @@ def test_built_archives_cannot_smuggle_a_typing_marker(tmp_path, archive_kind):
         _audit(tmp_path, distributions=[archive])
 
 
+@pytest.mark.parametrize("archive_kind", ["wheel", "sdist"])
+def test_built_archives_cannot_smuggle_a_typed_classifier(tmp_path, archive_kind):
+    _untyped_project(tmp_path)
+    payload = b"Metadata-Version: 2.4\nName: explainiverse\nClassifier: Typing :: Typed\n"
+    if archive_kind == "wheel":
+        archive = tmp_path / "explainiverse-0-py3-none-any.whl"
+        with zipfile.ZipFile(archive, "w") as wheel:
+            wheel.writestr("explainiverse-0.dist-info/METADATA", payload)
+    else:
+        archive = tmp_path / "explainiverse-0.tar.gz"
+        with tarfile.open(archive, "w:gz") as sdist:
+            member = tarfile.TarInfo("explainiverse-0/PKG-INFO")
+            member.size = len(payload)
+            sdist.addfile(member, io.BytesIO(payload))
+
+    with pytest.raises(typing_audit.TypingReadinessError, match="classifier shipped"):
+        _audit(tmp_path, distributions=[archive])
+
+
 def test_policy_cannot_flip_to_a_typed_claim_without_replacing_the_guard(tmp_path):
     _untyped_project(tmp_path)
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
@@ -85,4 +105,29 @@ def test_policy_cannot_flip_to_a_typed_claim_without_replacing_the_guard(tmp_pat
     policy_path.write_text(json.dumps(policy), encoding="utf-8")
 
     with pytest.raises(typing_audit.TypingReadinessError, match="strict consumer certification"):
+        _audit(tmp_path, policy=policy_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("forbidden_marker", "src/explainiverse/not-the-typing-marker"),
+        ("forbidden_classifier", "Typing :: Definitely Untyped"),
+    ],
+)
+def test_policy_cannot_redirect_the_canonical_typing_boundaries(tmp_path, field, replacement):
+    _untyped_project(tmp_path)
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    policy[field] = replacement
+    policy_path = tmp_path / "typing-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    if field == "forbidden_marker":
+        (tmp_path / "src" / "explainiverse" / "py.typed").touch()
+    else:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nclassifiers = ["Typing :: Typed"]\n', encoding="utf-8"
+        )
+
+    with pytest.raises(typing_audit.TypingReadinessError, match="canonical boundary"):
         _audit(tmp_path, policy=policy_path)

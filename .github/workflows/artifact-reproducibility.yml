@@ -53,9 +53,15 @@ jobs:
           --requirement .github/requirements/release-tools.txt
 
       - name: Record runner image and tool identities
+        env:
+          REPRODUCIBILITY_BUILD_ID: ${{ matrix.build-id }}
+          REPRODUCIBILITY_JOB_INDEX: ${{ strategy.job-index }}
+          REPRODUCIBILITY_JOB_TOTAL: ${{ strategy.job-total }}
+          REPRODUCIBILITY_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: >-
           python scripts/record_release_environment.py
           --requirements .github/requirements/release-tools.txt
+          --build-identity "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$REPRODUCIBILITY_BUILD_ID"
           --output provenance/release-environment.json
 
       - name: Build with the commit timestamp as the reproducibility epoch
@@ -100,26 +106,35 @@ jobs:
           name: reproducibility-two
           path: independent/two
 
-      - name: Require identical tool locks and byte-identical distributions
+      - name: Stage complete independent manifests
         run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
+          mkdir -p provenance
+          cp independent/one/provenance/release-environment.json \
+            provenance/release-environment-one.json
+          cp independent/two/provenance/release-environment.json \
+            provenance/release-environment-two.json
 
-          first = json.loads(Path("independent/one/provenance/release-environment.json").read_text())
-          second = json.loads(Path("independent/two/provenance/release-environment.json").read_text())
-          for field in ("python", "bootstrap_pip", "release_tools", "requirements"):
-              if first[field] != second[field]:
-                  raise SystemExit(f"independent build environment {field!r} differs")
-          PY
+      - name: Require stable hosted-runner environment identity
+        if: always()
+        run: |
+          python scripts/record_release_environment.py \
+            --compare \
+              independent/one/provenance/release-environment.json \
+              independent/two/provenance/release-environment.json \
+            --output provenance/release-environment-comparison.json
+
+      - name: Require byte-identical wheel and source distribution
+        if: always()
+        run: |
           python scripts/compare_distribution_artifacts.py \
             independent/one/dist independent/two/dist \
             --report provenance/reproducibility.json
 
       - name: Archive reproducibility report
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: reproducibility-report
-          path: provenance/reproducibility.json
+          path: provenance/*
           if-no-files-found: error
           retention-days: 90

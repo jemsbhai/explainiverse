@@ -21,6 +21,18 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 _DISTRIBUTION_SUFFIXES = (".whl", ".tar.gz")
+_POST_PYPI_RELEASE_STEPS = (
+    "Check out the immutable release tag for final verification",
+    "Set up Python 3.12 for provenance verification",
+    "Pin the provenance verifier installer",
+    "Install the hash-locked provenance verifier",
+    "Download attested distributions",
+    "Download hashes and SBOM",
+    "Verify release assets against reviewed hashes",
+    "Create and verify a draft from the already-published signed tag",
+    "Require and reverify the finalized immutable release",
+    "Archive normal-path release verification evidence",
+)
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -166,7 +178,7 @@ def verify_source_run(
     workflow_path: str,
     release_tag: str,
     release_commit: str,
-) -> None:
+) -> str:
     """Prove recovery consumes a completed original publish run, not a rebuild."""
     if _TAG.fullmatch(release_tag) is None:
         raise ValueError("release tag must have the form vMAJOR.MINOR.PATCH")
@@ -180,6 +192,7 @@ def verify_source_run(
         "head SHA": (run.get("head_sha"), release_commit),
         "head branch/tag": (run.get("head_branch"), release_tag),
         "status": (run.get("status"), "completed"),
+        "conclusion": (run.get("conclusion"), "failure"),
     }
     for label, (actual, expected) in expected_fields.items():
         if actual != expected:
@@ -212,6 +225,68 @@ def verify_source_run(
                 f"{job.get('status')!r}/{job.get('conclusion')!r}"
             )
 
+    release_job_name = "Create the immutable GitHub release"
+    release_matches = [job for job in jobs if job.get("name") == release_job_name]
+    if len(release_matches) != 1:
+        raise ValueError(
+            f"source run must contain exactly one all-attempt {release_job_name!r} job; "
+            f"got {len(release_matches)}"
+        )
+    release_job = release_matches[0]
+    if release_job.get("status") != "completed" or release_job.get("conclusion") != "failure":
+        raise ValueError(
+            f"source job {release_job_name!r} must demonstrate a downstream failure: "
+            f"got {release_job.get('status')!r}/{release_job.get('conclusion')!r}"
+        )
+
+    steps = [
+        _mapping(value, "GitHub Release job step")
+        for value in _sequence(release_job.get("steps"), "GitHub Release job steps")
+    ]
+    stage_name = "Stage an explicitly requested post-PyPI recovery drill"
+    stage_matches = [
+        (index, step) for index, step in enumerate(steps) if step.get("name") == stage_name
+    ]
+    if len(stage_matches) != 1:
+        raise ValueError(f"GitHub Release job must contain exactly one {stage_name!r} step")
+    stage_index, stage_step = stage_matches[0]
+    later_steps = steps[stage_index + 1 :]
+    if stage_step.get("status") != "completed":
+        raise ValueError("recovery-drill staging step did not complete")
+    if stage_step.get("conclusion") == "failure":
+        for expected_name in _POST_PYPI_RELEASE_STEPS:
+            matches = [step for step in later_steps if step.get("name") == expected_name]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"staged recovery drill must contain exactly one {expected_name!r} step"
+                )
+            step = matches[0]
+            if step.get("status") != "completed" or step.get("conclusion") != "skipped":
+                raise ValueError(
+                    f"staged recovery drill executed downstream step {expected_name!r}: "
+                    f"{step.get('status')!r}/{step.get('conclusion')!r}"
+                )
+        complete_steps = [step for step in later_steps if step.get("name") == "Complete job"]
+        if len(complete_steps) != 1 or complete_steps[0].get("conclusion") != "success":
+            raise ValueError("staged recovery drill has no successful runner Complete job step")
+        allowed_names = {*_POST_PYPI_RELEASE_STEPS, "Complete job"}
+        unexpected = [
+            step.get("name") for step in later_steps if step.get("name") not in allowed_names
+        ]
+        if unexpected:
+            raise ValueError(
+                f"staged recovery drill contains unexpected later steps: {unexpected!r}"
+            )
+        return "staged_drill"
+    if stage_step.get("conclusion") != "skipped":
+        raise ValueError(
+            "recovery-drill staging step must be failed for a drill or skipped for an "
+            "unplanned downstream failure"
+        )
+    if not any(step.get("conclusion") == "failure" for step in later_steps):
+        raise ValueError("source job has no failed post-PyPI GitHub Release step")
+    return "unplanned_downstream_failure"
+
 
 def _version_from_tag(tag: str) -> str:
     match = _TAG.fullmatch(tag)
@@ -230,6 +305,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--workflow-path", default=".github/workflows/publish-pypi.yml")
     source.add_argument("--tag", required=True)
     source.add_argument("--commit", required=True)
+    source.add_argument("--require-staged-drill", action="store_true")
     artifacts = subparsers.add_parser("artifacts")
     artifacts.add_argument("--sums", type=Path, required=True)
     artifacts.add_argument("--dist", type=Path, required=True)
@@ -247,7 +323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "source-run":
             run = _mapping(json.loads(args.run_json.read_text(encoding="utf-8")), "run JSON")
             jobs = _mapping(json.loads(args.jobs_json.read_text(encoding="utf-8")), "jobs JSON")
-            verify_source_run(
+            source_kind = verify_source_run(
                 run,
                 jobs,
                 repository=args.repository,
@@ -255,6 +331,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 release_tag=args.tag,
                 release_commit=args.commit.strip().lower(),
             )
+            if args.require_staged_drill and source_kind != "staged_drill":
+                raise ValueError(
+                    "source run is an unplanned downstream failure, not the required staged drill"
+                )
+            print(f"verified recovery source kind: {source_kind}")
         else:
             expected = parse_sha256sums(args.sums)
             verify_distribution_directory(args.dist, expected)

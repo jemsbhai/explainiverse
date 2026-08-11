@@ -15,5 +15,13 @@
     "mypy_strict": "487 errors in 41 files",
     "pyright_version": "1.1.411",
     "pyright_verifytypes": "No py.typed marker; type completeness score 0%."
+  },
+  "latest_evidence": {
+    "scope": "fresh local audit from dd76815c79076c43d88568ae10f43be7bb546d9c",
+    "observed_on": "2026-08-11",
+    "mypy_version": "1.19.1",
+    "mypy_strict": "1375 errors in 44 files",
+    "pyright_version": "1.1.411",
+    "pyright_verifytypes": "No py.typed marker; type completeness score 0%."
   }
 }

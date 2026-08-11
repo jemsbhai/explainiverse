@@ -73,6 +73,19 @@ def _source_run():
                 "name": "Create the immutable GitHub release",
                 "status": "completed",
                 "conclusion": "failure",
+                "steps": [
+                    {"name": "Set up job", "status": "completed", "conclusion": "success"},
+                    {
+                        "name": "Stage an explicitly requested post-PyPI recovery drill",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    },
+                    *[
+                        {"name": name, "status": "completed", "conclusion": "skipped"}
+                        for name in recovery._POST_PYPI_RELEASE_STEPS
+                    ],
+                    {"name": "Complete job", "status": "completed", "conclusion": "success"},
+                ],
             }
         ],
     }
@@ -179,17 +192,87 @@ def test_pypi_verification_fails_closed_on_identity_or_hash_drift(tmp_path, muta
 
 def test_failed_overall_source_run_is_accepted_only_after_publish_succeeded():
     run, jobs = _source_run()
-    recovery.verify_source_run(
-        run,
-        jobs,
-        repository="jemsbhai/explainiverse",
-        workflow_path=".github/workflows/publish-pypi.yml",
-        release_tag="v0.15.0",
-        release_commit=SHA,
+    assert (
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+        == "staged_drill"
     )
     publish = next(job for job in jobs["jobs"] if job["name"].startswith("Publish"))
     publish["conclusion"] = "failure"
     with pytest.raises(ValueError, match="Publish.*did not complete successfully"):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+
+def test_source_run_must_prove_failed_overall_and_downstream_release_job():
+    run, jobs = _source_run()
+    run["conclusion"] = "success"
+    with pytest.raises(ValueError, match="conclusion mismatch"):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+    run, jobs = _source_run()
+    jobs["jobs"][-1]["conclusion"] = "success"
+    with pytest.raises(ValueError, match="demonstrate a downstream failure"):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+
+def test_source_run_distinguishes_staged_drill_from_unplanned_failure():
+    run, jobs = _source_run()
+    release_steps = jobs["jobs"][-1]["steps"]
+    release_steps[1]["conclusion"] = "skipped"
+    release_steps[2]["conclusion"] = "failure"
+    assert (
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+        == "unplanned_downstream_failure"
+    )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "later-ran", "no-failure"])
+def test_source_run_rejects_ambiguous_downstream_failure_evidence(mutation):
+    run, jobs = _source_run()
+    release_job = jobs["jobs"][-1]
+    if mutation == "missing":
+        jobs["jobs"].pop()
+    elif mutation == "duplicate":
+        jobs["jobs"].append(copy.deepcopy(release_job))
+    elif mutation == "later-ran":
+        release_job["steps"][2]["conclusion"] = "success"
+    else:
+        release_job["steps"][1]["conclusion"] = "skipped"
+    with pytest.raises(ValueError):
         recovery.verify_source_run(
             run,
             jobs,
@@ -278,3 +361,15 @@ def test_recovery_workflow_has_no_pypi_upload_or_skip_existing_escape_hatch():
     assert "final-github-assets.sha256" in workflow
     assert "Archive complete or partial recovery evidence" in workflow
     assert "if: always()" in workflow
+
+
+def test_staged_drill_step_contract_matches_every_real_downstream_workflow_step():
+    workflow = (ROOT / ".github" / "workflows" / "publish-pypi.yml").read_text(encoding="utf-8")
+    release_job = workflow.split("  github-release:", 1)[1]
+    step_names = [
+        line.split("- name: ", 1)[1]
+        for line in release_job.splitlines()
+        if line.startswith("      - name: ")
+    ]
+    stage = "Stage an explicitly requested post-PyPI recovery drill"
+    assert step_names[step_names.index(stage) + 1 :] == list(recovery._POST_PYPI_RELEASE_STEPS)

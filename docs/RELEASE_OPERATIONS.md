@@ -14,6 +14,14 @@ both the original and bound JSON files. The publish workflow recomputes that age
 clock and rejects a once-valid snapshot after 30 minutes; an immutable attestation proves what was
 observed, not that mutable settings remained unchanged indefinitely.
 
+The reviewed policy currently contains 23 required contexts. Each branch-protection entry and
+exact-SHA check run must be bound to GitHub Actions app ID `15368` (slug `github-actions`); a
+same-named context from another provider is not release evidence. Six of those contexts are the
+automatic dependency-constraint matrix edges. Repository-level immutable Releases must also be
+enabled so that finalized assets and their tag cannot be altered through the Release API. Update
+live protection or immutable-Release settings only through separately authorized administrator
+action, then recapture rather than editing the observation by hand.
+
 First dispatch `cuda-ci.yml` from the exact `main` commit and record its run ID. All four
 all-attempt job records (single- and two-GPU, Torch minimum and latest) must complete successfully
 exactly once. The preflight queries every jobs page with `filter=all`, binds normalized runner and
@@ -42,6 +50,11 @@ gh workflow run release-preflight.yml --ref main `
   -f admin_snapshot_base64=$snapshotBase64
 ```
 
+The dispatch actor and the actor who triggers the current attempt must both be the authenticated
+capture principal. A rerun records its actual `GITHUB_RUN_ATTEMPT` and
+`GITHUB_TRIGGERING_ACTOR`; publication re-queries the Actions source run and rejects any attempt
+or triggering-actor mismatch before building or publishing.
+
 Record the successful preflight run ID. Only after separately authorized signed-tag creation,
 dispatch `publish-pypi.yml` from that tag and pass the same preflight run ID. The publish workflow
 re-verifies the attestation, source workflow, run ID, repository, commit, tag, policy digest, and
@@ -57,6 +70,18 @@ gh workflow run publish-pypi.yml --ref $releaseTag `
   -f cuda_run_id=$cudaRunId
 ```
 
+Before the draft GitHub Release is finalized, the workflow downloads and attestation-verifies the
+full preflight evidence, then generates `RELEASE_GOVERNANCE.json` and
+`RELEASE_GOVERNANCE.md`. The record binds the release actor, environment reviewer and self-review
+setting, tag/commit, preflight and CUDA run IDs, and external-control policy/snapshot digests. If
+the live project still uses one operator, the release notes explicitly disclose the absence of
+segregation of duties. The draft and its assets must verify before it is published; recovery must
+preserve the identical governance disclosure. The normal and recovery paths both fetch PyPI's
+release JSON and per-file Integrity provenance, constrain the DSSE subjects and Trusted Publisher
+identity to the exact repository/workflow/environment, and cryptographically verify every file
+with the hash-locked `pypi-attestations` tool before finalizing. Both paths then re-read the final
+GitHub Release and require the service's immutable flag.
+
 PyPI publisher configuration cannot be read through a
 public API; the project owner must separately archive direct settings-page evidence for owner
 `jemsbhai`, repository `explainiverse`, workflow `publish-pypi.yml`, environment `pypi`. The
@@ -69,14 +94,16 @@ For a separately authorized release intended to exercise recovery, set
 `stage_recovery_drill=true` on `publish-pypi.yml`. The workflow intentionally exits only after the
 single OIDC PyPI upload succeeds. Do not rerun all jobs and do not add `skip-existing`.
 
-Dispatch `recover-github-release.yml` with the tag and failed source run ID. It will:
+Dispatch `recover-github-release.yml` with the tag and failed source run ID. For the formal drill,
+set `require_staged_drill=true`; the verifier distinguishes that explicit failed staging step from
+an unplanned downstream failure and refuses a successful or ambiguous source run. It will:
 
 1. query every jobs page with `filter=all` and require the original build, attestation, and PyPI
    jobs to have completed successfully exactly once in the named `publish-pypi.yml` run on the
    same tag commit;
 2. download only that run's retained `release-distributions` and `release-provenance` artifacts;
-3. verify `SHA256SUMS`, GitHub artifact attestations, and the exact filename/SHA-256 inventory
-   returned by PyPI;
+3. verify `SHA256SUMS`, exact-workflow GitHub artifact attestations, the exact filename/SHA-256
+   inventory returned by PyPI, and every file's PyPI Integrity provenance and publisher identity;
 4. create or reuse a draft GitHub Release, reuse only byte-identical existing assets, and upload
    only missing downstream assets;
 5. download the draft assets and prove the GitHub distribution hashes equal PyPI before finalizing.
@@ -104,12 +131,15 @@ Set `CUDA_SINGLE_RUNNER` and `CUDA_TWO_RUNNER` only to GitHub-managed GPU runner
 ephemeral runners approved for public-repository code. With variables absent, the hosted CPU
 default fails the CUDA hardware assertion rather than skipping. Require both single-GPU Torch
 minimum/latest contexts on `main`; run both two-GPU edges on the scheduled workflow. A green gate
-means all 15 CUDA tests ran with zero skips, including adapter prediction/gradients, every vector
-and CAM gradient family, randomisation success/failure, initialized-device RNG byte restoration,
-dtype/device placement, and hook cleanup.
+means the checked-in exact node manifest matched collection and all 15 CUDA tests ran with zero
+skips, including adapter prediction/gradients, every vector and CAM gradient family,
+randomisation success/failure, initialized-device RNG byte restoration, dtype/device placement,
+and hook cleanup.
 
-As of the 2026-08-10 audit, the repository API reported zero Actions variables and zero registered
+As of the 2026-08-11 audit, the repository API reported zero Actions variables and zero registered
 runners. Both variables are therefore unset and no live GPU acceptance exists. A repository
 administrator must provision approved capacity, set both variables, dispatch `cuda-ci.yml` on the
 exact release commit, and retain a green four-job run before the preflight can succeed. The
-`tests_cuda` session hook converts every runtime or collection skip into a failed job.
+`tests_cuda` session hook converts every runtime or collection skip into a failed job and rejects
+missing, extra, reordered, or duplicate release nodes when manifest enforcement is enabled. A
+local one-GPU diagnostic, even if green, does not substitute for this hosted four-job evidence.

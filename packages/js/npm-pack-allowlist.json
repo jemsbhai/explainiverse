@@ -1,0 +1,18 @@
+[
+  "README.md",
+  "dist/core/explainer.d.ts",
+  "dist/core/explainer.js",
+  "dist/core/explanation.d.ts",
+  "dist/core/explanation.js",
+  "dist/core/index.d.ts",
+  "dist/core/index.js",
+  "dist/core/registry.d.ts",
+  "dist/core/registry.js",
+  "dist/index.d.ts",
+  "dist/index.js",
+  "dist/visualizer/ExplanationVisualizer.d.ts",
+  "dist/visualizer/ExplanationVisualizer.js",
+  "dist/visualizer/index.d.ts",
+  "dist/visualizer/index.js",
+  "package.json"
+]

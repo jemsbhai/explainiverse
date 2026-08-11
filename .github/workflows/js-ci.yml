@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit locked dependencies for high-severity vulnerabilities
+        run: npm audit --audit-level=high
+
       - name: Run tests
         run: npm test
 
@@ -54,6 +57,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify the private package and exact tarball boundary
+        run: npm run check:package-boundary
 
       - name: Smoke-test the packed tarball as a consumer
         shell: bash

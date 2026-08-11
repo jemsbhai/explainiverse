@@ -32,16 +32,31 @@ jobs:
         env:
           EVIDENCE_PATH: ${{ inputs.evidence_path }}
           EXPECTED_COMMIT: ${{ github.sha }}
-        run: >-
-          python scripts/validate_accessibility_evidence.py
-          --evidence "$EVIDENCE_PATH"
-          --expected-commit "$EXPECTED_COMMIT"
-          --normalized-output artifacts/accessibility/validation-summary.json
+        run: |
+          test "$(git ls-files --error-unmatch -- "$EVIDENCE_PATH")" = "$EVIDENCE_PATH"
+          test -f "$EVIDENCE_PATH"
+          test ! -L "$EVIDENCE_PATH"
+          resolved_evidence=$(realpath -- "$EVIDENCE_PATH")
+          case "$resolved_evidence" in
+            "$GITHUB_WORKSPACE"/*) ;;
+            *) echo "evidence path resolves outside the checked-out workspace" >&2; exit 1 ;;
+          esac
+          python scripts/validate_accessibility_evidence.py \
+            --evidence "$EVIDENCE_PATH" \
+            --expected-commit "$EXPECTED_COMMIT" \
+            --normalized-output artifacts/accessibility/validation-summary.json
+          cp -- "$EVIDENCE_PATH" artifacts/accessibility/evidence-manifest.json
+          cp .github/accessibility-certification-policy.json \
+            artifacts/accessibility/accessibility-certification-policy.json
+          (cd artifacts/accessibility && sha256sum \
+            accessibility-certification-policy.json \
+            evidence-manifest.json \
+            validation-summary.json > evidence-files.sha256)
 
       - name: Retain the validation summary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: accessibility-validation-${{ github.sha }}
-          path: artifacts/accessibility/validation-summary.json
+          path: artifacts/accessibility/*
           if-no-files-found: error
           retention-days: 180

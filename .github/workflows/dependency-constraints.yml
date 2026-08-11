@@ -2,6 +2,10 @@ name: Scheduled dependency constraints and prerelease probes
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
   schedule:
     - cron: "23 5 * * 2"
 
@@ -97,10 +101,137 @@ jobs:
           TEST_TARGETS: ${{ matrix.tests }}
         run: python -m pytest --strict-config --strict-markers -m "not quantus_reference" $TEST_TARGETS
 
-  scikit-image-next-major-prerelease:
-    name: scikit-image next-major prerelease probe
+  scikit-image-next-major-discovery:
+    name: scikit-image 1.x prerelease availability (blocking monitor)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      available: ${{ steps.candidate.outputs.available }}
+      version: ${{ steps.candidate.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Capture immutable PyPI discovery evidence
+        run: |
+          mkdir -p artifacts/scikit-image-prerelease
+          curl --fail-with-body --location --silent --show-error \
+            --dump-header artifacts/scikit-image-prerelease/pypi-headers.txt \
+            --output artifacts/scikit-image-prerelease/pypi-metadata.json \
+            https://pypi.org/pypi/scikit-image/json
+          sha256sum artifacts/scikit-image-prerelease/pypi-metadata.json \
+            > artifacts/scikit-image-prerelease/pypi-metadata.sha256
+
+      - name: Select the next-major prerelease without widening metadata
+        id: candidate
+        env:
+          EVIDENCE_DIR: artifacts/scikit-image-prerelease
+        run: |
+          python -m pip install --upgrade pip packaging
+          set +e
+          candidate=$(python scripts/select_dependency_prerelease.py \
+            --package scikit-image \
+            --current-major 0 \
+            --metadata "$EVIDENCE_DIR/pypi-metadata.json")
+          status=$?
+          set -e
+          if [[ "$status" -eq 3 ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No non-yanked scikit-image 1.x prerelease exists; the <1.0 bound remains blocked from widening." >> "$GITHUB_STEP_SUMMARY"
+            candidate=""
+          elif [[ "$status" -eq 0 ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "version=$candidate" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "The prerelease selector failed; no compatibility claim is possible." >> "$GITHUB_STEP_SUMMARY"
+            candidate=""
+          fi
+          export CANDIDATE="$candidate" SELECTOR_STATUS="$status"
+          python - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path(os.environ["EVIDENCE_DIR"])
+          metadata = evidence / "pypi-metadata.json"
+          metadata_value = json.loads(metadata.read_text(encoding="utf-8"))
+          serial = metadata_value.get("last_serial")
+          if not isinstance(serial, int) or serial <= 0:
+              raise SystemExit("PyPI metadata has no positive last_serial")
+          header_serials = [
+              line.split(":", 1)[1].strip()
+              for line in (evidence / "pypi-headers.txt").read_text(
+                  encoding="utf-8", errors="replace"
+              ).splitlines()
+              if line.lower().startswith("x-pypi-last-serial:")
+          ]
+          if header_serials and any(value != str(serial) for value in header_serials):
+              raise SystemExit("PyPI metadata/header serial mismatch")
+          candidate = os.environ["CANDIDATE"] or None
+          selector_status = int(os.environ["SELECTOR_STATUS"])
+          record = {
+              "schema_version": 1,
+              "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "package": "scikit-image",
+              "required_major": 1,
+              "candidate": candidate,
+              "compatibility_status": (
+                  "pending"
+                  if candidate
+                  else "blocked-no-candidate"
+                  if selector_status == 3
+                  else "discovery-error"
+              ),
+              "metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest(),
+              "pypi_last_serial": serial,
+              "selector_exit_code": selector_status,
+          }
+          (evidence / "selection.json").write_text(
+              json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+          if [[ "$status" -ne 0 && "$status" -ne 3 ]]; then
+            exit "$status"
+          fi
+
+      - name: Archive the exact discovery record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scikit-image-prerelease-discovery-${{ github.run_id }}
+          path: artifacts/scikit-image-prerelease/
+          if-no-files-found: error
+          retention-days: 180
+
+      - name: Fail closed while no candidate exists
+        if: steps.candidate.outputs.available != 'true'
+        run: |
+          echo "No compatibility proof can run; absence is blocked, not a successful probe." >&2
+          exit 1
+
+  scikit-image-next-major-compatibility:
+    name: scikit-image 1.x prerelease compatibility proof
+    needs: scikit-image-next-major-discovery
+    if: >-
+      always() &&
+      needs.scikit-image-next-major-discovery.result == 'success' &&
+      needs.scikit-image-next-major-discovery.outputs.available == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
 
     steps:
       - name: Checkout
@@ -115,28 +246,35 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Discover the next-major prerelease without widening metadata
-        id: candidate
+      - name: Recover the exact discovery record
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: scikit-image-prerelease-discovery-${{ github.run_id }}
+          path: artifacts/scikit-image-prerelease
+
+      - name: Bind discovery evidence to the selected candidate
+        env:
+          CANDIDATE: ${{ needs.scikit-image-next-major-discovery.outputs.version }}
+          EVIDENCE_DIR: artifacts/scikit-image-prerelease
         run: |
-          python -m pip install --upgrade pip packaging
-          set +e
-          candidate=$(python scripts/select_dependency_prerelease.py \
-            --package scikit-image --current-major 0)
-          status=$?
-          set -e
-          if [[ "$status" -eq 3 ]]; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "No non-yanked scikit-image 1.x prerelease exists; the <1.0 bound remains blocked from widening." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          test "$status" -eq 0
-          echo "available=true" >> "$GITHUB_OUTPUT"
-          echo "version=$candidate" >> "$GITHUB_OUTPUT"
+          sha256sum --check "$EVIDENCE_DIR/pypi-metadata.sha256"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          record = json.loads(
+              (Path(os.environ["EVIDENCE_DIR"]) / "selection.json").read_text(encoding="utf-8")
+          )
+          if record.get("candidate") != os.environ["CANDIDATE"]:
+              raise SystemExit("discovery artifact candidate does not match the job output")
+          if record.get("compatibility_status") != "pending":
+              raise SystemExit("discovery artifact is not pending a compatibility proof")
+          PY
 
       - name: Install the candidate outside the current declared bound
-        if: steps.candidate.outputs.available == 'true'
         env:
-          CANDIDATE: ${{ steps.candidate.outputs.version }}
+          CANDIDATE: ${{ needs.scikit-image-next-major-discovery.outputs.version }}
         run: |
           python -m pip install \
             --editable . \
@@ -148,22 +286,60 @@ jobs:
             "ipykernel>=6.29,<8" \
             "ipywidgets>=8.1,<9" \
             "matplotlib>=3.7,<4"
-          python -m pip install --upgrade --no-deps "scikit-image==$CANDIDATE"
+          python -m pip check \
+            2>&1 | tee artifacts/scikit-image-prerelease/pre-candidate-pip-check.txt
+          python -m pip uninstall --yes explainiverse
+          if python -m pip show explainiverse >/dev/null 2>&1; then
+            echo "candidate proof must import the checkout through PYTHONPATH, not installed capped metadata" >&2
+            exit 1
+          fi
+          python -m pip install --upgrade --pre "scikit-image==$CANDIDATE"
           python -c "import skimage; assert skimage.__version__ == '$CANDIDATE'"
+          python -m pip check \
+            2>&1 | tee artifacts/scikit-image-prerelease/post-candidate-pip-check.txt
+          python -m pip freeze --all > artifacts/scikit-image-prerelease/pip-freeze.txt
 
       - name: Exercise localisation and LIME
-        if: steps.candidate.outputs.available == 'true'
-        run: >-
-          python -m pytest --strict-config --strict-markers
-          -m "not quantus_reference"
-          tests/test_localisation.py
-          tests/test_localisation_accuracy.py
-          tests/test_lime_accuracy.py
-          tests/test_lime_explainer.py
+        run: |
+          python -m pytest --strict-config --strict-markers \
+            -m "not quantus_reference" \
+            --junitxml artifacts/scikit-image-prerelease/pytest.xml \
+            tests/test_localisation.py \
+            tests/test_localisation_accuracy.py \
+            tests/test_lime_accuracy.py \
+            tests/test_lime_explainer.py \
+            2>&1 | tee artifacts/scikit-image-prerelease/pytest.log
 
       - name: Exercise package and tutorial gates
-        if: steps.candidate.outputs.available == 'true'
         run: |
-          python -m build
-          python -m twine check dist/*
-          python scripts/execute_tutorials.py
+          python -m build 2>&1 | tee artifacts/scikit-image-prerelease/build.log
+          python -m twine check dist/* 2>&1 | tee artifacts/scikit-image-prerelease/twine.log
+          sha256sum dist/* > artifacts/scikit-image-prerelease/distribution-sha256.txt
+          python scripts/execute_tutorials.py \
+            2>&1 | tee artifacts/scikit-image-prerelease/tutorials.log
+
+      - name: Mark the candidate compatibility proof successful
+        env:
+          EVIDENCE_DIR: artifacts/scikit-image-prerelease
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["EVIDENCE_DIR"]) / "selection.json"
+          record = json.loads(path.read_text(encoding="utf-8"))
+          record["compatibility_status"] = "passed"
+          record["proof_commit"] = os.environ["GITHUB_SHA"]
+          record["proof_run_id"] = int(os.environ["GITHUB_RUN_ID"])
+          path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      - name: Archive candidate compatibility proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scikit-image-prerelease-compatibility-${{ github.run_id }}
+          path: artifacts/scikit-image-prerelease/
+          if-no-files-found: error
+          retention-days: 180

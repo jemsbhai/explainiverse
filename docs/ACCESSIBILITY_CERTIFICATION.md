@@ -32,8 +32,10 @@ semantic change after the recorded commit keeps the claim blocked.
    `npm run test:browser`. All Chromium, Firefox, WebKit, functional, reflow,
    off-origin-request, browser-error, and axe checks must pass.
 3. Deploy that exact build to an HTTPS staging URL. Record the immutable build
-   or workflow URL that ties the deployment to the candidate SHA. Do not use a
-   mutable local source checkout as certification evidence.
+   or workflow URL that ties the deployment to the candidate SHA. The Pages workflow's retained
+   `deployment-evidence.json`, `demo-files.sha256`, and `demo-tree.sha256` must match the manifest's
+   deployment URI, commit, and demo build digest. Do not use a mutable local source checkout as
+   certification evidence.
 4. Start a fresh browser profile with default settings. Disable extensions
    other than the screen reader. Record exact OS build, browser version, and
    assistive-technology version—not labels such as “latest.”
@@ -164,6 +166,7 @@ python scripts/validate_accessibility_evidence.py \
 Then run the manual **Accessibility Evidence Validation** workflow on the exact
 candidate ref with the reviewed manifest path. The workflow binds
 `commit_sha` to its checked-out `${{ github.sha }}` and retains the deployment
-URI and build digest in the summary. Retain that 180-day summary alongside the
-transcripts and recordings. A green validator is necessary but does not
+URI and build digest in the summary. It archives the exact tracked manifest,
+the reviewed policy, the normalized summary, and a SHA-256 inventory for 180
+days. Retain that artifact alongside the transcripts and recordings. A green validator is necessary but does not
 substitute for reviewing the actual manual evidence or deployment bytes.

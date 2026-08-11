@@ -13,6 +13,12 @@
     "Compatibility-latest (ubuntu-latest, Python 3.13)",
     "Compatibility-latest (macos-15, Python 3.12)",
     "Compatibility-latest (windows-latest, Python 3.12)",
+    "Dependency constraints (captum-current)",
+    "Dependency constraints (captum-minimum)",
+    "Dependency constraints (python310-direct-floor)",
+    "Dependency constraints (python313-latest)",
+    "Dependency constraints (shap-xgboost-current)",
+    "Dependency constraints (shap-xgboost-floor)",
     "Full extras, quality, and package",
     "Minimum direct dependencies (Python 3.10)",
     "Quantus reference parity (zero skips)",
@@ -21,6 +27,130 @@
     "Test and build (Node.js 20.11.0)",
     "Test and build (Node.js 22.x)"
   ],
+  "required_check_provider": {
+    "app_id": 15368,
+    "slug": "github-actions"
+  },
+  "required_check_workflows": {
+    "Artifact byte reproducibility": {
+      "path": ".github/workflows/artifact-reproducibility.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Base distribution contract (without Torch/Captum extras)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "CUDA single-GPU (Torch latest)": {
+      "path": ".github/workflows/cuda-ci.yml",
+      "event": "workflow_dispatch",
+      "head_branch": "main"
+    },
+    "CUDA single-GPU (Torch minimum)": {
+      "path": ".github/workflows/cuda-ci.yml",
+      "event": "workflow_dispatch",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.10)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.11)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.12)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.13)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (macos-15, Python 3.12)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (windows-latest, Python 3.12)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (captum-current)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (captum-minimum)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (python310-direct-floor)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (python313-latest)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (shap-xgboost-current)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (shap-xgboost-floor)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Full extras, quality, and package": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Minimum direct dependencies (Python 3.10)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Quantus reference parity (zero skips)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "React 18 peer floor (Node.js 20.11.0)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Real-browser demo and automated accessibility (Playwright)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Test and build (Node.js 20.11.0)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Test and build (Node.js 22.x)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    }
+  },
+  "immutable_releases": {
+    "enabled": true
+  },
   "admin_snapshot_principals": ["jemsbhai"],
   "cuda_evidence": {
     "workflow_path": ".github/workflows/cuda-ci.yml",
