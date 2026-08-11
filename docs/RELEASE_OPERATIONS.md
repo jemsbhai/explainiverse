@@ -1,0 +1,115 @@
+# Stable release control snapshot and recovery drill
+
+This runbook is executable automation, not evidence that mutable service settings or CUDA
+hardware are already configured. A stable release remains blocked until every preflight and
+hardware job is green and the PyPI project owner directly verifies the Trusted Publisher.
+
+## Administrator-authenticated pre-tag snapshot
+
+GitHub's workflow-scoped token cannot read branch-protection or secret metadata. The release
+administrator therefore captures those settings locally with the authenticated `gh` principal.
+The same principal must immediately dispatch the preflight on the exact `main` commit. The
+workflow accepts captures no more than 30 minutes old, binds the capture to its run, and attests
+both the original and bound JSON files. The publish workflow recomputes that age against its own
+clock and rejects a once-valid snapshot after 30 minutes; an immutable attestation proves what was
+observed, not that mutable settings remained unchanged indefinitely.
+
+First dispatch `cuda-ci.yml` from the exact `main` commit and record its run ID. All four
+all-attempt job records (single- and two-GPU, Torch minimum and latest) must complete successfully
+exactly once. The preflight queries every jobs page with `filter=all`, binds normalized runner and
+job evidence into the attested snapshot, and the publish workflow queries and compares it again.
+
+PowerShell example (do not print or persist the token):
+
+```powershell
+$releaseTag = "v0.15.0"
+$releaseCommit = git rev-parse origin/main
+$cudaRunId = "<successful-cuda-ci-run-id>"
+$snapshot = Join-Path $env:TEMP "explainiverse-$releaseTag-controls.json"
+$env:GH_TOKEN = gh auth token
+python scripts/release_external_controls.py capture `
+  --policy .github/release-control-policy.json `
+  --output $snapshot `
+  --repository jemsbhai/explainiverse `
+  --tag $releaseTag `
+  --commit $releaseCommit
+if ($LASTEXITCODE -ne 0) { throw "release controls differ from reviewed policy" }
+$snapshotBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($snapshot))
+gh workflow run release-preflight.yml --ref main `
+  -f tag=$releaseTag `
+  -f release_commit=$releaseCommit `
+  -f cuda_run_id=$cudaRunId `
+  -f admin_snapshot_base64=$snapshotBase64
+```
+
+Record the successful preflight run ID. Only after separately authorized signed-tag creation,
+dispatch `publish-pypi.yml` from that tag and pass the same preflight run ID. The publish workflow
+re-verifies the attestation, source workflow, run ID, repository, commit, tag, policy digest, and
+all observed controls and exact CUDA run before any build. It also accepts only PyPI's HTTP 404
+for the version before build and repeats that fail-closed check immediately before the sole OIDC
+publisher action. An existing version or an ambiguous API/network result never reaches the
+publisher; there is no `skip-existing` path. For example:
+
+```powershell
+gh workflow run publish-pypi.yml --ref $releaseTag `
+  -f tag=$releaseTag `
+  -f preflight_run_id="<successful-release-preflight-run-id>" `
+  -f cuda_run_id=$cudaRunId
+```
+
+PyPI publisher configuration cannot be read through a
+public API; the project owner must separately archive direct settings-page evidence for owner
+`jemsbhai`, repository `explainiverse`, workflow `publish-pypi.yml`, environment `pypi`. The
+token-free OIDC publication job is the final acceptance test. No repository or environment PyPI
+API token is permitted by the reviewed snapshot.
+
+## Post-PyPI recovery drill
+
+For a separately authorized release intended to exercise recovery, set
+`stage_recovery_drill=true` on `publish-pypi.yml`. The workflow intentionally exits only after the
+single OIDC PyPI upload succeeds. Do not rerun all jobs and do not add `skip-existing`.
+
+Dispatch `recover-github-release.yml` with the tag and failed source run ID. It will:
+
+1. query every jobs page with `filter=all` and require the original build, attestation, and PyPI
+   jobs to have completed successfully exactly once in the named `publish-pypi.yml` run on the
+   same tag commit;
+2. download only that run's retained `release-distributions` and `release-provenance` artifacts;
+3. verify `SHA256SUMS`, GitHub artifact attestations, and the exact filename/SHA-256 inventory
+   returned by PyPI;
+4. create or reuse a draft GitHub Release, reuse only byte-identical existing assets, and upload
+   only missing downstream assets;
+5. download the draft assets and prove the GitHub distribution hashes equal PyPI before finalizing.
+
+The recovery workflow contains no PyPI publisher action, credential, `twine upload`, or
+`skip-existing` path. Its always-running evidence upload retains complete or partial source-run
+and all-attempt jobs JSON, PyPI JSON, attestation verification output, final GitHub metadata, and
+the final asset hash inventory for 90 days. Archive that artifact, the source and recovery run
+URLs, and both attestations as the drill record.
+
+## Legacy 0.14.0 incident
+
+The public `0.14.0` files were uploaded to PyPI on 2026-08-10 through Twine, not Trusted
+Publishing. PyPI reports wheel SHA-256
+`b1b98dfdfc0acbc8dc2113d8db87d40ae9cec2f958ed25b00bc6e30d43db41d4` and source SHA-256
+`e2ab525f720d9970f25c307be84b9a5a6bb5feb612a4457ba9d72925cf2af68b`. Its `v0.14.0` tag is
+unsigned, no GitHub Release exists, and no original attested build run/artifact set is available.
+The recovery workflow must and does reject that incident: downloading the public PyPI files now
+cannot recreate original provenance. Recovery requires owner authority and a separately reviewed
+legacy disclosure decision; it cannot be represented as a successful recovery drill.
+
+## CUDA capacity acceptance
+
+Set `CUDA_SINGLE_RUNNER` and `CUDA_TWO_RUNNER` only to GitHub-managed GPU runners or isolated,
+ephemeral runners approved for public-repository code. With variables absent, the hosted CPU
+default fails the CUDA hardware assertion rather than skipping. Require both single-GPU Torch
+minimum/latest contexts on `main`; run both two-GPU edges on the scheduled workflow. A green gate
+means all 15 CUDA tests ran with zero skips, including adapter prediction/gradients, every vector
+and CAM gradient family, randomisation success/failure, initialized-device RNG byte restoration,
+dtype/device placement, and hook cleanup.
+
+As of the 2026-08-10 audit, the repository API reported zero Actions variables and zero registered
+runners. Both variables are therefore unset and no live GPU acceptance exists. A repository
+administrator must provision approved capacity, set both variables, dispatch `cuda-ci.yml` on the
+exact release commit, and retain a green four-job run before the preflight can succeed. The
+`tests_cuda` session hook converts every runtime or collection skip into a failed job.

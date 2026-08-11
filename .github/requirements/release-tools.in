@@ -1,0 +1,5 @@
+# Release tooling is resolved for CPython 3.12 on x86_64 Linux.
+# Regenerate release-tools.txt with the command embedded in its header.
+poetry==2.3.2
+twine==6.2.0
+cyclonedx-bom==7.2.1

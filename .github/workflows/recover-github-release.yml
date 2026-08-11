@@ -1,0 +1,241 @@
+name: Recover GitHub Release from an already-published PyPI release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Already-published stable tag (for example v0.15.0)"
+        required: true
+        type: string
+      source_run_id:
+        description: "Failed publish-pypi workflow run whose PyPI job succeeded"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recover-github-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Recover downstream release without republishing
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+
+    steps:
+      - name: Validate recovery inputs
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          mkdir -p recovery
+          jq -n --arg tag "$RELEASE_TAG" --arg source_run_id "$SOURCE_RUN_ID" \
+            --arg recovery_run_id "$GITHUB_RUN_ID" \
+            '{tag:$tag,source_run_id:$source_run_id,recovery_run_id:$recovery_run_id}' \
+            > recovery/request.json
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag must have the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          if [[ ! "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "source_run_id must be a positive integer" >&2
+            exit 1
+          fi
+
+      - name: Check out the immutable release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify signed tag, main ancestry, and package version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+          tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.verification.verified')" = true
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor HEAD origin/main
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          expected = os.environ["RELEASE_TAG"].removeprefix("v")
+          if version != expected:
+              raise SystemExit(f"tag version {expected!r} != pyproject version {version!r}")
+          PY
+
+      - name: Prove the source run published successfully exactly once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > recovery/source-run.json
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" \
+            --jq '.jobs[]' \
+            | jq -s \
+              '{query_filter:"all",pagination_complete:true,jobs:.}' \
+              > recovery/source-jobs.json
+          python scripts/verify_release_recovery.py source-run \
+            --run-json recovery/source-run.json \
+            --jobs-json recovery/source-jobs.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$(git rev-parse HEAD)"
+
+      - name: Download only the original retained artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name release-distributions --dir dist
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name release-provenance --dir provenance
+
+      - name: Verify original hashes, attestations, and PyPI records
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          (cd dist && sha256sum --check ../provenance/SHA256SUMS)
+          : > recovery/distribution-attestations.jsonl
+          for artifact in dist/*; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" --format json \
+              >> recovery/distribution-attestations.jsonl
+          done
+          version=${RELEASE_TAG#v}
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://pypi.org/pypi/explainiverse/$version/json" \
+            --output recovery/pypi.json
+          python scripts/verify_release_recovery.py artifacts \
+            --sums provenance/SHA256SUMS \
+            --dist dist \
+            --pypi-json recovery/pypi.json \
+            --project explainiverse \
+            --tag "$RELEASE_TAG"
+
+      - name: Create or inspect a recovery draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,url > recovery/github-release.json
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --draft --generate-notes \
+              --title "Explainiverse $RELEASE_TAG"
+            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,url > recovery/github-release.json
+          fi
+          test "$(jq -r '.isPrerelease' recovery/github-release.json)" = false
+
+      - name: Reuse matching assets and upload only missing downstream assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          is_draft=$(python -c "import json; print(str(json.load(open('recovery/github-release.json', encoding='utf-8'))['isDraft']).lower())")
+          mkdir -p recovery/existing-assets
+          asset_count=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+          if [[ "$asset_count" -gt 0 ]]; then
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --dir recovery/existing-assets
+          fi
+          for asset in dist/* provenance/*; do
+            name=$(basename "$asset")
+            existing="recovery/existing-assets/$name"
+            if [[ -f "$existing" ]]; then
+              test "$(sha256sum "$asset" | cut -d' ' -f1)" = "$(sha256sum "$existing" | cut -d' ' -f1)"
+            else
+              if [[ "$is_draft" != true ]]; then
+                echo "published GitHub Release is missing original asset $name" >&2
+                exit 1
+              fi
+              gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
+
+      - name: Verify GitHub distribution hashes equal PyPI before finalizing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p recovery/verified-release-assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir recovery/verified-release-assets
+          python scripts/verify_release_recovery.py artifacts \
+            --sums provenance/SHA256SUMS \
+            --dist dist \
+            --pypi-json recovery/pypi.json \
+            --project explainiverse \
+            --tag "$RELEASE_TAG" \
+            --github-assets recovery/verified-release-assets \
+            --provenance provenance
+
+      - name: Finalize the verified draft without any PyPI upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          is_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
+          if [[ "$is_draft" = true ]]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft=false --title "Explainiverse $RELEASE_TAG"
+          fi
+
+      - name: Record and reverify the final GitHub Release inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p recovery/final-release-assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir recovery/final-release-assets
+          python scripts/verify_release_recovery.py artifacts \
+            --sums provenance/SHA256SUMS \
+            --dist dist \
+            --pypi-json recovery/pypi.json \
+            --project explainiverse \
+            --tag "$RELEASE_TAG" \
+            --github-assets recovery/final-release-assets \
+            --provenance provenance
+          (cd recovery/final-release-assets && sha256sum * | sort) \
+            > recovery/final-github-assets.sha256
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets,isDraft,isPrerelease,name,publishedAt,tagName,targetCommitish,url \
+            > recovery/final-github-release.json
+          test "$(jq -r '.tagName' recovery/final-github-release.json)" = "$RELEASE_TAG"
+          test "$(jq -r '.isDraft' recovery/final-github-release.json)" = false
+          test "$(jq -r '.isPrerelease' recovery/final-github-release.json)" = false
+
+      - name: Archive complete or partial recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-recovery-evidence
+          path: recovery/**
+          if-no-files-found: error
+          retention-days: 90

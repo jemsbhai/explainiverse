@@ -1,0 +1,169 @@
+name: Scheduled dependency constraints and prerelease probes
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-constraints-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compatibility:
+    name: Dependency constraints (${{ matrix.case }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: python310-direct-floor
+            python-version: "3.10"
+            constraints: .github/constraints/python310-min-direct.txt
+            tests: tests
+          - case: captum-minimum
+            python-version: "3.10"
+            constraints: .github/constraints/captum-min.txt
+            tests: tests/test_deeplift.py tests/test_lrp.py tests/test_lrp_accuracy.py tests/reference/test_ref_deeplift.py tests/test_gradient_approved_remediation.py
+          - case: captum-current
+            python-version: "3.12"
+            constraints: none
+            tests: tests/test_deeplift.py tests/test_lrp.py tests/test_lrp_accuracy.py tests/reference/test_ref_deeplift.py tests/test_gradient_approved_remediation.py
+          - case: shap-xgboost-floor
+            python-version: "3.10"
+            constraints: .github/constraints/shap-xgboost-floor.txt
+            tests: tests/test_shap_explainer.py tests/test_treeshap_accuracy.py tests/test_treeshap_explainer.py
+          - case: shap-xgboost-current
+            python-version: "3.12"
+            constraints: none
+            tests: tests/test_shap_explainer.py tests/test_treeshap_accuracy.py tests/test_treeshap_explainer.py
+          - case: python313-latest
+            python-version: "3.13"
+            constraints: none
+            tests: tests
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/*.txt
+
+      - name: Install the selected constraint edge
+        env:
+          CONSTRAINTS: ${{ matrix.constraints }}
+        run: |
+          python -m pip install --upgrade pip
+          constraint_args=()
+          if [[ "$CONSTRAINTS" != none ]]; then
+            constraint_args=(--constraint "$CONSTRAINTS")
+          fi
+          python -m pip install --upgrade --upgrade-strategy eager \
+            "${constraint_args[@]}" \
+            --editable ".[all]" \
+            "pytest>=8,<9" \
+            "pytest-cov>=4.1,<8" \
+            "grad-cam>=1.5.5,<2" \
+            "nbformat>=5.10,<6" \
+            "nbclient>=0.10,<1" \
+            "ipykernel>=6.29,<8"
+
+      - name: Record the fully resolved graph
+        run: |
+          python -m pip check
+          python -m pip freeze --all
+
+      - name: Require Captum explicitly in both Captum matrix edges
+        if: startsWith(matrix.case, 'captum-')
+        run: python -c "import captum; print('required Captum imported:', captum.__version__)"
+
+      - name: Audit the Quantus floor exception
+        run: python scripts/validate_quantus_partition.py
+
+      - name: Exercise the selected substantive public surface
+        env:
+          TEST_TARGETS: ${{ matrix.tests }}
+        run: python -m pytest --strict-config --strict-markers -m "not quantus_reference" $TEST_TARGETS
+
+  scikit-image-next-major-prerelease:
+    name: scikit-image next-major prerelease probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Discover the next-major prerelease without widening metadata
+        id: candidate
+        run: |
+          python -m pip install --upgrade pip packaging
+          set +e
+          candidate=$(python scripts/select_dependency_prerelease.py \
+            --package scikit-image --current-major 0)
+          status=$?
+          set -e
+          if [[ "$status" -eq 3 ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No non-yanked scikit-image 1.x prerelease exists; the <1.0 bound remains blocked from widening." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          test "$status" -eq 0
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "version=$candidate" >> "$GITHUB_OUTPUT"
+
+      - name: Install the candidate outside the current declared bound
+        if: steps.candidate.outputs.available == 'true'
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.version }}
+        run: |
+          python -m pip install \
+            --editable . \
+            "pytest>=8,<9" \
+            "build>=1,<2" \
+            "twine>=5,<7" \
+            "nbformat>=5.10,<6" \
+            "nbclient>=0.10,<1" \
+            "ipykernel>=6.29,<8" \
+            "ipywidgets>=8.1,<9" \
+            "matplotlib>=3.7,<4"
+          python -m pip install --upgrade --no-deps "scikit-image==$CANDIDATE"
+          python -c "import skimage; assert skimage.__version__ == '$CANDIDATE'"
+
+      - name: Exercise localisation and LIME
+        if: steps.candidate.outputs.available == 'true'
+        run: >-
+          python -m pytest --strict-config --strict-markers
+          -m "not quantus_reference"
+          tests/test_localisation.py
+          tests/test_localisation_accuracy.py
+          tests/test_lime_accuracy.py
+          tests/test_lime_explainer.py
+
+      - name: Exercise package and tutorial gates
+        if: steps.candidate.outputs.available == 'true'
+        run: |
+          python -m build
+          python -m twine check dist/*
+          python scripts/execute_tutorials.py
