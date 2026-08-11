@@ -51,6 +51,7 @@ TUTORIAL_SPECS = (
     TutorialSpec("01_lime_tabular.ipynb", 42),
     TutorialSpec("02_kernelshap.ipynb", 17),
     TutorialSpec("03_treeshap.ipynb", 17),
+    TutorialSpec("04_finite_estimator_uncertainty.ipynb", 31),
 )
 SPEC_BY_FILENAME = {spec.filename: spec for spec in TUTORIAL_SPECS}
 DEFAULT_NOTEBOOKS = tuple(TUTORIAL_DIR / spec.filename for spec in TUTORIAL_SPECS)

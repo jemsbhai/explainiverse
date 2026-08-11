@@ -32,6 +32,7 @@ def test_reviewed_manifest_exactly_matches_notebook_inventory():
         "01_lime_tabular.ipynb",
         "02_kernelshap.ipynb",
         "03_treeshap.ipynb",
+        "04_finite_estimator_uncertainty.ipynb",
     }
 
 
@@ -169,3 +170,31 @@ def test_checkout_import_and_hashes_are_current_and_stable():
     assert runner._lock_digest() == runner._lock_digest()
     assert runner._runner_digest() == runner._runner_digest()
     assert runner._package_source_digest() == runner._package_source_digest()
+
+
+def test_uncertainty_tutorial_publishes_the_scoped_formula_and_fresh_equality_contracts():
+    path = runner.TUTORIAL_DIR / "04_finite_estimator_uncertainty.ipynb"
+    notebook = nbformat.read(path, as_version=4)
+    runner._validate_source(path, notebook)
+    runner._validate_published_provenance(path, notebook)
+
+    source = "\n".join(cell.source for cell in notebook.cells)
+    assert "load_iris()" in source
+    assert "model_probabilities, formula_probabilities" in source
+    assert "run_seeded_replicates(" in source
+    assert "evaluate_intervention_sensitivity(" in source
+    assert 'replicate_report["finite_estimate_is_global_proof"] is False' in source
+    assert 'sensitivity_report["universal_default_claimed"] is False' in source
+    assert "fresh_replicate_report == replicate_report" in source
+    assert "fresh_sensitivity_report == sensitivity_report" in source
+
+    published_text = "\n".join(
+        output.get("text", "")
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        for output in cell.outputs
+        if output.output_type == "stream"
+    )
+    assert "fresh seeded report is exactly equal: True" in published_text
+    assert "same sign across references: False" in published_text
+    assert "fresh sensitivity report is exactly equal: True" in published_text
