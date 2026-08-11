@@ -1,5 +1,7 @@
 """Adversarial regression tests for the approved non-gradient remediation."""
 
+from contextlib import nullcontext
+
 import numpy as np
 import pytest
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -345,6 +347,20 @@ def test_protodash_objective_is_scale_safe_or_fails_before_serializing_nonfinite
     # but its positive objective is genuinely larger than float64 can encode.
     with pytest.raises(ValueError, match="not representable as a finite float64"):
         explainer.explain(np.array([1e303]), np.array([[2e-5]]))
+
+
+def test_protodash_objective_rejects_silent_blas_underflow(monkeypatch):
+    explainer = ProtoDashExplainer(n_prototypes=1, kernel="linear")
+
+    # Some BLAS implementations return zero without honoring NumPy's requested
+    # underflow exception. Force that contract locally and retain exact proof.
+    monkeypatch.setattr(np, "errstate", lambda **_kwargs: nullcontext())
+    with pytest.raises(ValueError, match="not representable as a nonzero float64"):
+        explainer._evaluate_objective(
+            np.array([np.nextafter(0.0, 1.0)]),
+            np.array([[0.0]]),
+            np.array([0.25]),
+        )
 
 
 @pytest.mark.parametrize(

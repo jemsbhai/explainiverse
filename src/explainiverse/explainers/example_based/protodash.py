@@ -518,16 +518,7 @@ class ProtoDashExplainer(BaseExplainer):
             if not np.all(np.isfinite(values)):
                 raise ValueError(f"{name} must contain only finite values")
 
-        try:
-            with np.errstate(over="raise", under="raise", invalid="raise"):
-                result = float(
-                    mu @ objective_weights
-                    - 0.5 * objective_weights @ kernel_matrix @ objective_weights
-                )
-        except FloatingPointError:
-            # The two terms may overflow separately even when exact cancellation
-            # leaves a representable result. Re-evaluate that exceptional path
-            # from the exact binary-float rationals before deciding to fail.
+        def exact_float_result() -> float:
             weights_exact = [Fraction.from_float(float(value)) for value in objective_weights]
             linear = sum(
                 Fraction.from_float(float(value)) * weight
@@ -540,15 +531,36 @@ class ProtoDashExplainer(BaseExplainer):
             )
             exact_result = linear - quadratic / 2
             try:
-                result = float(exact_result)
+                exact_float = float(exact_result)
             except OverflowError as exc:
                 raise ValueError(
                     "ProtoDash objective is not representable as a finite float64 value"
                 ) from exc
-            if result == 0.0 and exact_result != 0:
+            if exact_float == 0.0 and exact_result != 0:
                 raise ValueError(
                     "ProtoDash objective is not representable as a nonzero float64 value"
                 )
+            return exact_float
+
+        used_exact_path = False
+        try:
+            with np.errstate(over="raise", under="raise", invalid="raise"):
+                result = float(
+                    mu @ objective_weights
+                    - 0.5 * objective_weights @ kernel_matrix @ objective_weights
+                )
+        except FloatingPointError:
+            # The two terms may overflow separately even when exact cancellation
+            # leaves a representable result. Re-evaluate that exceptional path
+            # from the exact binary-float rationals before deciding to fail.
+            result = exact_float_result()
+            used_exact_path = True
+
+        # BLAS implementations are not required to surface IEEE underflow
+        # through NumPy's error state. Verify every zero result exactly so a
+        # nonzero rational cannot be serialized as a platform-dependent zero.
+        if result == 0.0 and not used_exact_path:
+            result = exact_float_result()
 
         if not np.isfinite(result):
             raise ValueError("ProtoDash objective is not representable as a finite float64 value")
