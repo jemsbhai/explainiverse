@@ -4784,11 +4784,10 @@ test = ["big-O", "jaraco.functools", "jaraco.itertools", "jaraco.test", "more_it
 type = ["pytest-mypy (>=1.0.1) ; platform_python_implementation != \"PyPy\""]
 
 [extras]
-all = ["captum", "scikit-image", "torch"]
-image = ["scikit-image"]
+all = ["captum", "torch"]
 torch = ["captum", "torch"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "b04a54be54c6e25153ee2fa289fd46c2a5a0ace9e8ae72b647da6857436d8eef"
+content-hash = "5b06c3cedb0761015c0edc4ff52235801486b7b52c5a500613e7e1ba59b40199"

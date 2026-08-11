@@ -3,14 +3,8 @@ name: JS Package CI
 on:
   push:
     branches: ["main", "develop"]
-    paths:
-      - "packages/js/**"
-      - ".github/workflows/js-ci.yml"
   pull_request:
     branches: ["main", "develop"]
-    paths:
-      - "packages/js/**"
-      - ".github/workflows/js-ci.yml"
 
 permissions:
   contents: read
@@ -31,14 +25,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20.x, 22.x]
+        node-version: [20.11.0, 22.x]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -46,6 +42,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Audit locked dependencies for high-severity vulnerabilities
+        run: npm audit --audit-level=high
 
       - name: Run tests
         run: npm test
@@ -59,6 +58,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify the private package and exact tarball boundary
+        run: npm run check:package-boundary
+
       - name: Smoke-test the packed tarball as a consumer
         shell: bash
         run: |
@@ -68,7 +70,7 @@ jobs:
           mkdir -p "$consumer_dir"
           cd "$consumer_dir"
           npm init --yes
-          npm install "$RUNNER_TEMP/$tarball"
+          npm install --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP/$tarball"
           node - <<'NODE'
           const root = require('explainiverse-js-experimental');
           const core = require('explainiverse-js-experimental/core');
@@ -91,3 +93,100 @@ jobs:
             }
           }
           NODE
+
+  react-peer-floor:
+    name: React 18 peer floor (Node.js 20.11.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: packages/js
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 20.11.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.11.0
+
+      - name: Build the private package tarball
+        run: |
+          npm ci
+          npm run build
+          npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/explainiverse-pack.json"
+
+      - name: Exercise the declared React peer floor in a clean consumer
+        shell: bash
+        run: |
+          tarball="$(node -e "const fs = require('fs'); const result = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); process.stdout.write(result[0].filename);" "$RUNNER_TEMP/explainiverse-pack.json")"
+          consumer_dir="$RUNNER_TEMP/explainiverse-react18-consumer"
+          mkdir -p "$consumer_dir"
+          cd "$consumer_dir"
+          npm init --yes
+          npm install --ignore-scripts --no-audit --no-fund \
+            react@18.0.0 react-dom@18.0.0 "$RUNNER_TEMP/$tarball"
+          node - <<'NODE'
+          const React = require('react');
+          const installedReactVersion = require('react/package.json').version;
+          const { renderToStaticMarkup } = require('react-dom/server');
+          const { Explanation } = require('explainiverse-js-experimental/core');
+          const { ExplanationVisualizer } = require('explainiverse-js-experimental/visualizer');
+
+          if (installedReactVersion !== '18.0.0') {
+            throw new Error(`expected the declared React floor, received ${installedReactVersion}`);
+          }
+          const explanation = new Explanation('PeerFloor', 'accepted', {
+            feature_attributions: { evidence: 1 },
+          });
+          const markup = renderToStaticMarkup(
+            React.createElement(ExplanationVisualizer, { explanation }),
+          );
+          if (!markup.includes('Experimental Attribution View') || !markup.includes('evidence')) {
+            throw new Error('React 18 peer-floor render omitted the expected visualizer content');
+          }
+          NODE
+
+  real-browser-demo:
+    name: Real-browser demo and automated accessibility (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: packages/js
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 20.11.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.11.0
+          cache: npm
+          cache-dependency-path: packages/js/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install the locked Playwright browser engines
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Build and exercise the production demo in real browsers
+        run: npm run test:browser
+
+      - name: Preserve browser failures, traces, and accessibility output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: playwright-demo-evidence
+          path: |
+            packages/js/playwright-report
+            packages/js/test-results
+          if-no-files-found: ignore
+          retention-days: 30

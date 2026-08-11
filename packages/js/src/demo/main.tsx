@@ -126,6 +126,7 @@ function DemoApp() {
                 </p>
             </header>
 
+            <main>
             <div style={styles.controls}>
                 <div style={styles.grid}>
                     {/* Task Selection */}
@@ -254,8 +255,13 @@ function DemoApp() {
             </div>
 
             <div style={styles.visualizerContainer}>
+                <p aria-live="polite" role="status" style={styles.visuallyHidden}>
+                    Showing {Object.keys(features).length} synthetic attributions for{' '}
+                    {selectedClass} using the {selectedExplainer} label.
+                </p>
                 <ExplanationVisualizer key={`${selectedTask}-${selectedModel}-${selectedClass}`} explanation={getCurrentExplanation()} />
             </div>
+            </main>
 
             <footer style={styles.footer}>
                 <p>Model: <strong>{selectedModel}</strong> | Task: <strong>{selectedTask}</strong></p>
@@ -267,6 +273,7 @@ function DemoApp() {
 const styles: Record<string, CSSProperties> = {
     container: {
         minHeight: '100vh',
+        boxSizing: 'border-box',
         backgroundColor: '#f3f4f6',
         padding: '40px 20px',
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
@@ -276,14 +283,15 @@ const styles: Record<string, CSSProperties> = {
         marginBottom: '40px',
     },
     mainTitle: {
-        fontSize: '42px',
+        fontSize: 'clamp(2rem, 10vw, 42px)',
         fontWeight: '800',
         color: '#111827',
         margin: '0 0 8px 0',
+        overflowWrap: 'anywhere',
     },
     subtitle: {
         fontSize: '18px',
-        color: '#6b7280',
+        color: '#4b5563',
         margin: 0,
     },
     disclosure: {
@@ -309,7 +317,7 @@ const styles: Record<string, CSSProperties> = {
     },
     grid: {
         display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
         gap: '20px',
     },
     inputGroup: {
@@ -336,6 +344,7 @@ const styles: Record<string, CSSProperties> = {
         border: '2px solid #e5e7eb',
         borderRadius: '8px',
         flex: 1,
+        minWidth: '140px',
     },
     divider: {
         height: '1px',
@@ -350,6 +359,7 @@ const styles: Record<string, CSSProperties> = {
     },
     featureInputRow: {
         display: 'flex',
+        flexWrap: 'wrap',
         gap: '8px',
         marginBottom: '16px',
     },
@@ -388,7 +398,7 @@ const styles: Record<string, CSSProperties> = {
         lineHeight: '1',
     },
     emptyState: {
-        color: '#9ca3af',
+        color: '#4b5563',
         fontStyle: 'italic',
         fontSize: '14px',
     },
@@ -410,7 +420,7 @@ const styles: Record<string, CSSProperties> = {
     footer: {
         textAlign: 'center',
         marginTop: '40px',
-        color: '#9ca3af',
+        color: '#4b5563',
         fontSize: '14px',
     },
 

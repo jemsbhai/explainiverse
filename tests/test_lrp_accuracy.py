@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from types import MethodType
 
 import numpy as np
 import pytest
@@ -669,6 +670,13 @@ def test_sequential_subclass_with_overridden_graph_is_rejected():
         LRPExplainer(_adapter(model, task="regression"), ["x0", "x1"])
 
 
+def test_reused_layer_is_rejected_before_model_work():
+    shared = nn.Linear(2, 2, bias=False)
+    model = nn.Sequential(shared, nn.ReLU(), shared, nn.Linear(2, 1, bias=False))
+    with pytest.raises(TypeError, match="Layer 2 is reused; shared modules are unsupported"):
+        LRPExplainer(_adapter(model, task="regression"), ["x0", "x1"])
+
+
 def test_batchnorm_without_running_statistics_is_rejected():
     model = nn.Sequential(nn.BatchNorm1d(2, track_running_stats=False), nn.Linear(2, 1))
 
@@ -681,3 +689,85 @@ def test_maxpool_returning_indices_is_rejected():
 
     with pytest.raises(TypeError, match="return_indices"):
         LRPExplainer(_adapter(model, task="regression"), [f"p{i}" for i in range(4)])
+
+
+def _integrity_lrp_model():
+    output = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        output.weight.copy_(torch.tensor([[1.0, 0.0]]))
+    return nn.Sequential(nn.ReLU(), output)
+
+
+def test_lrp_canonical_forward_rejects_wrong_feature_swap_and_clean_control():
+    model = _integrity_lrp_model()
+    model[0].forward = MethodType(lambda self, values: torch.relu(values.flip(1)), model[0])
+    with pytest.raises(RuntimeError, match="instance-shadowed forward"):
+        LRPExplainer(_adapter(model, task="regression"), ["x0", "x1"])
+
+    clean = LRPExplainer(
+        _adapter(_integrity_lrp_model(), task="regression"),
+        ["x0", "x1"],
+        epsilon=0.0,
+    ).explain(np.array([2.0, 3.0], dtype=np.float32), target_class=0)
+    np.testing.assert_allclose(clean.explanation_data["attributions_raw"], [2.0, 0.0])
+
+
+@pytest.mark.parametrize("target", ["root_forward", "root_hook", "relu_call_impl"])
+def test_lrp_root_and_call_pipeline_integrity_fail_closed(target):
+    model = _integrity_lrp_model()
+    if target == "root_forward":
+        model.forward = MethodType(lambda self, values: values.flip(1), model)
+    elif target == "root_hook":
+        model.register_forward_hook(lambda _module, _inputs, output: output.flip(1))
+    else:
+        model[0]._call_impl = MethodType(lambda self, values: values * values, model[0])
+
+    with pytest.raises(RuntimeError, match="instance-shadowed|pre-existing"):
+        LRPExplainer(_adapter(model, task="regression"), ["x0", "x1"])
+
+
+@pytest.mark.parametrize(
+    "registry_name",
+    [
+        "_state_dict_pre_hooks",
+        "_state_dict_hooks",
+        "_load_state_dict_pre_hooks",
+        "_load_state_dict_post_hooks",
+    ],
+)
+def test_lrp_rejects_state_io_hooks_used_by_captum_restoration(registry_name):
+    model = _integrity_lrp_model()
+    object.__getattribute__(model, "__dict__")[registry_name][12345] = lambda *_args: None
+
+    with pytest.raises(RuntimeError, match=registry_name):
+        LRPExplainer(_adapter(model, task="regression"), ["x0", "x1"])
+
+
+@pytest.mark.parametrize("mutation", ["replace_child", "forward", "hook", "call_impl"])
+def test_lrp_post_construction_mutations_are_revalidated_before_model_work(mutation):
+    model = _integrity_lrp_model()
+    explainer = LRPExplainer(_adapter(model, task="regression"), ["x0", "x1"])
+    if mutation == "replace_child":
+        model[0] = nn.Sigmoid()
+        match = "model graph changed"
+    elif mutation == "forward":
+        model[0].forward = MethodType(lambda self, values: values.flip(1), model[0])
+        match = "instance-shadowed forward"
+    elif mutation == "hook":
+        model[0].register_full_backward_hook(lambda _module, grad_input, _grad_output: grad_input)
+        match = "pre-existing"
+    else:
+        model[0]._call_impl = MethodType(lambda self, values: values * values, model[0])
+        match = "instance-shadowed _call_impl"
+
+    with pytest.raises(RuntimeError, match=match):
+        explainer.explain(np.array([2.0, 3.0], dtype=np.float32), target_class=0)
+
+
+def test_lrp_class_forward_monkeypatch_is_not_blessed(monkeypatch):
+    model = _integrity_lrp_model()
+    explainer = LRPExplainer(_adapter(model, task="regression"), ["x0", "x1"])
+    monkeypatch.setattr(nn.ReLU, "forward", lambda self, values: values.flip(1))
+
+    with pytest.raises(RuntimeError, match="canonical forward"):
+        explainer.explain(np.array([2.0, 3.0], dtype=np.float32), target_class=0)

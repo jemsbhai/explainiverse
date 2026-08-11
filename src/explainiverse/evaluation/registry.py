@@ -20,7 +20,17 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 @dataclass(frozen=True)
 class MetricMeta:
-    """Audit and interpretation metadata for one evaluation endpoint."""
+    """Audit and interpretation metadata for one evaluation endpoint.
+
+    ``stochasticity`` describes randomness introduced or explicitly
+    orchestrated by the endpoint itself:
+    ``"deterministic"`` introduces none, ``"conditional"`` uses a random or
+    potentially random branch only for some arguments/data, and
+    ``"stochastic"`` always performs sampling/randomisation. It cannot certify
+    hidden randomness inside arbitrary caller-supplied models, explainers, or
+    callbacks beyond that declared protocol. The legacy ``stochastic`` boolean
+    remains true for both non-deterministic categories.
+    """
 
     family: str
     level: str
@@ -30,10 +40,12 @@ class MetricMeta:
     score_direction: str = "contextual"
     stochastic: bool = False
     paper_reference: Optional[str] = None
+    stochasticity: str = "deterministic"
 
     _VALID_LEVELS = {"instance", "batch", "dataset"}
     _VALID_STATUSES = {"verified", "quarantined", "unverified"}
     _VALID_DIRECTIONS = {"higher", "lower", "zero", "contextual", "none"}
+    _VALID_STOCHASTICITY = {"deterministic", "conditional", "stochastic"}
 
     def __post_init__(self) -> None:
         for name in ("family", "claim_scope"):
@@ -49,6 +61,14 @@ class MetricMeta:
         for name in ("canonical_claim", "stochastic"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a boolean")
+        if self.stochasticity not in self._VALID_STOCHASTICITY:
+            raise ValueError(f"stochasticity must be one of {sorted(self._VALID_STOCHASTICITY)}")
+        # Preserve the historical boolean while exposing whether randomness is
+        # unconditional or activated only by a mode/data-dependent branch.
+        if self.stochastic and self.stochasticity == "deterministic":
+            object.__setattr__(self, "stochasticity", "stochastic")
+        elif not self.stochastic and self.stochasticity != "deterministic":
+            raise ValueError("non-deterministic stochasticity requires stochastic=True")
         if self.paper_reference is not None and (
             not isinstance(self.paper_reference, str) or not self.paper_reference.strip()
         ):
@@ -63,6 +83,7 @@ class MetricMeta:
         level: Optional[str] = None,
         claim_status: Optional[str] = None,
         canonical_claim: Optional[bool] = None,
+        stochasticity: Optional[str] = None,
     ) -> bool:
         """Return whether this entry matches validated discovery criteria."""
 
@@ -74,11 +95,16 @@ class MetricMeta:
             raise ValueError(f"claim_status must be one of {sorted(self._VALID_STATUSES)}")
         if canonical_claim is not None and not isinstance(canonical_claim, bool):
             raise TypeError("canonical_claim must be a boolean or None")
+        if stochasticity is not None and stochasticity not in self._VALID_STOCHASTICITY:
+            raise ValueError(
+                f"stochasticity must be one of {sorted(self._VALID_STOCHASTICITY)} or None"
+            )
         return (
             (family is None or self.family == family)
             and (level is None or self.level == level)
             and (claim_status is None or self.claim_status == claim_status)
             and (canonical_claim is None or self.canonical_claim == canonical_claim)
+            and (stochasticity is None or self.stochasticity == stochasticity)
         )
 
 
@@ -140,6 +166,7 @@ class MetricRegistry:
         level: Optional[str] = None,
         claim_status: Optional[str] = None,
         canonical_claim: Optional[bool] = None,
+        stochasticity: Optional[str] = None,
     ) -> List[str]:
         # Validate even when the registry is empty.
         probe = MetricMeta(
@@ -153,6 +180,7 @@ class MetricRegistry:
             level=level,
             claim_status=claim_status,
             canonical_claim=canonical_claim,
+            stochasticity=stochasticity,
         )
         return [
             name
@@ -162,6 +190,7 @@ class MetricRegistry:
                 level=level,
                 claim_status=claim_status,
                 canonical_claim=canonical_claim,
+                stochasticity=stochasticity,
             )
         ]
 
@@ -206,18 +235,305 @@ _FAMILY_BY_MODULE = {
 }
 
 
-_STOCHASTIC_FRAGMENTS = {
-    "aopc",
-    "data_randomisation",
-    "faithfulness_estimate",
-    "infidelity",
-    "lipschitz_estimate",
-    "max_sensitivity",
-    "avg_sensitivity",
-    "mprt",
-    "random_logit",
-    "roar",
-    "sensitivity_n",
+_ALL_REVIEWED_ENDPOINTS = (
+    "compute_aopc",
+    "compute_batch_aopc",
+    "compute_roar",
+    "compute_roar_curve",
+    "compute_pgi",
+    "compute_pgu",
+    "compute_faithfulness_score",
+    "compute_comprehensiveness",
+    "compute_sufficiency",
+    "compute_faithfulness_correlation",
+    "compute_batch_faithfulness",
+    "compute_ris",
+    "compute_ros",
+    "compute_lipschitz_estimate",
+    "compute_stability_metrics",
+    "compute_batch_stability",
+    "compute_faithfulness_estimate",
+    "compute_batch_faithfulness_estimate",
+    "compute_monotonicity",
+    "compute_batch_monotonicity",
+    "compute_monotonicity_nguyen",
+    "compute_batch_monotonicity_nguyen",
+    "compute_pixel_flipping",
+    "compute_batch_pixel_flipping",
+    "compute_region_perturbation",
+    "compute_batch_region_perturbation",
+    "compute_selectivity",
+    "compute_batch_selectivity",
+    "compute_sensitivity_n",
+    "compute_sensitivity_n_multi",
+    "compute_batch_sensitivity_n",
+    "compute_irof",
+    "compute_irof_multi_segment",
+    "compute_batch_irof",
+    "compute_infidelity",
+    "compute_infidelity_multi_perturbation",
+    "compute_batch_infidelity",
+    "compute_road",
+    "compute_road_combined",
+    "compute_batch_road",
+    "compute_deletion_auc",
+    "compute_batch_deletion_auc",
+    "compute_insertion_auc",
+    "compute_batch_insertion_auc",
+    "compute_insertion_deletion_auc",
+    "compute_max_sensitivity",
+    "compute_batch_max_sensitivity",
+    "compute_avg_sensitivity",
+    "compute_batch_avg_sensitivity",
+    "compute_continuity",
+    "compute_batch_continuity",
+    "compute_consistency",
+    "compute_batch_consistency",
+    "compute_relative_input_stability",
+    "compute_batch_relative_input_stability",
+    "compute_relative_representation_stability",
+    "compute_batch_relative_representation_stability",
+    "compute_relative_output_stability",
+    "compute_batch_relative_output_stability",
+    "compute_relative_stability",
+    "compute_batch_relative_stability",
+    "compute_feature_agreement",
+    "compute_batch_feature_agreement",
+    "compute_rank_agreement",
+    "compute_batch_rank_agreement",
+    "compute_sparseness",
+    "compute_batch_sparseness",
+    "compute_complexity",
+    "compute_batch_complexity",
+    "compute_attribution_threshold_count",
+    "compute_batch_attribution_threshold_count",
+    "compute_effective_complexity",
+    "compute_batch_effective_complexity",
+    "compute_pointing_game",
+    "compute_batch_pointing_game",
+    "compute_attribution_localisation",
+    "compute_batch_attribution_localisation",
+    "compute_top_k_intersection",
+    "compute_batch_top_k_intersection",
+    "compute_relevance_mass_accuracy",
+    "compute_batch_relevance_mass_accuracy",
+    "compute_relevance_rank_accuracy",
+    "compute_batch_relevance_rank_accuracy",
+    "compute_auc",
+    "compute_batch_auc",
+    "compute_energy_based_pointing_game",
+    "compute_batch_energy_based_pointing_game",
+    "compute_focus",
+    "compute_batch_focus",
+    "compute_attribution_iou",
+    "compute_batch_attribution_iou",
+    "compute_mprt",
+    "compute_mprt_score",
+    "compute_batch_mprt",
+    "compute_random_logit",
+    "compute_random_logit_score",
+    "compute_batch_random_logit",
+    "compute_smooth_mprt",
+    "compute_batch_smooth_mprt",
+    "compute_efficient_mprt",
+    "compute_batch_efficient_mprt",
+    "compute_data_randomisation",
+    "compute_data_randomisation_score",
+    "compute_batch_data_randomisation",
+    "compute_completeness",
+    "compute_completeness_score",
+    "compute_batch_completeness",
+    "compute_non_sensitivity",
+    "compute_non_sensitivity_score",
+    "compute_batch_non_sensitivity",
+    "compute_input_invariance",
+    "compute_input_invariance_pytorch",
+    "compute_batch_input_invariance",
+    "compute_batch_input_invariance_pytorch",
+    "compute_symmetry",
+    "compute_symmetry_score",
+    "compute_batch_symmetry",
+    "compute_group_metric_disparity",
+    "compute_group_fairness",
+    "compute_group_fairness_score",
+    "compute_batch_group_fairness",
+    "compute_cross_group_lipschitz_diagnostic",
+    "compute_individual_fairness",
+    "compute_sensitive_attribution_change",
+    "compute_counterfactual_fairness",
+    "compute_fidelity_gap",
+    "compute_fidelity_disparity",
+    "compute_sensitive_attribution_gap",
+    "compute_attribution_parity",
+    "compute_prediction_conditioned_metric_disparity",
+    "compute_conditional_fairness",
+)
+
+# Level describes the unit represented by one result, not a spelling pattern.
+# In particular, aggregate randomisation tests and Consistency consume a cohort
+# and are dataset-level even though some historical names omit/contain "batch".
+_BATCH_ENDPOINTS = {
+    "compute_batch_aopc",
+    "compute_batch_faithfulness",
+    "compute_batch_stability",
+    "compute_batch_faithfulness_estimate",
+    "compute_batch_monotonicity",
+    "compute_batch_monotonicity_nguyen",
+    "compute_batch_pixel_flipping",
+    "compute_batch_region_perturbation",
+    "compute_batch_selectivity",
+    "compute_batch_sensitivity_n",
+    "compute_batch_irof",
+    "compute_batch_infidelity",
+    "compute_batch_road",
+    "compute_batch_deletion_auc",
+    "compute_batch_insertion_auc",
+    "compute_batch_max_sensitivity",
+    "compute_batch_avg_sensitivity",
+    "compute_batch_continuity",
+    "compute_batch_relative_input_stability",
+    "compute_batch_relative_representation_stability",
+    "compute_batch_relative_output_stability",
+    "compute_batch_relative_stability",
+    "compute_batch_feature_agreement",
+    "compute_batch_rank_agreement",
+    "compute_batch_sparseness",
+    "compute_batch_complexity",
+    "compute_batch_attribution_threshold_count",
+    "compute_batch_effective_complexity",
+    "compute_batch_pointing_game",
+    "compute_batch_attribution_localisation",
+    "compute_batch_top_k_intersection",
+    "compute_batch_relevance_mass_accuracy",
+    "compute_batch_relevance_rank_accuracy",
+    "compute_batch_auc",
+    "compute_batch_energy_based_pointing_game",
+    "compute_batch_focus",
+    "compute_batch_attribution_iou",
+    "compute_batch_mprt",
+    "compute_batch_random_logit",
+    "compute_batch_smooth_mprt",
+    "compute_batch_efficient_mprt",
+    "compute_batch_data_randomisation",
+    "compute_batch_completeness",
+    "compute_batch_non_sensitivity",
+    "compute_batch_input_invariance",
+    "compute_batch_input_invariance_pytorch",
+    "compute_batch_symmetry",
+    "compute_batch_group_fairness",
+}
+
+_DATASET_ENDPOINTS = {
+    "compute_roar",
+    "compute_roar_curve",
+    "compute_consistency",
+    "compute_batch_consistency",
+    "compute_mprt",
+    "compute_random_logit",
+    "compute_smooth_mprt",
+    "compute_efficient_mprt",
+    "compute_data_randomisation",
+    "compute_group_metric_disparity",
+    "compute_group_fairness",
+    "compute_group_fairness_score",
+    "compute_cross_group_lipschitz_diagnostic",
+    "compute_individual_fairness",
+    "compute_sensitive_attribution_change",
+    "compute_counterfactual_fairness",
+    "compute_fidelity_gap",
+    "compute_fidelity_disparity",
+    "compute_sensitive_attribution_gap",
+    "compute_attribution_parity",
+    "compute_prediction_conditioned_metric_disparity",
+    "compute_conditional_fairness",
+}
+
+_STOCHASTIC_ENDPOINTS = {
+    "compute_ris",
+    "compute_ros",
+    "compute_lipschitz_estimate",
+    "compute_stability_metrics",
+    "compute_batch_stability",
+    "compute_faithfulness_estimate",
+    "compute_batch_faithfulness_estimate",
+    "compute_sensitivity_n",
+    "compute_sensitivity_n_multi",
+    "compute_batch_sensitivity_n",
+    "compute_infidelity",
+    "compute_infidelity_multi_perturbation",
+    "compute_batch_infidelity",
+    "compute_road",
+    "compute_road_combined",
+    "compute_batch_road",
+    "compute_max_sensitivity",
+    "compute_batch_max_sensitivity",
+    "compute_avg_sensitivity",
+    "compute_batch_avg_sensitivity",
+    "compute_relative_input_stability",
+    "compute_batch_relative_input_stability",
+    "compute_relative_representation_stability",
+    "compute_batch_relative_representation_stability",
+    "compute_relative_output_stability",
+    "compute_batch_relative_output_stability",
+    "compute_relative_stability",
+    "compute_batch_relative_stability",
+    "compute_mprt",
+    "compute_batch_mprt",
+    "compute_random_logit",
+    "compute_batch_random_logit",
+    "compute_smooth_mprt",
+    "compute_batch_smooth_mprt",
+    "compute_efficient_mprt",
+    "compute_batch_efficient_mprt",
+}
+
+_CONDITIONALLY_STOCHASTIC_ENDPOINTS = {
+    "compute_roar",
+    "compute_roar_curve",
+    "compute_faithfulness_correlation",
+    "compute_consistency",
+    "compute_batch_consistency",
+    "compute_input_invariance",
+    "compute_input_invariance_pytorch",
+    "compute_batch_input_invariance",
+    "compute_batch_input_invariance_pytorch",
+    "compute_cross_group_lipschitz_diagnostic",
+    "compute_individual_fairness",
+}
+
+if len(_ALL_REVIEWED_ENDPOINTS) != len(set(_ALL_REVIEWED_ENDPOINTS)):
+    raise RuntimeError("reviewed metric endpoint manifest contains duplicates")
+if _BATCH_ENDPOINTS & _DATASET_ENDPOINTS:
+    raise RuntimeError("a metric endpoint cannot have both batch and dataset level")
+if _STOCHASTIC_ENDPOINTS & _CONDITIONALLY_STOCHASTIC_ENDPOINTS:
+    raise RuntimeError("metric stochasticity classifications must be disjoint")
+for _classification in (
+    _BATCH_ENDPOINTS,
+    _DATASET_ENDPOINTS,
+    _STOCHASTIC_ENDPOINTS,
+    _CONDITIONALLY_STOCHASTIC_ENDPOINTS,
+):
+    if not _classification <= set(_ALL_REVIEWED_ENDPOINTS):
+        raise RuntimeError("metric behavior classification names an unreviewed endpoint")
+
+_ENDPOINT_BEHAVIOR = {
+    endpoint: (
+        (
+            "dataset"
+            if endpoint in _DATASET_ENDPOINTS
+            else "batch" if endpoint in _BATCH_ENDPOINTS else "instance"
+        ),
+        (
+            "stochastic"
+            if endpoint in _STOCHASTIC_ENDPOINTS
+            else (
+                "conditional"
+                if endpoint in _CONDITIONALLY_STOCHASTIC_ENDPOINTS
+                else "deterministic"
+            )
+        ),
+    )
+    for endpoint in _ALL_REVIEWED_ENDPOINTS
 }
 
 
@@ -333,13 +649,14 @@ def infer_metric_meta(name: str, metric_fn: Callable[..., Any]) -> MetricMeta:
         raise ValueError("metric names must start with 'compute_'")
     if not callable(metric_fn):
         raise TypeError("metric_fn must be callable")
+    if name not in _ENDPOINT_BEHAVIOR:
+        raise ValueError(
+            f"Metric {name!r} has no reviewed level/stochasticity metadata; "
+            "add it to the explicit endpoint manifest before registration"
+        )
     module_name = getattr(metric_fn, "__module__", "").rsplit(".", 1)[-1]
     family = _FAMILY_BY_MODULE.get(module_name, "unclassified evaluation")
-    level = "batch" if name.startswith("compute_batch_") else "instance"
-    if family == "fairness-related" and level != "batch":
-        level = "dataset"
-    if name in {"compute_roar", "compute_roar_curve", "compute_data_randomisation"}:
-        level = "dataset"
+    level, stochasticity = _ENDPOINT_BEHAVIOR[name]
 
     if name in _NONCANONICAL_SCOPES:
         scope = _NONCANONICAL_SCOPES[name]
@@ -355,7 +672,7 @@ def infer_metric_meta(name: str, metric_fn: Callable[..., Any]) -> MetricMeta:
         canonical = False
 
     status = "quarantined" if name in _QUARANTINED_ENDPOINTS else "verified"
-    stochastic = any(token in name for token in _STOCHASTIC_FRAGMENTS)
+    stochastic = stochasticity != "deterministic"
     if name in _LOWER_IS_BETTER:
         direction = "lower"
     elif name in _HIGHER_IS_BETTER:
@@ -371,6 +688,7 @@ def infer_metric_meta(name: str, metric_fn: Callable[..., Any]) -> MetricMeta:
         canonical_claim=canonical and status == "verified",
         score_direction=direction,
         stochastic=stochastic,
+        stochasticity=stochasticity,
     )
 
 
@@ -384,6 +702,14 @@ def build_metric_registry(
     for name in names:
         if name not in namespace:
             raise ValueError(f"Public metric {name!r} is missing from the namespace")
+    missing_review = sorted(set(names) - set(_ENDPOINT_BEHAVIOR))
+    stale_review = sorted(set(_ENDPOINT_BEHAVIOR) - set(names))
+    if missing_review or stale_review:
+        raise ValueError(
+            "Reviewed metric metadata inventory mismatch: "
+            f"missing_review={missing_review}, stale_review={stale_review}"
+        )
+    for name in names:
         metric_fn = namespace[name]
         registry.register(name, metric_fn, infer_metric_meta(name, metric_fn))
     registry.validate_inventory(names)

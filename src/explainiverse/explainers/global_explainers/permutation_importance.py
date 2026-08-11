@@ -18,7 +18,11 @@ from sklearn.metrics import accuracy_score, r2_score
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
-from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers._validation import (
+    as_real_array,
+    get_prediction_output_kind,
+    validate_name_sequence,
+)
 
 _VALID_TASKS = {"classification", "regression"}
 
@@ -98,6 +102,8 @@ class PermutationImportanceExplainer(BaseExplainer):
             raise ValueError("n_repeats must be at least 1")
         if not isinstance(random_state, Integral) or isinstance(random_state, bool):
             raise TypeError("random_state must be an integer")
+        if random_state < 0 or random_state > 2**32 - 1:
+            raise ValueError("random_state must be between 0 and 2**32 - 1")
         if scoring_fn is not None and not callable(scoring_fn):
             raise TypeError("scoring_fn must be callable or None")
 
@@ -134,6 +140,27 @@ class PermutationImportanceExplainer(BaseExplainer):
 
     def _classification_labels(self, predictions: np.ndarray) -> np.ndarray:
         """Convert adapter prediction scores to labels without label-index guesses."""
+        output_kind = get_prediction_output_kind(self.model)
+        if output_kind == "regression_values":
+            raise ValueError(
+                "Classification scoring is incompatible with regression_values outputs"
+            )
+        if output_kind == "class_labels":
+            labels = np.asarray(predictions)
+            if labels.ndim != 1 or labels.shape[0] != self.X.shape[0]:
+                raise ValueError("Hard class-label predictions must have shape (n_samples,)")
+            declared_classes = getattr(self.model, "classes_", None)
+            if declared_classes is None:
+                declared_classes = getattr(getattr(self.model, "model", None), "classes_", None)
+            classes = np.asarray(
+                np.unique(self.y) if declared_classes is None else declared_classes
+            )
+            if classes.ndim != 1 or classes.size == 0:
+                raise ValueError("Classification classes must be a non-empty 1D array")
+            if not np.all(np.isin(labels, classes)):
+                raise ValueError("Hard class-label predictions contain unknown labels")
+            return labels.copy()
+
         predictions = as_real_array(
             predictions,
             name="classification predictions",
@@ -159,9 +186,15 @@ class PermutationImportanceExplainer(BaseExplainer):
                     "A one-column classification output must contain P(class 1) " "values in [0, 1]"
                 )
             classes = self._class_values(2)
-            return classes[(probabilities >= 0.5).astype(int)]
+            # Match argmax([1 - p, p]): an exact tie selects the first class.
+            return classes[(probabilities > 0.5).astype(int)]
 
         classes = self._class_values(predictions.shape[1])
+        if output_kind == "probabilities":
+            if np.any((predictions < 0.0) | (predictions > 1.0)):
+                raise ValueError("Declared classification probabilities must lie in [0, 1]")
+            if not np.allclose(predictions.sum(axis=1), 1.0, atol=1e-6, rtol=1e-6):
+                raise ValueError("Declared classification probability rows must sum to 1")
         return classes[np.argmax(predictions, axis=1)]
 
     def _regression_values(self, predictions: np.ndarray) -> np.ndarray:

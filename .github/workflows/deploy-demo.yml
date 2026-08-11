@@ -7,49 +7,107 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: "pages"
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
+    name: Build and upload the Pages artifact
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: packages/js
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          node-version: "20.11.0"
           cache: "npm"
           cache-dependency-path: packages/js/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit locked dependencies for high-severity vulnerabilities
+        run: npm audit --audit-level=high
+
+      - name: Run unit, type, lint, and library build gates
+        run: |
+          npm test
+          npm run typecheck
+          npm run lint
+          npm run build
+          npm run check:package-boundary
+
       - name: Build Demo
         run: npm run build:demo
         env:
           GITHUB_PAGES: "true"
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+      - name: Record the exact deployable tree
+        shell: bash
+        run: |
+          mkdir -p artifacts/deployment
+          demo_file_count=$(find dist/demo -type f | wc -l)
+          test "$demo_file_count" -gt 0
+          find dist/demo -type f -print0 | sort -z | xargs -0 -r sha256sum \
+            > artifacts/deployment/demo-files.sha256
+          sha256sum artifacts/deployment/demo-files.sha256 \
+            > artifacts/deployment/demo-tree.sha256
+          node - <<'NODE'
+          const { readFileSync, writeFileSync } = require('node:fs');
+          const treeHash = readFileSync('artifacts/deployment/demo-tree.sha256', 'utf8')
+            .trim().split(/\s+/)[0];
+          const record = {
+            schema_version: 1,
+            commit: process.env.GITHUB_SHA,
+            workflow_run_id: Number(process.env.GITHUB_RUN_ID),
+            workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            demo_tree_sha256: treeHash,
+          };
+          writeFileSync(
+            'artifacts/deployment/deployment-evidence.json',
+            `${JSON.stringify(record, null, 2)}\n`,
+          );
+          NODE
+
+      - name: Retain the exact deployment evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: demo-deployment-evidence-${{ github.sha }}
+          path: packages/js/artifacts/deployment/*
+          if-no-files-found: error
+          retention-days: 180
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: "packages/js/dist/demo"
 
+  deploy:
+    name: Deploy the prebuilt Pages artifact
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Setup Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

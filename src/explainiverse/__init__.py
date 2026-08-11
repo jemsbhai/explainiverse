@@ -26,21 +26,32 @@ For PyTorch models:
 from explainiverse.adapters import TORCH_AVAILABLE
 from explainiverse.adapters.sklearn_adapter import SklearnAdapter
 from explainiverse.core.explainer import BaseExplainer
-from explainiverse.core.explanation import Explanation
+from explainiverse.core.explanation import EXPLANATION_WIRE_SCHEMA_VERSION, Explanation
 from explainiverse.core.registry import (
     ExplainerMeta,
     ExplainerRegistry,
     default_registry,
     get_default_registry,
 )
+from explainiverse.core.scaled_detail import (
+    SCALED_DETAIL_SCHEMA_VERSION,
+    DetailRepresentationError,
+    decode_scaled_detail,
+    encode_scaled_detail,
+)
 from explainiverse.engine.suite import ExplanationSuite
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 __all__ = [
     # Core
     "BaseExplainer",
     "Explanation",
+    "EXPLANATION_WIRE_SCHEMA_VERSION",
+    "DetailRepresentationError",
+    "SCALED_DETAIL_SCHEMA_VERSION",
+    "encode_scaled_detail",
+    "decode_scaled_detail",
     # Registry
     "ExplainerRegistry",
     "ExplainerMeta",

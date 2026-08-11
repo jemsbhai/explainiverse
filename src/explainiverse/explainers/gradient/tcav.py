@@ -54,16 +54,18 @@ Example:
     )
 """
 
-from collections import defaultdict
+import copy
 from itertools import combinations
 from numbers import Integral
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union, overload
+from types import MappingProxyType
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union, overload
 
 import numpy as np
 
-from explainiverse.core.explainer import BaseExplainer
+from explainiverse.core.explainer import BaseExplainer, synchronized_explainer_method
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._input import scale_safe_product_sum
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 # Check if sklearn is available for linear classifier
@@ -102,6 +104,23 @@ def _check_scipy():
         )
 
 
+def _normalize_cav_vector(vector: np.ndarray) -> np.ndarray:
+    """Normalize one finite non-zero CAV without norm under/overflow."""
+
+    scale = float(np.max(np.abs(vector)))
+    if scale == 0.0:
+        raise ValueError("CAV vector must be non-zero")
+    scaled = vector / scale
+    scaled_norm_squared = float(scale_safe_product_sum(scaled, scaled, axis=0))
+    scaled_norm = float(np.sqrt(scaled_norm_squared))
+    if not np.isfinite(scaled_norm) or scaled_norm == 0.0:
+        raise ValueError("CAV vector must have a finite non-zero direction")
+    normalized = scaled / scaled_norm
+    if not np.all(np.isfinite(normalized)):
+        raise ValueError("CAV vector normalization produced non-finite values")
+    return normalized
+
+
 class ConceptActivationVector:
     """
     Represents a learned Concept Activation Vector (CAV).
@@ -119,6 +138,24 @@ class ConceptActivationVector:
             training data for very small sets (identified in metadata)
         metadata: Additional training information
     """
+
+    _concept_name: str
+    _layer_name: str
+    _vector: np.ndarray
+    _classifier: Any
+    _accuracy: float
+    _metadata: Dict[str, Any]
+    _sealed: bool
+
+    __slots__ = (
+        "_concept_name",
+        "_layer_name",
+        "_vector",
+        "_classifier",
+        "_accuracy",
+        "_metadata",
+        "_sealed",
+    )
 
     def __init__(
         self,
@@ -142,20 +179,85 @@ class ConceptActivationVector:
         )
         if vector_array.ndim != 1 or vector_array.size == 0:
             raise ValueError("CAV vector must be a non-empty one-dimensional array")
-        norm = float(np.linalg.norm(vector_array))
-        if not np.isfinite(norm) or norm == 0.0:
-            raise ValueError("CAV vector must be non-zero")
+        normalized_vector = _normalize_cav_vector(vector_array)
 
         accuracy_value = float(accuracy)
         if not np.isfinite(accuracy_value) or not 0.0 <= accuracy_value <= 1.0:
             raise ValueError("accuracy must be a finite value in [0, 1]")
 
-        self.concept_name: str = concept_name
-        self.layer_name: str = layer_name
-        self.vector: np.ndarray = vector_array / norm
-        self.classifier: Any = classifier
-        self.accuracy: float = accuracy_value
-        self.metadata: Dict[str, Any] = dict(metadata) if metadata is not None else {}
+        try:
+            owned_classifier = copy.deepcopy(classifier)
+            owned_metadata = copy.deepcopy(dict(metadata) if metadata is not None else {})
+        except Exception as error:
+            raise TypeError(
+                "CAV classifier and metadata must support defensive copying so learned "
+                "concept state cannot alias caller-owned mutable objects"
+            ) from error
+        owned_vector = normalized_vector.copy()
+        owned_vector.setflags(write=False)
+        object.__setattr__(self, "_concept_name", concept_name)
+        object.__setattr__(self, "_layer_name", layer_name)
+        object.__setattr__(self, "_vector", owned_vector)
+        object.__setattr__(self, "_classifier", owned_classifier)
+        object.__setattr__(self, "_accuracy", accuracy_value)
+        object.__setattr__(self, "_metadata", owned_metadata)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name, value) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("ConceptActivationVector snapshots are immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def concept_name(self) -> str:
+        return self._concept_name
+
+    @property
+    def layer_name(self) -> str:
+        return self._layer_name
+
+    @property
+    def vector(self) -> np.ndarray:
+        # A read-only copy prevents ``setflags(write=True)`` from exposing the
+        # internally owned CAV direction.
+        snapshot = self._vector.copy()
+        snapshot.setflags(write=False)
+        return snapshot
+
+    @property
+    def classifier(self) -> Any:
+        return copy.deepcopy(self._classifier)
+
+    @property
+    def accuracy(self) -> float:
+        return self._accuracy
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        return MappingProxyType(copy.deepcopy(self._metadata))
+
+    def clone(self) -> "ConceptActivationVector":
+        """Return a fully independent, bit-exact public snapshot."""
+
+        try:
+            owned_classifier = copy.deepcopy(self._classifier)
+            owned_metadata = copy.deepcopy(self._metadata)
+        except Exception as error:
+            raise TypeError(
+                "CAV classifier and metadata must support defensive copying so learned "
+                "concept state cannot alias caller-owned mutable objects"
+            ) from error
+        owned_vector = self._vector.copy()
+        owned_vector.setflags(write=False)
+        snapshot = object.__new__(ConceptActivationVector)
+        object.__setattr__(snapshot, "_concept_name", self._concept_name)
+        object.__setattr__(snapshot, "_layer_name", self._layer_name)
+        object.__setattr__(snapshot, "_vector", owned_vector)
+        object.__setattr__(snapshot, "_classifier", owned_classifier)
+        object.__setattr__(snapshot, "_accuracy", self._accuracy)
+        object.__setattr__(snapshot, "_metadata", owned_metadata)
+        object.__setattr__(snapshot, "_sealed", True)
+        return snapshot
 
     def __repr__(self):
         return (
@@ -194,6 +296,7 @@ class TCAVExplainer(BaseExplainer):
         cav_classifier: str = "logistic",
         random_seed: int = 42,
         require_logit_scores: bool = False,
+        layer_occurrence: Optional[int] = None,
     ):
         """
         Initialize the TCAV explainer.
@@ -212,6 +315,9 @@ class TCAVExplainer(BaseExplainer):
                 logit derivative contract. If False, other adapter-selected
                 score spaces remain available but are labeled as variants in
                 returned metadata.
+            layer_occurrence: Explicit zero-based execution occurrence when
+                the named layer is reused in one forward pass. ``None`` keeps
+                the adapter's fail-closed repeated-layer default.
         """
         _check_dependencies()
         super().__init__(model)
@@ -234,10 +340,14 @@ class TCAVExplainer(BaseExplainer):
             raise ValueError("layer_name must be a non-empty string")
         if cav_classifier not in {"logistic", "sgd"}:
             raise ValueError("cav_classifier must be 'logistic' or 'sgd'")
-        if not isinstance(random_seed, Integral) or isinstance(random_seed, bool):
-            raise TypeError("random_seed must be an integer")
+        random_seed = self._validate_random_seed(random_seed)
         if not isinstance(require_logit_scores, (bool, np.bool_)):
             raise TypeError("require_logit_scores must be a boolean")
+        if layer_occurrence is not None:
+            if not isinstance(layer_occurrence, Integral) or isinstance(layer_occurrence, bool):
+                raise TypeError("layer_occurrence must be a non-negative integer or None")
+            if int(layer_occurrence) < 0:
+                raise ValueError("layer_occurrence must be a non-negative integer or None")
         validated_classes = validate_name_sequence(
             class_names,
             name="class_names",
@@ -247,8 +357,11 @@ class TCAVExplainer(BaseExplainer):
         self.layer_name: str = layer_name
         self.class_names: Optional[List[str]] = validated_classes
         self.cav_classifier: str = cav_classifier
-        self.random_seed: int = int(random_seed)
+        self.random_seed: int = random_seed
         self.require_logit_scores: bool = bool(require_logit_scores)
+        self.layer_occurrence: Optional[int] = (
+            None if layer_occurrence is None else int(layer_occurrence)
+        )
         self.last_target_score_space: Optional[str] = None
         self.last_tcav_variant: Optional[str] = None
         self.last_tcav_is_canonical: Optional[bool] = None
@@ -266,8 +379,8 @@ class TCAVExplainer(BaseExplainer):
                 )
 
         # Storage for learned concepts
-        self.concepts: Dict[str, ConceptActivationVector] = {}
-        self.random_concepts: Dict[str, List[ConceptActivationVector]] = defaultdict(list)
+        self._concepts: Dict[str, ConceptActivationVector] = {}
+        self._random_concepts: Dict[str, Tuple[ConceptActivationVector, ...]] = {}
         # Repeated TCAV runs must retrain the named concept against multiple
         # random counterexample sets. Keep the already-extracted positive
         # bottleneck activations private so inference never substitutes the
@@ -281,6 +394,41 @@ class TCAVExplainer(BaseExplainer):
                 raise ValueError(
                     f"Layer '{layer_name}' not found. " f"Available layers: {available_layers}"
                 )
+
+    @property
+    def concepts(self) -> Mapping[str, ConceptActivationVector]:
+        """Immutable, defensively copied snapshot of learned concepts."""
+
+        with self._instance_lock:
+            return MappingProxyType({name: cav.clone() for name, cav in self._concepts.items()})
+
+    @property
+    def random_concepts(self) -> Mapping[str, Tuple[ConceptActivationVector, ...]]:
+        """Immutable, defensively copied snapshot of random CAV collections."""
+
+        with self._instance_lock:
+            return MappingProxyType(
+                {
+                    name: tuple(cav.clone() for cav in cavs)
+                    for name, cavs in self._random_concepts.items()
+                }
+            )
+
+    @staticmethod
+    def _validate_random_seed(value, *, name: str = "random_seed") -> int:
+        """Normalize a seed accepted by NumPy RandomState and scikit-learn."""
+        if not isinstance(value, Integral) or isinstance(value, bool):
+            raise TypeError(f"{name} must be an integer")
+        seed = int(value)
+        maximum = int(np.iinfo(np.uint32).max)
+        if seed < 0 or seed > maximum:
+            raise ValueError(f"{name} must be in [0, {maximum}]")
+        return seed
+
+    def _derived_seed(self, offset: int) -> int:
+        """Derive a reproducible RandomState seed without range overflow."""
+        modulus = int(np.iinfo(np.uint32).max) + 1
+        return (self.random_seed + int(offset)) % modulus
 
     def _get_activations(self, inputs: np.ndarray) -> np.ndarray:
         """
@@ -301,8 +449,15 @@ class TCAVExplainer(BaseExplainer):
             raise ValueError("inputs must contain at least one example")
 
         with preserve_adapter_model_eval(self.model, preserve_gradients=False):
+            occurrence_kwargs = (
+                {} if self.layer_occurrence is None else {"occurrence": self.layer_occurrence}
+            )
             activations = as_real_array(
-                self.model.get_layer_output(input_array, self.layer_name),
+                self.model.get_layer_output(
+                    input_array,
+                    self.layer_name,
+                    **occurrence_kwargs,
+                ),
                 name="bottleneck activations",
                 dtype=np.float64,
                 require_finite=True,
@@ -337,8 +492,14 @@ class TCAVExplainer(BaseExplainer):
             raise ValueError("inputs must contain at least one example")
 
         with preserve_adapter_model_eval(self.model):
+            occurrence_kwargs = (
+                {} if self.layer_occurrence is None else {"occurrence": self.layer_occurrence}
+            )
             _, gradients = self.model.get_layer_gradients(
-                input_array, self.layer_name, target_class=target_class
+                input_array,
+                self.layer_name,
+                target_class=target_class,
+                **occurrence_kwargs,
             )
         score_space = getattr(self.model, "last_gradient_output_space", None) or "adapter_defined"
         declared_raw_space = getattr(self.model, "raw_model_output_space", "unspecified")
@@ -389,7 +550,7 @@ class TCAVExplainer(BaseExplainer):
             Tuple of (cav_vector, classifier, accuracy)
             Note: accuracy is returned as Python float, not numpy.float64
         """
-        seed = self.random_seed if random_seed is None else int(random_seed)
+        seed = self.random_seed if random_seed is None else self._validate_random_seed(random_seed)
         if not 0.0 <= float(test_size) < 1.0:
             raise ValueError("test_size must be in [0, 1)")
 
@@ -476,11 +637,12 @@ class TCAVExplainer(BaseExplainer):
         # Extract CAV (normal vector to separating hyperplane)
         # For linear classifiers, this is the coefficient vector
         cav_vector = np.asarray(classifier.coef_, dtype=np.float64).reshape(-1)
-        if not np.all(np.isfinite(cav_vector)) or np.linalg.norm(cav_vector) == 0:
+        if not np.all(np.isfinite(cav_vector)) or np.max(np.abs(cav_vector)) == 0:
             raise ValueError("Linear classifier did not learn a finite non-zero CAV")
 
         return cav_vector, classifier, accuracy
 
+    @synchronized_explainer_method
     def learn_concept(
         self,
         concept_name: str,
@@ -576,15 +738,17 @@ class TCAVExplainer(BaseExplainer):
                 ),
                 "activation_space": "flattened_full_bottleneck",
                 "cav_direction": "toward_concept_label",
+                "layer_occurrence": self.layer_occurrence,
             },
         )
 
         # Store the CAV
-        self.concepts[concept_name] = cav
+        self._concepts[concept_name] = cav
         self._concept_activations[concept_name] = concept_acts.copy()
 
-        return cav
+        return cav.clone()
 
+    @synchronized_explainer_method
     def learn_random_concepts(
         self,
         negative_examples: np.ndarray,
@@ -627,7 +791,7 @@ class TCAVExplainer(BaseExplainer):
             raise ValueError("At least four examples are required for random splits")
 
         for i in range(int(n_random)):
-            seed = self.random_seed + i
+            seed = self._derived_seed(i)
             rng = np.random.RandomState(seed)
             # Randomly split into two groups
             indices = rng.permutation(n_samples)
@@ -653,14 +817,15 @@ class TCAVExplainer(BaseExplainer):
                     "baseline_semantics": "overlapping_random_partition_diagnostic",
                     "activation_space": "flattened_full_bottleneck",
                     "accuracy_evaluation": "training",
+                    "layer_occurrence": self.layer_occurrence,
                 },
             )
             random_cavs.append(cav)
 
         # Store random CAVs
-        self.random_concepts[concept_name_prefix] = random_cavs
+        self._random_concepts[concept_name_prefix] = tuple(random_cavs)
 
-        return random_cavs
+        return [cav.clone() for cav in random_cavs]
 
     def _validate_target_class(self, target_class: int) -> int:
         """Normalize one fixed target-score index for a complete TCAV run."""
@@ -673,6 +838,7 @@ class TCAVExplainer(BaseExplainer):
             raise ValueError(f"target_class must be in [0, {len(self.class_names) - 1}]")
         return target_index
 
+    @synchronized_explainer_method
     def compute_directional_derivative(
         self, inputs: np.ndarray, cav: ConceptActivationVector, target_class: int
     ) -> np.ndarray:
@@ -701,6 +867,12 @@ class TCAVExplainer(BaseExplainer):
             raise TypeError("cav must be a ConceptActivationVector")
         if cav.layer_name != self.layer_name:
             raise ValueError(f"CAV layer {cav.layer_name!r} does not match {self.layer_name!r}")
+        cav_occurrence = cav.metadata.get("layer_occurrence")
+        if cav_occurrence != self.layer_occurrence:
+            raise ValueError(
+                f"CAV layer occurrence {cav_occurrence!r} does not match "
+                f"{self.layer_occurrence!r}"
+            )
         target_index = self._validate_target_class(target_class)
         gradients = self._get_gradients_wrt_layer(inputs, target_index)
         if gradients.shape[1] != cav.vector.size:
@@ -711,7 +883,9 @@ class TCAVExplainer(BaseExplainer):
 
         # Compute dot product with CAV
         # S_C,k(x) = ∇h_l,k(x) · v_C
-        directional_derivatives = gradients @ cav.vector
+        directional_derivatives = scale_safe_product_sum(gradients, cav.vector, axis=1)
+        if not np.all(np.isfinite(directional_derivatives)):
+            raise FloatingPointError("TCAV directional derivatives must be finite")
 
         return directional_derivatives
 
@@ -742,6 +916,7 @@ class TCAVExplainer(BaseExplainer):
         return_derivatives: bool,
     ) -> Union[float, Tuple[float, np.ndarray]]: ...
 
+    @synchronized_explainer_method
     def compute_tcav_score(
         self,
         test_inputs: np.ndarray,
@@ -771,10 +946,12 @@ class TCAVExplainer(BaseExplainer):
             If return_derivatives=True, returns (score, derivatives) where
             score is Python float and derivatives is numpy array.
         """
-        if concept_name not in self.concepts:
+        if not isinstance(return_derivatives, (bool, np.bool_)):
+            raise TypeError("return_derivatives must be a boolean")
+        if concept_name not in self._concepts:
             raise ValueError(
                 f"Concept '{concept_name}' not found. "
-                f"Available concepts: {list(self.concepts.keys())}. "
+                f"Available concepts: {list(self._concepts.keys())}. "
                 f"Use learn_concept() first."
             )
 
@@ -783,7 +960,7 @@ class TCAVExplainer(BaseExplainer):
             name="test_inputs",
             require_finite=True,
         )
-        cav = self.concepts[concept_name]
+        cav = self._concepts[concept_name]
 
         # Compute directional derivatives
         derivatives = self.compute_directional_derivative(test_inputs, cav, target_class)
@@ -893,6 +1070,7 @@ class TCAVExplainer(BaseExplainer):
             return float("inf") if difference > 0 else float("-inf")
         return float(difference / np.sqrt(pooled_variance))
 
+    @synchronized_explainer_method
     def statistical_significance_test(
         self,
         test_inputs: np.ndarray,
@@ -920,7 +1098,7 @@ class TCAVExplainer(BaseExplainer):
         assumption is reported in the result.
         """
         _check_scipy()
-        if concept_name not in self.concepts or concept_name not in self._concept_activations:
+        if concept_name not in self._concepts or concept_name not in self._concept_activations:
             raise ValueError(f"Concept {concept_name!r} was not learned with learn_concept()")
         if not isinstance(n_random, Integral) or isinstance(n_random, bool):
             raise TypeError("n_random must be an integer")
@@ -956,7 +1134,7 @@ class TCAVExplainer(BaseExplainer):
                 concept_activations,
                 random_activations,
                 test_size=float(cav_test_size),
-                random_seed=self.random_seed + run_index,
+                random_seed=self._derived_seed(run_index),
             )
             cav = ConceptActivationVector(
                 concept_name=concept_name,
@@ -972,6 +1150,7 @@ class TCAVExplainer(BaseExplainer):
                     "accuracy_effective_test_size": (
                         classifier._explainiverse_accuracy_effective_test_size
                     ),
+                    "layer_occurrence": self.layer_occurrence,
                 },
             )
             concept_cav_accuracies.append(float(accuracy))
@@ -991,7 +1170,7 @@ class TCAVExplainer(BaseExplainer):
                 random_activation_sets[left_index],
                 random_activation_sets[right_index],
                 test_size=float(cav_test_size),
-                random_seed=self.random_seed + n_random + pair_index,
+                random_seed=self._derived_seed(n_random + pair_index),
             )
             cav = ConceptActivationVector(
                 concept_name=f"_random_{left_index}_vs_{right_index}",
@@ -1007,6 +1186,7 @@ class TCAVExplainer(BaseExplainer):
                     "accuracy_effective_test_size": (
                         classifier._explainiverse_accuracy_effective_test_size
                     ),
+                    "layer_occurrence": self.layer_occurrence,
                 },
             )
             random_cavs.append(cav)
@@ -1019,7 +1199,7 @@ class TCAVExplainer(BaseExplainer):
             )
 
         random_prefix = f"_random_{concept_name}_{target_index}"
-        self.random_concepts[random_prefix] = random_cavs
+        self._random_concepts[random_prefix] = tuple(random_cavs)
         concept_array = np.asarray(concept_scores, dtype=np.float64)
         random_array = np.asarray(random_scores, dtype=np.float64)
         t_statistic, p_value = self._welch_test(concept_array, random_array)
@@ -1069,6 +1249,7 @@ class TCAVExplainer(BaseExplainer):
             ],
         }
 
+    @synchronized_explainer_method
     def explain(
         self,
         test_inputs: np.ndarray,
@@ -1112,6 +1293,13 @@ class TCAVExplainer(BaseExplainer):
         Returns:
             Explanation object with TCAV scores for each concept.
         """
+        if not isinstance(run_significance_test, (bool, np.bool_)):
+            raise TypeError("run_significance_test must be a boolean")
+        if concept_names is not None:
+            validated_concepts = validate_name_sequence(concept_names, name="concept_names")
+            assert validated_concepts is not None
+            concept_names = validated_concepts
+
         test_inputs = as_real_array(
             test_inputs,
             name="test_inputs",
@@ -1120,7 +1308,7 @@ class TCAVExplainer(BaseExplainer):
         if test_inputs.ndim == 0 or len(test_inputs) == 0:
             raise ValueError("test_inputs must contain at least one example")
 
-        if len(self.concepts) == 0:
+        if len(self._concepts) == 0:
             raise ValueError("No concepts learned. Use learn_concept() first.")
 
         # Validate the score width even for an explicit target so class labels
@@ -1153,10 +1341,9 @@ class TCAVExplainer(BaseExplainer):
 
         # Determine concepts to analyze
         if concept_names is None:
-            concept_names = list(self.concepts.keys())
+            concept_names = list(self._concepts.keys())
         else:
-            concept_names = list(concept_names)
-            missing = [name for name in concept_names if name not in self.concepts]
+            missing = [name for name in concept_names if name not in self._concepts]
             if missing:
                 raise ValueError(f"Unknown concepts requested: {missing}")
 
@@ -1172,7 +1359,7 @@ class TCAVExplainer(BaseExplainer):
 
             tcav_scores[concept_name] = {
                 "score": score,  # Already Python float
-                "cav_accuracy": self.concepts[concept_name].accuracy,  # Already Python float
+                "cav_accuracy": self._concepts[concept_name].accuracy,  # Already Python float
                 "positive_count": int(np.sum(derivatives > 0)),
                 "total_count": int(len(derivatives)),
                 "target_score_space": self.last_target_score_space,
@@ -1195,7 +1382,7 @@ class TCAVExplainer(BaseExplainer):
                 significance_results[concept_name] = sig_result
 
         # Determine class name
-        if self.class_names and target_class is not None:
+        if self.class_names is not None and target_class is not None:
             label_name = self.class_names[target_class]
         else:
             label_name = f"class_{target_class}"
@@ -1205,6 +1392,7 @@ class TCAVExplainer(BaseExplainer):
             "target_class": int(target_class),
             "n_test_inputs": int(len(test_inputs)),
             "layer_name": self.layer_name,
+            "layer_occurrence": self.layer_occurrence,
             "concepts_analyzed": list(concept_names),
             "activation_space": "flattened_full_bottleneck",
             "tcav_score_definition": (
@@ -1234,9 +1422,11 @@ class TCAVExplainer(BaseExplainer):
                 "tcav_variant": self.last_tcav_variant,
                 "canonical_class_logit_tcav": bool(self.last_tcav_is_canonical),
                 "target_score_space": self.last_target_score_space,
+                "layer_occurrence": self.layer_occurrence,
             },
         )
 
+    @synchronized_explainer_method
     def explain_batch(
         self, X: np.ndarray, target_class: Optional[int] = None, **kwargs
     ) -> List[Explanation]:
@@ -1256,6 +1446,7 @@ class TCAVExplainer(BaseExplainer):
         """
         return [self.explain(X, target_class=target_class, **kwargs)]
 
+    @synchronized_explainer_method
     def get_most_influential_concepts(
         self, test_inputs: np.ndarray, target_class: int, top_k: int = 5
     ) -> List[Tuple[str, float]]:
@@ -1279,7 +1470,7 @@ class TCAVExplainer(BaseExplainer):
         target_class = self._validate_target_class(target_class)
         scores = []
 
-        for concept_name in self.concepts:
+        for concept_name in self._concepts:
             # compute_tcav_score returns Python float
             score = self.compute_tcav_score(test_inputs, target_class, concept_name)
             scores.append((concept_name, score))
@@ -1289,6 +1480,7 @@ class TCAVExplainer(BaseExplainer):
 
         return scores[: int(top_k)]
 
+    @synchronized_explainer_method
     def compare_concepts(
         self,
         test_inputs: np.ndarray,
@@ -1311,9 +1503,9 @@ class TCAVExplainer(BaseExplainer):
             All scores are Python floats.
         """
         if concept_names is None:
-            concept_names = list(self.concepts.keys())
+            concept_names = list(self._concepts.keys())
         else:
-            missing = [name for name in concept_names if name not in self.concepts]
+            missing = [name for name in concept_names if name not in self._concepts]
             if missing:
                 raise ValueError(f"Unknown concepts requested: {missing}")
         normalized_targets = [self._validate_target_class(value) for value in target_classes]
@@ -1329,18 +1521,21 @@ class TCAVExplainer(BaseExplainer):
 
         return results
 
+    @synchronized_explainer_method
     def list_concepts(self) -> List[str]:
         """List all learned concept names."""
-        return list(self.concepts.keys())
+        return list(self._concepts.keys())
 
+    @synchronized_explainer_method
     def get_concept(self, concept_name: str) -> ConceptActivationVector:
         """Get a specific CAV by name."""
-        if concept_name not in self.concepts:
+        if concept_name not in self._concepts:
             raise ValueError(f"Concept '{concept_name}' not found.")
-        return self.concepts[concept_name]
+        return self._concepts[concept_name].clone()
 
+    @synchronized_explainer_method
     def remove_concept(self, concept_name: str) -> None:
         """Remove a learned concept."""
-        if concept_name in self.concepts:
-            del self.concepts[concept_name]
+        if concept_name in self._concepts:
+            del self._concepts[concept_name]
             self._concept_activations.pop(concept_name, None)

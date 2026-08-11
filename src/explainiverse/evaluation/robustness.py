@@ -33,9 +33,11 @@ References:
     Zitnik, M., & Lakkaraju, H. (2022). Rethinking Stability for
     Attribution-based Explanations. arXiv:2203.06877.
 """
+
 import inspect
 import warnings
 from collections.abc import Mapping
+from decimal import Decimal, localcontext
 from numbers import Integral, Real
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -44,6 +46,7 @@ from scipy.spatial.distance import cdist
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import _stable_mean, _stable_std, _stable_sum
 from explainiverse.evaluation.faithfulness import _candidate_from_label
 
 # =============================================================================
@@ -164,9 +167,116 @@ def _validate_norm_order(norm_ord: Union[int, float]) -> None:
         raise ValueError("norm_ord must be 1, 2, or np.inf.")
 
 
+def _validate_bool(value, name: str) -> bool:
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a boolean.")
+    return bool(value)
+
+
 def _vector_norm(values: np.ndarray, norm_ord: Union[int, float]) -> float:
-    """Return the scalar vector norm produced for a one-dimensional input."""
-    return float(np.linalg.norm(values, ord=norm_ord))
+    """Return a finite vector norm without overflow or tiny-value underflow."""
+    vector = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(vector)):
+        raise FloatingPointError("vector norm input must be finite")
+    magnitudes = np.abs(vector)
+    if norm_ord == np.inf:
+        return float(np.max(magnitudes))
+    if norm_ord == 1:
+        result = float(_stable_sum(magnitudes))
+    else:
+        scale = float(np.max(magnitudes))
+        if scale == 0.0:
+            return 0.0
+        scaled = vector / scale
+        with np.errstate(over="ignore", invalid="ignore"):
+            result = float(scale * np.sqrt(np.dot(scaled, scaled)))
+    if not np.isfinite(result):
+        raise FloatingPointError("vector norm is not representable")
+    return result
+
+
+def _scaled_norm_components(values: np.ndarray, norm_ord: Union[int, float]) -> Tuple[float, float]:
+    """Represent a norm as ``scale * unit_norm`` without materializing it."""
+    vector = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(vector)):
+        raise FloatingPointError("vector norm input must be finite")
+    scale = float(np.max(np.abs(vector)))
+    if scale == 0.0:
+        return 0.0, 0.0
+    normalized = vector / scale
+    if norm_ord == np.inf:
+        unit_norm = 1.0
+    elif norm_ord == 1:
+        unit_norm = float(_stable_sum(np.abs(normalized)))
+    else:
+        unit_norm = float(np.sqrt(_stable_sum(normalized * normalized)))
+    return scale, unit_norm
+
+
+def _vector_norm_ratio(
+    numerator: np.ndarray,
+    denominator: np.ndarray,
+    norm_ord: Union[int, float],
+    context: str,
+) -> float:
+    """Divide vector norms even when each separate norm is outside float64."""
+    numerator_scale, numerator_unit = _scaled_norm_components(numerator, norm_ord)
+    denominator_scale, denominator_unit = _scaled_norm_components(denominator, norm_ord)
+    if denominator_scale == 0.0:
+        raise ValueError(f"{context} denominator norm is zero")
+    if numerator_scale == 0.0:
+        return 0.0
+    with localcontext() as decimal_context:
+        decimal_context.prec = 1600
+        exact = (
+            Decimal.from_float(numerator_scale)
+            * Decimal.from_float(numerator_unit)
+            / Decimal.from_float(denominator_scale)
+            / Decimal.from_float(denominator_unit)
+        )
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError(f"{context} ratio is not representable")
+    return result
+
+
+def _vector_difference(left: np.ndarray, right: np.ndarray, context: str) -> np.ndarray:
+    """Subtract finite vectors, rejecting an out-of-range coordinate."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = np.asarray(left, dtype=np.float64) - np.asarray(right, dtype=np.float64)
+    if not np.all(np.isfinite(result)):
+        raise FloatingPointError(f"{context} vector difference is not representable")
+    return result
+
+
+def _finite_mean(values: Union[List[float], np.ndarray], context: str) -> float:
+    result = float(_stable_mean(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} mean is not representable")
+    return result
+
+
+def _finite_std(values: Union[List[float], np.ndarray], context: str) -> float:
+    result = float(_stable_std(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} standard deviation is not representable")
+    return result
+
+
+def _finite_median(values: Union[List[float], np.ndarray], context: str) -> float:
+    ordered = np.sort(np.asarray(values, dtype=np.float64))
+    midpoint = ordered.size // 2
+    if ordered.size % 2:
+        return float(ordered[midpoint])
+    return _finite_mean(ordered[midpoint - 1 : midpoint + 1], context)
+
+
+def _finite_ratio(numerator: float, denominator: float, context: str) -> float:
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        result = float(numerator / denominator)
+    if not np.isfinite(result) or (result == 0.0 and numerator != 0.0):
+        raise FloatingPointError(f"{context} ratio is not representable")
+    return result
 
 
 def _require_scalar_result(result: Union[float, dict], metric_name: str) -> float:
@@ -256,8 +366,10 @@ def _generate_perturbations_l2(
 
     # Sample radius with volume-correction: r ~ U[0, R]^{1/d}
     radii = rng.uniform(0, 1, size=(n_samples, 1)) ** (1.0 / d) * radius
-    perturbations = instance + directions * radii
-
+    with np.errstate(over="ignore", invalid="ignore"):
+        perturbations = instance + directions * radii
+    if not np.all(np.isfinite(perturbations)):
+        raise FloatingPointError("L2 perturbation is not representable")
     return perturbations
 
 
@@ -282,8 +394,15 @@ def _generate_perturbations_linf(
         Array of shape (n_samples, n_features) — perturbed instances
     """
     d = len(instance)
-    noise = rng.uniform(-radius, radius, size=(n_samples, d))
-    return instance + noise
+    if radius <= np.finfo(np.float64).max / 2.0:
+        noise = rng.uniform(-radius, radius, size=(n_samples, d))
+    else:
+        noise = (2.0 * rng.random((n_samples, d)) - 1.0) * radius
+    with np.errstate(over="ignore", invalid="ignore"):
+        perturbations = instance + noise
+    if not np.all(np.isfinite(perturbations)):
+        raise FloatingPointError("L-infinity perturbation is not representable")
+    return perturbations
 
 
 def _get_explanation_vector(
@@ -437,12 +556,17 @@ def compute_max_sensitivity(
             target_class=target_class,
             expected_target=explained_target,
         )
-        diffs.append(_vector_norm(original_attr - perturbed_attr, norm_ord))
+        diffs.append(
+            _vector_norm(
+                _vector_difference(original_attr, perturbed_attr, "explanation"),
+                norm_ord,
+            )
+        )
 
     max_diff = max(diffs)
 
     if normalize:
-        return float(max_diff / original_norm)
+        return _finite_ratio(max_diff, original_norm, "normalized max-sensitivity")
     return float(max_diff)
 
 
@@ -519,8 +643,8 @@ def compute_batch_max_sensitivity(
         }
 
     return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
+        "mean": _finite_mean(scores, "batch max-sensitivity"),
+        "std": _finite_std(scores, "batch max-sensitivity"),
         "max": float(np.max(scores)),
         "min": float(np.min(scores)),
         "scores": scores,
@@ -611,13 +735,13 @@ def _generate_mixed_perturbations(
 
         # Continuous features: additive Gaussian noise
         if np.any(continuous_mask):
-            n_cont = np.sum(continuous_mask)
+            n_cont: int = int(np.sum(continuous_mask))
             noise = rng.normal(0, noise_scale, size=(n_perturbations, n_cont))
             perturbed[:, continuous_mask] += noise
 
         # Discrete features: Bernoulli replacement draws.
         if np.any(discrete_mask):
-            n_disc = np.sum(discrete_mask)
+            n_disc: int = int(np.sum(discrete_mask))
             # Appendix B replaces each discrete dimension by an independent
             # Bernoulli(p) draw; it does not describe an XOR/flip operation.
             perturbed[:, discrete_mask] = rng.binomial(
@@ -660,7 +784,21 @@ def _element_wise_percent_change(
         raise ValueError("epsilon_min must be finite and greater than zero.")
     safe_denom = np.copy(original)
     safe_denom[original == 0] = epsilon_min
-    return (original - perturbed) / safe_denom
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        result = (original - perturbed) / safe_denom
+    fallback = (~np.isfinite(result)) | ((result == 0.0) & (original != perturbed))
+    for index in np.flatnonzero(fallback):
+        with localcontext() as context:
+            context.prec = 1500
+            exact = (
+                Decimal.from_float(float(original[index]))
+                - Decimal.from_float(float(perturbed[index]))
+            ) / Decimal.from_float(float(safe_denom[index]))
+            rounded = float(exact)
+        if not np.isfinite(rounded) or (rounded == 0.0 and exact != 0):
+            raise FloatingPointError("element-wise percent change is not representable")
+        result[index] = rounded
+    return result
 
 
 def _aggregate_perturbation_scores(
@@ -695,10 +833,12 @@ def _aggregate_perturbation_scores(
         }
 
     arr = np.array(scores, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        raise FloatingPointError("perturbation score is not representable")
     result = {
         "max": float(np.max(arr)),
-        "mean": float(np.mean(arr)),
-        "median": float(np.median(arr)),
+        "mean": _finite_mean(arr, "perturbation score"),
+        "median": _finite_median(arr, "perturbation score median"),
         "perturbation_scores": scores,
     }
     result["score"] = result[aggregation]
@@ -951,6 +1091,7 @@ def compute_relative_input_stability(
         Zitnik, M., & Lakkaraju, H. (2022). Rethinking Stability for
         Attribution-based Explanations. arXiv:2203.06877. Equation 2.
     """
+    return_details = _validate_bool(return_details, "return_details")
     instance = _validate_instance(instance)
     _validate_relative_parameters(
         n_perturbations=n_perturbations,
@@ -1019,7 +1160,7 @@ def compute_relative_input_stability(
         denom_vec = _element_wise_percent_change(instance, x_prime, epsilon_min)
         denom = max(_vector_norm(denom_vec, norm_ord), epsilon_min)
 
-        ratio = float(numerator / denom)
+        ratio = _finite_ratio(numerator, denom, "relative input stability")
         per_perturbation_scores.append(ratio)
 
         # Collect components for the sampled Equation 4 RHS diagnostic.
@@ -1033,9 +1174,14 @@ def compute_relative_input_stability(
                 raise ValueError("representation_fn changed output shape across perturbations.")
             repr_pct = _element_wise_percent_change(repr_orig, repr_pert, epsilon_min)
             repr_denom = max(_vector_norm(repr_pct, norm_ord), epsilon_min)
-            rrs_ratio = float(numerator / repr_denom)
+            rrs_ratio = _finite_ratio(numerator, repr_denom, "relative representation stability")
             rrs_scores_for_bound.append(rrs_ratio)
-            representation_differences.append((instance - x_prime, repr_orig - repr_pert))
+            representation_differences.append(
+                (
+                    _vector_difference(instance, x_prime, "input"),
+                    _vector_difference(repr_orig, repr_pert, "representation"),
+                )
+            )
 
     n_valid = len(per_perturbation_scores)
 
@@ -1067,11 +1213,13 @@ def compute_relative_input_stability(
             if input_diff == 0:
                 continue
             representation_diff = _vector_norm(representation_delta, norm_ord)
-            l1_estimates.append(representation_diff / input_diff)
+            l1_estimates.append(
+                _finite_ratio(representation_diff, input_diff, "sampled representation Lipschitz")
+            )
         # λ₁ is undefined for a zero-norm anchor. Do not manufacture a finite
         # value with epsilon regularisation and call it Equation 4's RHS.
         if input_norm != 0 and l1_estimates:
-            lambda_1 = repr_norm / input_norm
+            lambda_1 = _finite_ratio(repr_norm, input_norm, "Equation 4 lambda")
             l1_est = float(np.max(l1_estimates))
             max_rrs = float(np.max(rrs_scores_for_bound))
             empirical_bound_estimate = float(lambda_1 * l1_est * max_rrs)
@@ -1175,8 +1323,8 @@ def compute_batch_relative_input_stability(
         }
 
     return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
+        "mean": _finite_mean(scores, "batch relative-input stability"),
+        "std": _finite_std(scores, "batch relative-input stability"),
         "max": float(np.max(scores)),
         "min": float(np.min(scores)),
         "scores": scores,
@@ -1258,6 +1406,7 @@ def compute_relative_representation_stability(
     Reference:
         Agarwal et al. (2022). Equation 3.
     """
+    return_details = _validate_bool(return_details, "return_details")
     instance = _validate_instance(instance)
     _validate_relative_parameters(
         n_perturbations=n_perturbations,
@@ -1317,7 +1466,7 @@ def compute_relative_representation_stability(
         denom_vec = _element_wise_percent_change(repr_orig, repr_pert, epsilon_min)
         denom = max(_vector_norm(denom_vec, norm_ord), epsilon_min)
 
-        ratio = float(numerator / denom)
+        ratio = _finite_ratio(numerator, denom, "relative representation stability")
         per_perturbation_scores.append(ratio)
 
     n_valid = len(per_perturbation_scores)
@@ -1434,8 +1583,8 @@ def compute_batch_relative_representation_stability(
         }
 
     return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
+        "mean": _finite_mean(scores, "batch relative-representation stability"),
+        "std": _finite_std(scores, "batch relative-representation stability"),
         "max": float(np.max(scores)),
         "min": float(np.min(scores)),
         "scores": scores,
@@ -1518,6 +1667,7 @@ def compute_relative_output_stability(
     Reference:
         Agarwal et al. (2022). Equation 5.
     """
+    return_details = _validate_bool(return_details, "return_details")
     instance = _validate_instance(instance)
     _validate_relative_parameters(
         n_perturbations=n_perturbations,
@@ -1575,10 +1725,10 @@ def compute_relative_output_stability(
 
         # Denominator: max(||h(x) - h(x')||_p, epsilon_min)
         # NOTE: Equation 5 uses ABSOLUTE difference, not percent change
-        logit_diff = logits_orig - logits_pert
+        logit_diff = _vector_difference(logits_orig, logits_pert, "logit")
         denom = max(_vector_norm(logit_diff, norm_ord), epsilon_min)
 
-        ratio = float(numerator / denom)
+        ratio = _finite_ratio(numerator, denom, "relative output stability")
         per_perturbation_scores.append(ratio)
 
     n_valid = len(per_perturbation_scores)
@@ -1696,8 +1846,8 @@ def compute_batch_relative_output_stability(
         }
 
     return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
+        "mean": _finite_mean(scores, "batch relative-output stability"),
+        "std": _finite_std(scores, "batch relative-output stability"),
         "max": float(np.max(scores)),
         "min": float(np.min(scores)),
         "scores": scores,
@@ -1771,6 +1921,7 @@ def compute_relative_stability(
         ... )
         >>> print(f"RIS={result['ris']:.4f}, RRS={result['rrs']:.4f}")
     """
+    return_details = _validate_bool(return_details, "return_details")
     instance = _validate_instance(instance)
     _validate_relative_parameters(
         n_perturbations=n_perturbations,
@@ -1838,7 +1989,7 @@ def compute_relative_stability(
         # RIS denominator: max(||(x - x') / x||_p, epsilon_min)
         ris_denom_vec = _element_wise_percent_change(instance, x_prime, epsilon_min)
         ris_denom = max(_vector_norm(ris_denom_vec, norm_ord), epsilon_min)
-        ris_scores.append(float(numerator / ris_denom))
+        ris_scores.append(_finite_ratio(numerator, ris_denom, "relative input stability"))
 
         # RRS denominator: max(||(L_x - L_x') / L_x||_p, epsilon_min)
         if representation_fn is not None:
@@ -1851,7 +2002,9 @@ def compute_relative_stability(
                 raise ValueError("representation_fn changed output shape across perturbations.")
             rrs_denom_vec = _element_wise_percent_change(repr_orig, repr_pert, epsilon_min)
             rrs_denom = max(_vector_norm(rrs_denom_vec, norm_ord), epsilon_min)
-            rrs_scores.append(float(numerator / rrs_denom))
+            rrs_scores.append(
+                _finite_ratio(numerator, rrs_denom, "relative representation stability")
+            )
 
         # ROS denominator: max(||h(x) - h(x')||_p, epsilon_min)
         if logit_fn is not None:
@@ -1860,9 +2013,9 @@ def compute_relative_stability(
             logits_pert = _evaluate_single_vector_fn(logit_fn, x_prime, name="logit_fn")
             if logits_pert.shape != logits_orig.shape:
                 raise ValueError("logit_fn changed output shape across perturbations.")
-            logit_diff = logits_orig - logits_pert
+            logit_diff = _vector_difference(logits_orig, logits_pert, "logit")
             ros_denom = max(_vector_norm(logit_diff, norm_ord), epsilon_min)
-            ros_scores.append(float(numerator / ros_denom))
+            ros_scores.append(_finite_ratio(numerator, ros_denom, "relative output stability"))
 
     # Aggregate
     ris_agg = _aggregate_perturbation_scores(ris_scores, aggregation)
@@ -2023,8 +2176,8 @@ def compute_batch_relative_stability(
                 "n_undefined": n,
             }
         return {
-            "mean": float(np.mean(scores_list)),
-            "std": float(np.std(scores_list)),
+            "mean": _finite_mean(scores_list, "batch relative stability"),
+            "std": _finite_std(scores_list, "batch relative stability"),
             "max": float(np.max(scores_list)),
             "min": float(np.min(scores_list)),
             "scores": scores_list,
@@ -2048,7 +2201,10 @@ def compute_batch_relative_stability(
 def _get_top_k_features(
     attribution_vector: np.ndarray,
     k: int,
-) -> frozenset:
+    tie_policy: str = "stable_order",
+    *,
+    return_tie_incidence: bool = False,
+) -> Union[frozenset, Tuple[frozenset, bool]]:
     """
     Extract the indices of the top-k features by absolute attribution magnitude.
 
@@ -2061,9 +2217,33 @@ def _get_top_k_features(
     Returns:
         frozenset of integer indices.
     """
+    if tie_policy not in {"stable_order", "reject", "include_all"}:
+        raise ValueError("tie_policy must be 'stable_order', 'reject', or 'include_all'.")
     k = min(k, len(attribution_vector))
-    indices = np.argsort(np.abs(attribution_vector))[::-1][:k]
-    return frozenset(indices.tolist())
+    magnitudes = np.abs(attribution_vector)
+    feature_indices = np.arange(len(attribution_vector))
+    ordered = np.lexsort((feature_indices, -magnitudes))
+    cutoff = magnitudes[ordered[k - 1]]
+    strictly_above = int(np.sum(magnitudes > cutoff))
+    tied_at_cutoff = np.flatnonzero(magnitudes == cutoff)
+    tie_spans_cutoff = strictly_above < k < strictly_above + len(tied_at_cutoff)
+
+    if tie_policy == "reject" and tie_spans_cutoff:
+        raise ValueError(
+            "top-k attribution magnitudes contain a tie spanning the cutoff; "
+            "choose tie_policy='stable_order' or 'include_all' explicitly"
+        )
+    if tie_policy == "include_all":
+        indices = np.flatnonzero(magnitudes >= cutoff)
+    else:
+        indices = ordered[:k]
+    # The discretisation needs exactly k features. Ties are resolved by the
+    # declared feature order (lowest index first), an explicit deterministic
+    # policy rather than an accidental consequence of NumPy's sort algorithm.
+    selected = frozenset(indices.tolist())
+    if return_tie_incidence:
+        return selected, tie_spans_cutoff
+    return selected
 
 
 def _get_model_prediction(
@@ -2093,7 +2273,9 @@ def compute_consistency(
     top_k: int = 3,
     max_pairs: Optional[int] = None,
     seed: Optional[int] = None,
-) -> float:
+    tie_policy: str = "stable_order",
+    return_details: bool = False,
+) -> Union[float, Dict[str, object]]:
     """
     Compute a top-k-discretised empirical Consistency estimate.
 
@@ -2135,12 +2317,19 @@ def compute_consistency(
             number of possible top-k sets is combinatorial and is not
             monotone in k, so k must be treated as a reported
             discretisation parameter.
+            Magnitude ties are resolved by declared feature order (lowest
+            feature index first), so the selected set is reproducible.
         max_pairs: Historical parameter name. If None, compute the exact
             finite-sample estimator. If set, perform this many with-replacement
             Monte Carlo draws: sample a query uniformly, then sample one of
             its same-explanation peers uniformly. This is an unbiased estimate
             of the same query-weighted target.
         seed: Random seed for Monte Carlo sampling when max_pairs is set.
+        tie_policy: ``"stable_order"`` selects exactly ``top_k`` features and
+            breaks a cutoff tie by feature index; ``"reject"`` refuses such a
+            tie; ``"include_all"`` includes every feature tied at the cutoff.
+        return_details: If true, return the score together with the selected
+            tie policy, cutoff-tie incidence, and selected-set sizes.
 
     Returns:
         Consistency score (float) in [0, 1]. Higher = more consistent.
@@ -2160,6 +2349,12 @@ def compute_consistency(
     X = _validate_batch(X)
     n_instances, n_features = X.shape
 
+    if tie_policy not in {"stable_order", "reject", "include_all"}:
+        raise ValueError("tie_policy must be 'stable_order', 'reject', or 'include_all'.")
+    if not isinstance(return_details, (bool, np.bool_)):
+        raise TypeError("return_details must be a boolean.")
+    return_details = bool(return_details)
+
     if isinstance(top_k, (bool, np.bool_)) or not isinstance(top_k, (int, np.integer)):
         raise TypeError("top_k must be an integer.")
     if top_k < 1:
@@ -2171,7 +2366,19 @@ def compute_consistency(
             "match and the metric becomes uninformative."
         )
     if n_instances < 2:
-        return float("nan")
+        score = float("nan")
+        if not return_details:
+            return score
+        return {
+            "score": score,
+            "tie_policy": tie_policy,
+            "requested_top_k": int(top_k),
+            "cutoff_tie_count": 0,
+            "cutoff_tie_fraction": 0.0,
+            "selected_feature_counts": [],
+            "n_instances": n_instances,
+            "estimator": "undefined_fewer_than_two_instances",
+        }
     if max_pairs is not None:
         if isinstance(max_pairs, bool) or not isinstance(max_pairs, (int, np.integer)):
             raise TypeError("max_pairs must be an integer or None.")
@@ -2182,11 +2389,19 @@ def compute_consistency(
 
     # Step 1: Compute explanations and predictions for all instances
     top_k_sets = []  # frozenset per instance
+    cutoff_ties: List[bool] = []
     predictions = []  # predicted class per instance
     for i in range(n_instances):
         attr = _get_explanation_vector(explainer, X[i], n_features)
         pred = _get_model_prediction(model, X[i])
-        top_k_sets.append(_get_top_k_features(attr, top_k))
+        selected, cutoff_tie = _get_top_k_features(
+            attr,
+            top_k,
+            tie_policy,
+            return_tie_incidence=True,
+        )
+        top_k_sets.append(selected)
+        cutoff_ties.append(cutoff_tie)
         predictions.append(pred)
 
     # Step 2: Group instances by their top-k explanation set
@@ -2210,20 +2425,39 @@ def compute_consistency(
                 local_scores.append(0.0)
                 continue
             local_scores.append(float(np.mean([predictions[j] == predictions[i] for j in peers])))
-        return float(np.mean(local_scores))
+        score = float(np.mean(local_scores))
+        estimator = "exact_query_weighted"
+    else:
+        # Unbiased Monte Carlo approximation of the same query-weighted quantity:
+        # draw x uniformly, then x' uniformly from x's same-explanation peers.
+        sampled_scores = []
+        query_indices = rng.integers(0, n_instances, size=max_pairs)
+        for i in query_indices:
+            peers = [j for j in groups[top_k_sets[i]] if j != i]
+            if not peers:
+                sampled_scores.append(0.0)
+                continue
+            j = peers[int(rng.integers(0, len(peers)))]
+            sampled_scores.append(float(predictions[j] == predictions[i]))
+        score = float(np.mean(sampled_scores))
+        estimator = "monte_carlo_query_peer"
 
-    # Unbiased Monte Carlo approximation of the same query-weighted quantity:
-    # draw x uniformly, then x' uniformly from x's same-explanation peers.
-    sampled_scores = []
-    query_indices = rng.integers(0, n_instances, size=max_pairs)
-    for i in query_indices:
-        peers = [j for j in groups[top_k_sets[i]] if j != i]
-        if not peers:
-            sampled_scores.append(0.0)
-            continue
-        j = peers[int(rng.integers(0, len(peers)))]
-        sampled_scores.append(float(predictions[j] == predictions[i]))
-    return float(np.mean(sampled_scores))
+    if not return_details:
+        return score
+    tie_count = int(sum(cutoff_ties))
+    return {
+        "score": score,
+        "tie_policy": tie_policy,
+        "requested_top_k": int(top_k),
+        "cutoff_tie_count": tie_count,
+        "cutoff_tie_fraction": tie_count / n_instances,
+        "selected_feature_counts": [len(features) for features in top_k_sets],
+        "n_instances": n_instances,
+        "n_explanation_groups": len(groups),
+        "estimator": estimator,
+        "max_pairs": None if max_pairs is None else int(max_pairs),
+        "seed": seed,
+    }
 
 
 def compute_batch_consistency(
@@ -2233,6 +2467,7 @@ def compute_batch_consistency(
     top_k_values: Optional[List[int]] = None,
     max_pairs: Optional[int] = None,
     seed: Optional[int] = None,
+    tie_policy: str = "stable_order",
 ) -> dict:
     """
     Compute Consistency across multiple top-k values.
@@ -2251,6 +2486,7 @@ def compute_batch_consistency(
         max_pairs: Historical name for the number of Monte Carlo query-peer
             draws per top-k evaluation; None computes the exact estimator.
         seed: Seed for Monte Carlo query-peer sampling only.
+        tie_policy: Shared cutoff-tie policy for every selected ``top_k``.
 
     Returns:
         Dictionary with:
@@ -2261,6 +2497,9 @@ def compute_batch_consistency(
     """
     X = _validate_batch(X)
     n_features = X.shape[1]
+
+    if tie_policy not in {"stable_order", "reject", "include_all"}:
+        raise ValueError("tie_policy must be 'stable_order', 'reject', or 'include_all'.")
 
     if top_k_values is None:
         top_k_values = [k for k in [1, 2, 3, 5] if k < n_features]
@@ -2274,6 +2513,8 @@ def compute_batch_consistency(
                     "Every top_k_values entry must be at least 1 and smaller "
                     "than the number of features."
                 )
+        if len(set(int(k) for k in top_k_values)) != len(top_k_values):
+            raise ValueError("top_k_values must not contain duplicate entries.")
 
     if not top_k_values:
         return {
@@ -2281,18 +2522,30 @@ def compute_batch_consistency(
             "mean": float("nan"),
             "top_k_values": [],
             "n_instances": len(X),
+            "tie_policy": tie_policy,
+            "details": {},
         }
 
     scores = {}
+    details = {}
     for k in top_k_values:
-        scores[k] = compute_consistency(
+        detail = compute_consistency(
             explainer,
             model,
             X,
             top_k=k,
             max_pairs=max_pairs,
             seed=seed,
+            tie_policy=tie_policy,
+            return_details=True,
         )
+        if not isinstance(detail, dict):
+            raise RuntimeError("compute_consistency unexpectedly returned a scalar")
+        details[k] = detail
+        score_value = detail.get("score")
+        if isinstance(score_value, (bool, np.bool_)) or not isinstance(score_value, Real):
+            raise RuntimeError("compute_consistency detail payload has no real score")
+        scores[k] = float(score_value)
 
     valid_scores = [s for s in scores.values() if not np.isnan(s)]
     mean_score = float(np.mean(valid_scores)) if valid_scores else float("nan")
@@ -2302,6 +2555,47 @@ def compute_batch_consistency(
         "mean": mean_score,
         "top_k_values": top_k_values,
         "n_instances": len(X),
+        "tie_policy": tie_policy,
+        "details": details,
+    }
+
+
+def compare_consistency_results(
+    results: Mapping[str, Mapping[str, object]],
+) -> Dict[str, object]:
+    """Validate and collect detailed Consistency results under one tie policy.
+
+    The helper deliberately refuses scalar-only payloads and mixed policies;
+    without the recorded discretisation policy, numeric scores are not a
+    defensible comparison.
+    """
+
+    if not isinstance(results, Mapping) or not results:
+        raise ValueError("results must be a non-empty mapping of named detail payloads")
+    scores: Dict[str, float] = {}
+    policies = set()
+    for name, payload in results.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("result names must be non-empty strings")
+        if not isinstance(payload, Mapping):
+            raise TypeError("every consistency result must be a detail mapping")
+        policy = payload.get("tie_policy")
+        if policy not in {"stable_order", "reject", "include_all"}:
+            raise ValueError("every consistency result must record a valid tie_policy")
+        score = payload.get("score")
+        if isinstance(score, (bool, np.bool_)) or not isinstance(score, Real):
+            raise TypeError("every consistency result must contain a real scalar score")
+        numeric_score = float(score)
+        if not np.isfinite(numeric_score):
+            raise ValueError("consistency comparison scores must be finite")
+        policies.add(policy)
+        scores[name] = numeric_score
+    if len(policies) != 1:
+        raise ValueError("consistency results with mixed tie_policy values are incomparable")
+    return {
+        "tie_policy": next(iter(policies)),
+        "scores": scores,
+        "comparison_contract": "same_consistency_cutoff_tie_policy",
     }
 
 
@@ -2392,13 +2686,15 @@ def compute_avg_sensitivity(
             target_class=target_class,
             expected_target=explained_target,
         )
-        diff = _vector_norm(original_attr - perturbed_attr, norm_ord)
+        diff = _vector_norm(
+            _vector_difference(original_attr, perturbed_attr, "explanation"), norm_ord
+        )
         diffs.append(diff)
 
-    mean_diff = np.mean(diffs)
+    mean_diff = _finite_mean(diffs, "average sensitivity")
 
     if normalize:
-        return float(mean_diff / original_norm)
+        return _finite_ratio(mean_diff, original_norm, "normalized average sensitivity")
     return float(mean_diff)
 
 
@@ -2466,8 +2762,8 @@ def compute_batch_avg_sensitivity(
         }
 
     return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
+        "mean": _finite_mean(scores, "batch average sensitivity"),
+        "std": _finite_std(scores, "batch average sensitivity"),
         "max": float(np.max(scores)),
         "min": float(np.min(scores)),
         "scores": scores,
@@ -2521,7 +2817,16 @@ def compute_continuity(
 
     k_neighbors = min(k_neighbors, len(X_reference))
 
-    input_dists = cdist(instance.reshape(1, -1), X_reference, metric=input_distance).reshape(-1)
+    if input_distance == "euclidean":
+        input_dists = np.asarray(
+            [
+                _vector_norm(_vector_difference(instance, row, "continuity input"), 2)
+                for row in X_reference
+            ],
+            dtype=np.float64,
+        )
+    else:
+        input_dists = cdist(instance.reshape(1, -1), X_reference, metric=input_distance).reshape(-1)
     finite_nonzero = np.flatnonzero(np.isfinite(input_dists) & (input_dists > 0))
     selected = finite_nonzero[np.argsort(input_dists[finite_nonzero])][:k_neighbors]
     if selected.size == 0:
@@ -2540,8 +2845,13 @@ def compute_continuity(
             target_class=target_class,
             expected_target=explained_target,
         )
-        numerator = _vector_norm(original_attr - neighbor_attr, norm_ord)
-        ratios.append(float(numerator / input_dists[index]))
+        numerator = _vector_norm(
+            _vector_difference(original_attr, neighbor_attr, "continuity attribution"),
+            norm_ord,
+        )
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            ratio = _finite_ratio(numerator, input_dists[index], "continuity")
+        ratios.append(ratio)
     return float(np.max(ratios))
 
 
@@ -2625,8 +2935,8 @@ def compute_batch_continuity(
         }
 
     return {
-        "mean": float(np.mean(scores)),
-        "std": float(np.std(scores)),
+        "mean": _finite_mean(scores, "batch continuity"),
+        "std": _finite_std(scores, "batch continuity"),
         "max": float(np.max(scores)),
         "min": float(np.min(scores)),
         "scores": scores,

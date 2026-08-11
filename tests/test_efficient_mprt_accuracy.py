@@ -13,6 +13,7 @@ from explainiverse.evaluation.randomisation import (
 )
 
 
+@pytest.mark.quantus_reference
 def test_histogram_entropy_matches_quantus_reference():
     pytest.importorskip("quantus")
     from quantus.functions.complexity_func import discrete_entropy

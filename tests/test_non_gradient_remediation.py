@@ -35,6 +35,7 @@ class _BoundedRegressor:
 
 class _TwoFeatureProbabilityModel:
     task = "classification"
+    prediction_output_kind = "probabilities"
 
     def predict(self, X):
         X = np.asarray(X)

@@ -161,6 +161,7 @@ from explainiverse.evaluation.randomisation import (
 )
 from explainiverse.evaluation.registry import MetricMeta, MetricRegistry, build_metric_registry
 from explainiverse.evaluation.robustness import (
+    compare_consistency_results,
     compute_avg_sensitivity,
     compute_batch_avg_sensitivity,
     compute_batch_consistency,
@@ -185,6 +186,12 @@ from explainiverse.evaluation.stability import (
     compute_ris,
     compute_ros,
     compute_stability_metrics,
+)
+from explainiverse.evaluation.uncertainty import (
+    compare_intervention_sensitivity_reports,
+    evaluate_intervention_sensitivity,
+    run_seeded_replicates,
+    summarize_replicate_estimates,
 )
 
 __all__ = [
@@ -249,6 +256,11 @@ __all__ = [
     "compute_batch_continuity",
     "compute_consistency",
     "compute_batch_consistency",
+    "compare_consistency_results",
+    "summarize_replicate_estimates",
+    "run_seeded_replicates",
+    "evaluate_intervention_sensitivity",
+    "compare_intervention_sensitivity_reports",
     # Relative Stability metrics (Agarwal et al., 2022)
     "compute_relative_input_stability",
     "compute_batch_relative_input_stability",

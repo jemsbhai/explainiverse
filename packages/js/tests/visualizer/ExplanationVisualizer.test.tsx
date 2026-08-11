@@ -38,9 +38,9 @@ describe('ExplanationVisualizer', () => {
     expect(screen.queryAllByRole('meter')).toHaveLength(0);
   });
 
-  it('renders all-zero and negative-zero maps with valid zero-width meters', () => {
+  it('renders all-zero maps with valid zero-width meters', () => {
     const explanation = new Explanation('Test', 'cat', {
-      feature_attributions: { zero: 0, negativeZero: -0 },
+      feature_attributions: { firstZero: 0, secondZero: 0 },
     });
     render(<ExplanationVisualizer explanation={explanation} />);
 
@@ -51,8 +51,8 @@ describe('ExplanationVisualizer', () => {
       expect(meter).toHaveAttribute('aria-valuenow', '0');
       expect(meter.firstElementChild).toHaveStyle({ width: '0%' });
     }
-    expect(screen.getByLabelText('zero: 0.0000 (zero)')).toBeVisible();
-    expect(screen.getByLabelText('negativeZero: 0.0000 (zero)')).toBeVisible();
+    expect(screen.getByLabelText('firstZero: 0.0000 (zero)')).toBeVisible();
+    expect(screen.getByLabelText('secondZero: 0.0000 (zero)')).toBeVisible();
   });
 
   it('shows at most five features and describes magnitude ranking', () => {

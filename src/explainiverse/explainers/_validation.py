@@ -5,19 +5,24 @@ adapter.  Adapters retain their model-specific output contracts; explainers use
 the helpers to enforce the narrower contracts required by their algorithms.
 """
 
-from typing import List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence, cast
 
 import numpy as np
+
+_PREDICTION_OUTPUT_KINDS = frozenset(
+    {"probabilities", "class_labels", "scores", "regression_values"}
+)
 
 
 def _contains_complex_values(values: np.ndarray) -> bool:
     """Return whether an array contains native or object-wrapped complex values."""
 
+    object_values = cast(Iterable[Any], values.flat)
     return bool(
         np.iscomplexobj(values)
         or (
             values.dtype == object
-            and any(isinstance(value, (complex, np.complexfloating)) for value in values.flat)
+            and any(isinstance(value, (complex, np.complexfloating)) for value in object_values)
         )
     )
 
@@ -152,6 +157,33 @@ def ensure_classification_task(model, *, context: str) -> Optional[str]:
     return declared_tasks[0] if declared_tasks else None
 
 
+def get_prediction_output_kind(model) -> Optional[str]:
+    """Return an explicitly declared ``predict`` output contract, if present.
+
+    Adapters may expose ``prediction_output_kind`` as ``"probabilities"``,
+    ``"class_labels"``, ``"scores"``, or ``"regression_values"``. The marker
+    removes the otherwise irreducible ambiguity between numerical hard labels
+    and endpoint probabilities such as ``[0, 1]``. Legacy models without a
+    marker continue through the historical shape/metadata heuristics.
+    """
+
+    kind = getattr(model, "prediction_output_kind", None)
+    if kind is None:
+        wrapped = getattr(model, "model", None)
+        if wrapped is not None and wrapped is not model:
+            kind = getattr(wrapped, "prediction_output_kind", None)
+    if kind is None:
+        return None
+    if not isinstance(kind, str):
+        raise TypeError("model.prediction_output_kind must be a string or None")
+    if kind not in _PREDICTION_OUTPUT_KINDS:
+        supported = ", ".join(sorted(_PREDICTION_OUTPUT_KINDS))
+        raise ValueError(
+            f"Unknown model.prediction_output_kind {kind!r}; " f"supported values are: {supported}"
+        )
+    return kind
+
+
 def _model_class_labels(model) -> Optional[np.ndarray]:
     """Return the one-dimensional class order exposed by a model, if any."""
 
@@ -169,6 +201,46 @@ def _model_class_labels(model) -> Optional[np.ndarray]:
     if np.unique(labels).size != labels.size:
         raise ValueError("model.classes_ must contain unique labels")
     return labels
+
+
+def _class_labels_to_indicator(
+    raw: np.ndarray,
+    *,
+    model_labels: Optional[np.ndarray],
+    display_names: Optional[List[str]],
+    context: str,
+) -> np.ndarray:
+    """Map an explicitly or heuristically identified hard-label vector."""
+
+    if model_labels is not None:
+        matches = raw[:, None] == model_labels[None, :]
+        if np.all(matches.sum(axis=1) == 1):
+            return matches.astype(float)
+        unknown = raw[matches.sum(axis=1) != 1]
+        raise ValueError(
+            f"{context} returned class labels not present in model.classes_: " f"{unknown.tolist()}"
+        )
+
+    if display_names is not None:
+        display_array = np.asarray(display_names, dtype=object)
+        direct_matches = raw[:, None] == display_array[None, :]
+        if np.all(direct_matches.sum(axis=1) == 1):
+            return direct_matches.astype(float)
+        try:
+            numeric_labels = np.asarray(raw, dtype=float)
+        except (TypeError, ValueError):
+            numeric_labels = None
+        if numeric_labels is not None:
+            integer_labels = numeric_labels.astype(int)
+            if np.all(numeric_labels == integer_labels) and np.all(
+                (integer_labels >= 0) & (integer_labels < len(display_names))
+            ):
+                return np.eye(len(display_names), dtype=float)[integer_labels]
+
+    raise ValueError(
+        f"{context} cannot map hard class labels to output columns; expose "
+        "model.classes_ or class_names"
+    )
 
 
 def normalize_classifier_outputs(
@@ -196,8 +268,16 @@ def normalize_classifier_outputs(
     if not hasattr(model, "predict"):
         raise TypeError(f"{context} requires a model with a batched predict method")
 
+    declared_output_kind = get_prediction_output_kind(model)
+    if declared_output_kind == "regression_values":
+        raise ValueError(
+            f"{context} requires classifier outputs, but model.predict declares "
+            "regression_values"
+        )
+
     used_predict_proba = require_probabilities and hasattr(model, "predict_proba")
     prediction_method = model.predict_proba if used_predict_proba else model.predict
+    output_kind = "probabilities" if used_predict_proba else declared_output_kind
     raw = np.asarray(prediction_method(matrix))
     if raw.ndim == 0:
         raise ValueError(f"{context} model.predict must retain a sample dimension")
@@ -219,28 +299,45 @@ def normalize_classifier_outputs(
 
     normalized = None
     if raw.ndim == 1:
-        if not allow_label_predictions and model_labels is not None:
-            label_matches = raw[:, None] == model_labels[None, :]
-            if np.all(label_matches.sum(axis=1) == 1):
+        if output_kind == "scores":
+            raise ValueError(f"{context} class-score outputs must contain one column per class")
+        if output_kind == "class_labels":
+            if not allow_label_predictions:
                 raise ValueError(
                     f"{context} requires probabilities, not hard class-label predictions"
                 )
-        if allow_label_predictions and model_labels is not None:
-            matches = raw[:, None] == model_labels[None, :]
-            if np.all(matches.sum(axis=1) == 1):
-                normalized = matches.astype(float)
+            normalized = _class_labels_to_indicator(
+                raw,
+                model_labels=model_labels,
+                display_names=display_names,
+                context=context,
+            )
+        elif output_kind is None:
+            # Backward-compatible heuristic: known class values are labels.
+            # Endpoint probability vectors are inherently ambiguous here;
+            # adapters can declare ``prediction_output_kind='probabilities'``
+            # to select probability semantics deterministically.
+            if model_labels is not None:
+                label_matches = raw[:, None] == model_labels[None, :]
+                if np.all(label_matches.sum(axis=1) == 1):
+                    if not allow_label_predictions:
+                        raise ValueError(
+                            f"{context} requires probabilities, not hard class-label predictions; "
+                            "declare prediction_output_kind='probabilities' when endpoint "
+                            "values are probabilities"
+                        )
+                    normalized = label_matches.astype(float)
 
-        if normalized is None and allow_label_predictions and display_names is not None:
-            try:
-                numeric_labels = np.asarray(raw, dtype=float)
-            except (TypeError, ValueError):
-                numeric_labels = None
-            if numeric_labels is not None:
-                integer_labels = numeric_labels.astype(int)
-                if np.all(numeric_labels == integer_labels) and np.all(
-                    (integer_labels >= 0) & (integer_labels < len(display_names))
-                ):
-                    normalized = np.eye(len(display_names), dtype=float)[integer_labels]
+            if normalized is None and allow_label_predictions and display_names is not None:
+                try:
+                    normalized = _class_labels_to_indicator(
+                        raw,
+                        model_labels=None,
+                        display_names=display_names,
+                        context=context,
+                    )
+                except ValueError:
+                    normalized = None
 
         if normalized is None:
             try:
@@ -249,16 +346,51 @@ def normalize_classifier_outputs(
                 raise ValueError(
                     f"{context} requires numerical probabilities or mappable class labels"
                 ) from exc
+            if (
+                output_kind is None
+                and (require_probabilities or not allow_label_predictions)
+                and positive.size > 0
+                and np.all(np.isfinite(positive))
+                and np.all((positive == 0.0) | (positive == 1.0))
+            ):
+                raise ValueError(
+                    f"{context} cannot infer whether an undeclared one-dimensional {{0, 1}} "
+                    "output contains endpoint probabilities or hard class labels. Declare "
+                    "prediction_output_kind='probabilities' or 'class_labels'."
+                )
             normalized = np.column_stack((1.0 - positive, positive))
     elif raw.ndim == 2:
         if raw.shape[1] == 0:
             raise ValueError(f"{context} model.predict returned no output columns")
+        if require_probabilities and raw.shape[1] > 1 and output_kind is None:
+            raise ValueError(
+                f"{context} cannot infer whether an undeclared multiclass matrix contains "
+                "scores or probabilities. Declare prediction_output_kind='probabilities' "
+                "or configure PyTorchAdapter(classification_output_kind='probabilities')."
+            )
+        if output_kind == "class_labels":
+            raise ValueError(f"{context} hard class-label outputs must be one-dimensional")
         try:
             numerical = raw.astype(float, copy=False)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{context} classifier outputs must be numerical") from exc
         if numerical.shape[1] == 1:
+            if output_kind == "scores":
+                raise ValueError(f"{context} class-score outputs must contain one column per class")
             positive = numerical[:, 0]
+            if (
+                output_kind is None
+                and (require_probabilities or not allow_label_predictions)
+                and positive.size > 0
+                and np.all(np.isfinite(positive))
+                and np.all((positive == 0.0) | (positive == 1.0))
+            ):
+                raise ValueError(
+                    f"{context} cannot infer whether an undeclared one-column {{0, 1}} "
+                    "output contains endpoint probabilities or hard class labels. Declare "
+                    "prediction_output_kind='probabilities' or return a one-dimensional "
+                    "prediction_output_kind='class_labels' output."
+                )
             normalized = np.column_stack((1.0 - positive, positive))
         else:
             normalized = numerical
@@ -283,7 +415,9 @@ def normalize_classifier_outputs(
     # Binary vectors are always interpreted as probabilities, even for an
     # algorithm that otherwise permits arbitrary multi-class scores.
     binary_probability_input = raw.ndim == 1 or (raw.ndim == 2 and raw.shape[1] == 1)
-    if require_probabilities or binary_probability_input:
+    if require_probabilities and output_kind == "scores":
+        raise ValueError(f"{context} requires probabilities, not arbitrary class scores")
+    if require_probabilities or output_kind == "probabilities" or binary_probability_input:
         if np.any(normalized < -1e-8) or np.any(normalized > 1.0 + 1e-8):
             raise ValueError(f"{context} requires probabilities in [0, 1]")
         if not np.allclose(normalized.sum(axis=1), 1.0, atol=1e-6, rtol=1e-6):

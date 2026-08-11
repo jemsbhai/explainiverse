@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "repository": "jemsbhai/explainiverse",
+  "default_branch": "main",
+  "required_checks": [
+    "Artifact byte reproducibility",
+    "Base distribution contract (without Torch/Captum extras)",
+    "CUDA single-GPU (Torch latest)",
+    "CUDA single-GPU (Torch minimum)",
+    "Compatibility-latest (ubuntu-latest, Python 3.10)",
+    "Compatibility-latest (ubuntu-latest, Python 3.11)",
+    "Compatibility-latest (ubuntu-latest, Python 3.12)",
+    "Compatibility-latest (ubuntu-latest, Python 3.13)",
+    "Compatibility-latest (macos-15, Python 3.12)",
+    "Compatibility-latest (windows-latest, Python 3.12)",
+    "Dependency constraints (captum-current)",
+    "Dependency constraints (captum-minimum)",
+    "Dependency constraints (python310-direct-floor)",
+    "Dependency constraints (python313-latest)",
+    "Dependency constraints (shap-xgboost-current)",
+    "Dependency constraints (shap-xgboost-floor)",
+    "Full extras, quality, and package",
+    "Minimum direct dependencies (Python 3.10)",
+    "Quantus reference parity (zero skips)",
+    "React 18 peer floor (Node.js 20.11.0)",
+    "Real-browser demo and automated accessibility (Playwright)",
+    "Test and build (Node.js 20.11.0)",
+    "Test and build (Node.js 22.x)"
+  ],
+  "required_check_provider": {
+    "app_id": 15368,
+    "slug": "github-actions"
+  },
+  "required_check_workflows": {
+    "Artifact byte reproducibility": {
+      "path": ".github/workflows/artifact-reproducibility.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Base distribution contract (without Torch/Captum extras)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "CUDA single-GPU (Torch latest)": {
+      "path": ".github/workflows/cuda-ci.yml",
+      "event": "workflow_dispatch",
+      "head_branch": "main"
+    },
+    "CUDA single-GPU (Torch minimum)": {
+      "path": ".github/workflows/cuda-ci.yml",
+      "event": "workflow_dispatch",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.10)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.11)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.12)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (ubuntu-latest, Python 3.13)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (macos-15, Python 3.12)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Compatibility-latest (windows-latest, Python 3.12)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (captum-current)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (captum-minimum)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (python310-direct-floor)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (python313-latest)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (shap-xgboost-current)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Dependency constraints (shap-xgboost-floor)": {
+      "path": ".github/workflows/dependency-constraints.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Full extras, quality, and package": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Minimum direct dependencies (Python 3.10)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Quantus reference parity (zero skips)": {
+      "path": ".github/workflows/python-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "React 18 peer floor (Node.js 20.11.0)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Real-browser demo and automated accessibility (Playwright)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Test and build (Node.js 20.11.0)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    },
+    "Test and build (Node.js 22.x)": {
+      "path": ".github/workflows/js-ci.yml",
+      "event": "push",
+      "head_branch": "main"
+    }
+  },
+  "immutable_releases": {
+    "enabled": true
+  },
+  "admin_snapshot_principals": ["jemsbhai"],
+  "cuda_evidence": {
+    "workflow_path": ".github/workflows/cuda-ci.yml",
+    "event": "workflow_dispatch",
+    "head_branch": "main",
+    "required_jobs": [
+      "CUDA single-GPU (Torch latest)",
+      "CUDA single-GPU (Torch minimum)",
+      "CUDA two-GPU scheduled (Torch latest)",
+      "CUDA two-GPU scheduled (Torch minimum)"
+    ],
+    "required_runner_labels": {
+      "CUDA single-GPU (Torch latest)": "explainiverse-cuda-single",
+      "CUDA single-GPU (Torch minimum)": "explainiverse-cuda-single",
+      "CUDA two-GPU scheduled (Torch latest)": "explainiverse-cuda-two",
+      "CUDA two-GPU scheduled (Torch minimum)": "explainiverse-cuda-two"
+    }
+  },
+  "branch_protection": {
+    "admin_enforcement": true,
+    "strict_required_checks": true,
+    "resolved_conversations": true,
+    "allow_force_pushes": false,
+    "allow_deletions": false
+  },
+  "tag_ruleset": {
+    "name": "Immutable semantic-version release tags",
+    "target": "tag",
+    "enforcement": "active",
+    "include": ["refs/tags/v*"],
+    "exclude": [],
+    "rule_types": ["deletion", "non_fast_forward", "update"],
+    "bypass_actors": [],
+    "current_user_can_bypass": "never"
+  },
+  "pypi_environment": {
+    "name": "pypi",
+    "can_admins_bypass": false,
+    "required_reviewer_logins": ["jemsbhai"],
+    "prevent_self_review": false,
+    "deployment_branch_policy": {
+      "protected_branches": false,
+      "custom_branch_policies": true
+    },
+    "deployment_policies": [
+      {
+        "name": "v*",
+        "type": "tag"
+      }
+    ],
+    "repository_secret_names": [],
+    "environment_secret_names": []
+  },
+  "pypi_trusted_publisher": {
+    "project": "explainiverse",
+    "owner": "jemsbhai",
+    "repository": "explainiverse",
+    "workflow": "publish-pypi.yml",
+    "environment": "pypi",
+    "verification": "PyPI settings have no public read API; archive direct project-owner evidence and require the token-free OIDC publish job to succeed"
+  }
+}

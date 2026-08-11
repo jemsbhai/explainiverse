@@ -29,13 +29,17 @@ References:
     distinguish its model-conditional Effective Complexity from the simpler
     attribution threshold count retained here for compatibility.
 """
+
+import math
 import warnings
+from decimal import Decimal, localcontext
 from typing import Dict, Optional
 
 import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import _stable_mean, _stable_std
 
 # =============================================================================
 # Internal Helpers
@@ -147,8 +151,8 @@ def _summarise_scores(scores: list[float]) -> Dict[str, object]:
     """Return the shared deterministic batch summary."""
     values = np.asarray(scores, dtype=np.float64)
     return {
-        "mean": float(np.mean(values)),
-        "std": float(np.std(values)),
+        "mean": float(_stable_mean(values)),
+        "std": float(_stable_std(values)),
         "max": float(np.max(values)),
         "min": float(np.min(values)),
         "scores": scores,
@@ -183,16 +187,21 @@ def _compute_gini_index(values: np.ndarray) -> float:
     if n <= 1:
         return 0.0
 
-    total = np.sum(values)
-    if total == 0.0:
+    if float(np.max(values)) == 0.0:
         return 0.0
-
-    sorted_vals = np.sort(values)
-    # Indices 1..n (1-based) for the sorted formula
-    indices = np.arange(1, n + 1, dtype=np.float64)
-    gini = (2.0 * np.sum(indices * sorted_vals)) / (n * total) - (n + 1.0) / n
-
-    return float(gini)
+    with localcontext() as context:
+        context.prec = 2500 + len(str(n))
+        sorted_values = [Decimal.from_float(float(value)) for value in np.sort(values)]
+        total = sum(sorted_values, start=Decimal(0))
+        weighted_total = sum(
+            (Decimal(index) * value for index, value in enumerate(sorted_values, start=1)),
+            start=Decimal(0),
+        )
+        exact = Decimal(2) * weighted_total / (Decimal(n) * total) - Decimal(n + 1) / Decimal(n)
+        gini = float(exact)
+    if not np.isfinite(gini) or (gini == 0.0 and exact != 0):
+        raise FloatingPointError("Gini index is not representable")
+    return float(np.clip(gini, 0.0, 1.0))
 
 
 def _compute_entropy(values: np.ndarray) -> float:
@@ -212,24 +221,50 @@ def _compute_entropy(values: np.ndarray) -> float:
         number of non-zero elements. Returns 0.0 if sum is zero or
         only one non-zero element exists.
     """
-    total = np.sum(values)
-    if total == 0.0:
+    if float(np.max(values)) == 0.0:
         raise ValueError(
             "Complexity is undefined for an all-zero attribution vector because "
             "the fractional contribution distribution cannot be formed."
         )
 
-    # Normalize to probability distribution
-    p = values / total
-
-    # Filter out zeros to avoid log(0)
-    p_nonzero = p[p > 0]
-
-    if len(p_nonzero) <= 1:
+    positive = values[values > 0]
+    if len(positive) <= 1:
         return 0.0
+    maximum = float(np.max(positive))
+    ratios = positive / maximum
+    if np.any((ratios == 0.0) & (positive != 0.0)):
+        # Rare cross-exponent path: a probability can underflow while
+        # ``-p log(p)`` is lifted back into the representable subnormal range.
+        with localcontext() as context:
+            context.prec = 1800 + len(str(len(positive)))
+            decimal_values = [Decimal.from_float(float(value)) for value in positive]
+            decimal_total = sum(decimal_values, start=Decimal(0))
+            exact = -sum(
+                (
+                    (value / decimal_total) * (value / decimal_total).ln()
+                    for value in decimal_values
+                ),
+                start=Decimal(0),
+            )
+            entropy = float(exact)
+        if not np.isfinite(entropy) or (entropy == 0.0 and exact != 0):
+            raise FloatingPointError("attribution entropy is not representable")
+        return entropy
 
-    entropy = -np.sum(p_nonzero * np.log(p_nonzero))
-    return float(entropy)
+    # Isolate one exact ratio of one.  ``log1p`` then retains a small tail
+    # that ``1 + tail`` would round away, while the equivalent identity
+    # H = log(S) - sum(r_i log(r_i)) / S avoids forming rounded probabilities.
+    maximum_index = int(np.argmax(ratios))
+    tail = np.delete(ratios, maximum_index)
+    tail_sum = math.fsum(float(value) for value in tail)
+    total = 1.0 + tail_sum
+    weighted_log_sum = math.fsum(
+        float(value) * math.log(float(value)) for value in ratios if value > 0.0
+    )
+    entropy = math.fsum([math.log1p(tail_sum), -weighted_log_sum / total])
+    if not np.isfinite(entropy) or entropy == 0.0:
+        raise FloatingPointError("attribution entropy is not representable")
+    return entropy
 
 
 # =============================================================================
@@ -418,16 +453,14 @@ def compute_attribution_threshold_count(
 
     # Compute effective threshold
     if threshold_type == "relative":
-        max_attr = np.max(abs_attr)
+        max_attr: float = float(np.max(abs_attr))
         if max_attr == 0.0:
             # All attributions are exactly zero.
             return 0.0
-        effective_threshold = threshold * max_attr
+        exact_threshold = Decimal.from_float(float(threshold)) * Decimal.from_float(max_attr)
+        count = sum(Decimal.from_float(float(value)) > exact_threshold for value in abs_attr)
     else:
-        effective_threshold = threshold
-
-    # Count features exceeding threshold
-    count = int(np.sum(abs_attr > effective_threshold))
+        count = int(np.sum(abs_attr > float(threshold)))
 
     if normalize:
         return float(count) / float(n_features) if n_features > 0 else 0.0

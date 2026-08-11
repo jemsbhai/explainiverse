@@ -1,6 +1,6 @@
 [project]
 name = "explainiverse"
-version = "0.14.0"
+version = "0.15.0"
 description = "Unified, extensible explainability framework with audited method metadata and evaluation diagnostics"
 authors = [
     { name = "Muntaser Syed", email = "jemsbhai@gmail.com" },
@@ -23,6 +23,9 @@ classifiers = [
 dependencies = [
     "numpy>=1.24,<3.0",
     "lime>=0.2.0.1,<1.0",
+    # LIME requires scikit-image transitively. Declare the dependency directly
+    # so the base distribution contract does not rely on that implementation detail.
+    "scikit-image>=0.20,<1.0",
     "scikit-learn>=1.6,<2.0",
     "shap>=0.46,<0.50; python_version < '3.11'",
     "shap>=0.50,<1.0; python_version >= '3.11'",
@@ -33,9 +36,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-torch = ["torch>=2.0", "captum>=0.8,<1.0"]
-image = ["scikit-image>=0.20"]
-all = ["torch>=2.0", "captum>=0.8,<1.0", "scikit-image>=0.20"]
+torch = ["torch>=2.0,<3.0", "captum>=0.8,<1.0"]
+all = ["torch>=2.0,<3.0", "captum>=0.8,<1.0"]
 
 [project.urls]
 Homepage = "https://github.com/jemsbhai/explainiverse"
@@ -72,6 +74,9 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 filterwarnings = []
 xfail_strict = true
+markers = [
+    "quantus_reference: comparison against the optional Quantus reference package",
+]
 
 [tool.coverage.run]
 branch = true
@@ -108,5 +113,5 @@ module = [
 ignore_missing_imports = true
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core==2.3.1"]
 build-backend = "poetry.core.masonry.api"

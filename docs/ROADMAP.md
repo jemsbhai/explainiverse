@@ -70,9 +70,12 @@ device scope until a GPU runner is part of the release gate.
 ### Documentation and secondary packages
 
 - The competitive comparison is withdrawn.
-- The LIME, KernelSHAP, and TreeSHAP tutorials are offline and lock-provenanced; the CI
-  workflow is configured to re-execute them cleanly. Planned tutorial rows remain planning
-  entries rather than capability claims.
+- The LIME, KernelSHAP, TreeSHAP, and finite-estimator uncertainty/intervention-sensitivity
+  tutorials are offline and lock-provenanced; the CI workflow is configured to re-execute them
+  cleanly. Planned tutorial rows remain planning entries rather than capability claims. The
+  uncertainty tutorial's t-interval is scoped to its supplied seeded streams, and its three
+  empirical replacement references demonstrate intervention dependence rather than a universal
+  baseline.
 - The TypeScript package is private and experimental; it must pass its own build/test/lint and
   package-content gates, but is not claimed to implement the Python method inventory.
 

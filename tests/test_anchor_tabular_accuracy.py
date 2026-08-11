@@ -298,6 +298,11 @@ def test_unconverged_lucb_reports_the_atomic_pair_budget_limit():
     "kwargs, error_type, match",
     [
         ({"background_data": np.array([[0.0 + 1.0j]])}, ValueError, "complex"),
+        (
+            {"background_data": np.array([["low"], ["high"]], dtype=object)},
+            ValueError,
+            "numeric|numerical",
+        ),
         ({"background_data": np.array([[math.nan]])}, ValueError, "finite"),
         ({"feature_names": ["signal", " "]}, ValueError, "feature_names"),
         ({"threshold": 1.0}, ValueError, "threshold"),
@@ -324,6 +329,8 @@ def test_classifier_only_and_single_instance_contracts_are_enforced():
         explainer.explain(np.ones((2, 2)))
     with pytest.raises(ValueError, match="finite"):
         explainer.explain(np.array([np.inf, 1.0]))
+    with pytest.raises(ValueError, match="numeric|numerical"):
+        explainer.explain(np.array(["high", "low"], dtype=object))
     with pytest.raises(TypeError, match="Unexpected keyword"):
         explainer.explain(np.array([1.0, 1.0]), target_class=1)
 

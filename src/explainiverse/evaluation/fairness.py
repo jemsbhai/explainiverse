@@ -32,6 +32,7 @@ https://doi.org/10.1145/3531146.3533179
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, localcontext
 from itertools import combinations
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -39,13 +40,79 @@ import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import (
+    _exact_percentile,
+    _percentile_mask,
+    _stable_difference_of_means,
+    _stable_mean,
+    _stable_sum,
+)
 
 ScalarMetric = Callable[[np.ndarray], float]
+_FAIRNESS_CONCLUSION_REASON = (
+    "diagnostic_requires_external_domain_outcome_measurement_and_decision_impact_review"
+)
+
+
+def _fairness_conclusion_metadata() -> Dict[str, object]:
+    """Return the shared fail-closed normative boundary for audit diagnostics."""
+
+    return {
+        "fairness_conclusion_defined": False,
+        "fairness_conclusion_reason": _FAIRNESS_CONCLUSION_REASON,
+    }
 
 
 def _attribution_l1_magnitude(attr_vector: np.ndarray) -> float:
     """Return attribution L1 magnitude; this is not a quality or fairness score."""
-    return float(np.sum(np.abs(attr_vector)))
+    result = float(_stable_sum(np.abs(attr_vector)))
+    if not np.isfinite(result):
+        raise FloatingPointError("attribution L1 magnitude is not representable")
+    return result
+
+
+def _finite_mean(values: np.ndarray, context: str) -> float:
+    """Return a cancellation-safe mean or fail when it cannot be represented."""
+    result = float(_stable_mean(np.asarray(values, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} mean is not representable")
+    return result
+
+
+def _finite_difference(left: float, right: float, context: str) -> float:
+    """Subtract two finite scalars without overflowing an intermediate sum."""
+    result = float(_stable_sum(np.asarray([left, -right], dtype=np.float64)))
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} is not representable")
+    return result
+
+
+def _finite_gap(left: float, right: float, context: str) -> float:
+    return abs(_finite_difference(left, right, context))
+
+
+def _finite_vector_difference(left: np.ndarray, right: np.ndarray, context: str) -> np.ndarray:
+    """Subtract finite vectors and reject a genuinely out-of-range coordinate."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        difference = np.asarray(left, dtype=np.float64) - np.asarray(right, dtype=np.float64)
+    if not np.all(np.isfinite(difference)):
+        raise FloatingPointError(f"{context} vector difference is not representable")
+    return difference
+
+
+def _finite_l2_norm(values: np.ndarray, context: str) -> float:
+    """Evaluate a Euclidean norm without overflow or tiny-value underflow."""
+    vector = np.asarray(values, dtype=np.float64)
+    scale = float(np.max(np.abs(vector)))
+    if scale == 0.0:
+        return 0.0
+    scaled = vector / scale
+    unit_norm = float(np.sqrt(np.dot(scaled, scaled)))
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = float(scale * unit_norm)
+    if not np.isfinite(result):
+        raise FloatingPointError(f"{context} Euclidean norm is not representable")
+    return result
 
 
 # Kept private-name compatible for callers that imported it despite the underscore.
@@ -186,16 +253,46 @@ def _cohens_d(a: np.ndarray, b: np.ndarray) -> Optional[float]:
     """Return pooled Cohen's d, or ``None`` when sample variance is unavailable."""
     if len(a) < 2 or len(b) < 2:
         return None
-    mean_difference = float(np.mean(a) - np.mean(b))
-    degrees_of_freedom = len(a) + len(b) - 2
-    pooled_variance = (
-        (len(a) - 1) * np.var(a, ddof=1) + (len(b) - 1) * np.var(b, ddof=1)
-    ) / degrees_of_freedom
-    if pooled_variance == 0.0:
-        if mean_difference == 0.0:
-            return 0.0
-        return float(np.copysign(np.inf, mean_difference))
-    return float(mean_difference / np.sqrt(pooled_variance))
+    with localcontext() as context:
+        context.prec = 3000 + len(str(len(a) + len(b)))
+        decimal_a = [Decimal.from_float(float(value)) for value in a]
+        decimal_b = [Decimal.from_float(float(value)) for value in b]
+        mean_a = sum(decimal_a, start=Decimal(0)) / Decimal(len(decimal_a))
+        mean_b = sum(decimal_b, start=Decimal(0)) / Decimal(len(decimal_b))
+        mean_difference = mean_a - mean_b
+        pooled_sum_squares = sum(
+            ((value - mean_a) * (value - mean_a) for value in decimal_a),
+            start=Decimal(0),
+        ) + sum(
+            ((value - mean_b) * (value - mean_b) for value in decimal_b),
+            start=Decimal(0),
+        )
+        pooled_variance = pooled_sum_squares / Decimal(len(a) + len(b) - 2)
+        if pooled_variance == 0:
+            if mean_difference == 0:
+                return 0.0
+            return float(np.copysign(np.inf, float(mean_difference)))
+        exact = mean_difference / pooled_variance.sqrt()
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("Cohen's d is not representable")
+    return result
+
+
+def _effect_size_state(
+    a: np.ndarray,
+    b: np.ndarray,
+    value: Optional[float],
+) -> Tuple[bool, Optional[str]]:
+    """Describe whether a returned Cohen's-d value is an ordinary finite estimate."""
+
+    if value is None:
+        return False, "insufficient_group_sample_size"
+    if np.isinf(value):
+        return False, "zero_pooled_variance_with_unequal_group_means_signed_infinity"
+    if np.all(a == a[0]) and np.all(b == b[0]) and a[0] == b[0]:
+        return False, "zero_pooled_variance_with_equal_group_means_zero_convention"
+    return True, None
 
 
 def _group_statistics(
@@ -203,15 +300,34 @@ def _group_statistics(
     groups: Dict[Any, np.ndarray],
 ) -> Dict[str, Any]:
     group_scores = {label: scores[indices] for label, indices in groups.items()}
-    group_means = {label: float(np.mean(values)) for label, values in group_scores.items()}
+    group_means = {
+        label: _finite_mean(values, f"group {label!r}") for label, values in group_scores.items()
+    }
     pairwise_gaps: Dict[Tuple[Any, Any], float] = {}
     pairwise_p_values: Dict[Tuple[Any, Any], Optional[float]] = {}
     pairwise_effect_sizes: Dict[Tuple[Any, Any], Optional[float]] = {}
+    pairwise_p_value_defined: Dict[Tuple[Any, Any], bool] = {}
+    pairwise_p_value_reasons: Dict[Tuple[Any, Any], Optional[str]] = {}
+    pairwise_effect_size_defined: Dict[Tuple[Any, Any], bool] = {}
+    pairwise_effect_size_reasons: Dict[Tuple[Any, Any], Optional[str]] = {}
     for left, right in combinations(groups, 2):
         pair = (left, right)
-        pairwise_gaps[pair] = abs(group_means[left] - group_means[right])
-        pairwise_p_values[pair] = _mann_whitney_u(group_scores[left], group_scores[right])
-        pairwise_effect_sizes[pair] = _cohens_d(group_scores[left], group_scores[right])
+        pairwise_gaps[pair] = abs(
+            _stable_difference_of_means(group_scores[left], group_scores[right])
+        )
+        p_value = _mann_whitney_u(group_scores[left], group_scores[right])
+        effect_size = _cohens_d(group_scores[left], group_scores[right])
+        pairwise_p_values[pair] = p_value
+        pairwise_effect_sizes[pair] = effect_size
+        pairwise_p_value_defined[pair] = p_value is not None
+        pairwise_p_value_reasons[pair] = (
+            None if p_value is not None else "completely_tied_pooled_sample_zero_rank_variance"
+        )
+        effect_defined, effect_reason = _effect_size_state(
+            group_scores[left], group_scores[right], effect_size
+        )
+        pairwise_effect_size_defined[pair] = effect_defined
+        pairwise_effect_size_reasons[pair] = effect_reason
 
     effects = [abs(value) for value in pairwise_effect_sizes.values() if value is not None]
     available_p_values = [value for value in pairwise_p_values.values() if value is not None]
@@ -222,11 +338,27 @@ def _group_statistics(
         "pairwise_gaps": pairwise_gaps,
         "pairwise_p_values": pairwise_p_values,
         "pairwise_effect_sizes": pairwise_effect_sizes,
+        "pairwise_p_value_defined": pairwise_p_value_defined,
+        "pairwise_p_value_reasons": pairwise_p_value_reasons,
+        "pairwise_effect_size_defined": pairwise_effect_size_defined,
+        "pairwise_effect_size_reasons": pairwise_effect_size_reasons,
         # Compatibility summaries.  For >2 groups, p_value is explicitly an
         # uncorrected minimum and must not be treated as a family-wise p-value.
         "p_value": float(min(available_p_values)) if available_p_values else None,
         "p_value_unavailable_pairs": unavailable_p_value_pairs,
         "effect_size": float(max(effects)) if effects else None,
+        "p_value_defined": all(pairwise_p_value_defined.values()),
+        "p_value_reason": (
+            None
+            if all(pairwise_p_value_defined.values())
+            else "one_or_more_pairwise_p_values_are_boundary_states"
+        ),
+        "effect_size_defined": all(pairwise_effect_size_defined.values()),
+        "effect_size_reason": (
+            None
+            if all(pairwise_effect_size_defined.values())
+            else "one_or_more_pairwise_effect_sizes_are_boundary_states"
+        ),
         "p_value_adjustment": "none",
         "p_value_summary": (
             "two-sided Mann-Whitney U; None marks completely tied pooled samples"
@@ -236,6 +368,7 @@ def _group_statistics(
                 "None marks completely tied pooled samples"
             )
         ),
+        **_fairness_conclusion_metadata(),
     }
 
 
@@ -539,17 +672,36 @@ def compute_cross_group_lipschitz_diagnostic(
     for left, right in combinations(groups, 2):
         pairs.extend((int(i), int(j)) for i in groups[left] for j in groups[right])
     feature_distances = np.asarray(
-        [np.linalg.norm(data[i] - data[j]) for i, j in pairs], dtype=np.float64
+        [
+            _finite_l2_norm(
+                _finite_vector_difference(data[i], data[j], "cross-group input"),
+                "cross-group input",
+            )
+            for i, j in pairs
+        ],
+        dtype=np.float64,
     )
     attribution_distances = np.asarray(
-        [np.linalg.norm(attrs[i] - attrs[j]) for i, j in pairs], dtype=np.float64
+        [
+            _finite_l2_norm(
+                _finite_vector_difference(attrs[i], attrs[j], "cross-group attribution"),
+                "cross-group attribution",
+            )
+            for i, j in pairs
+        ],
+        dtype=np.float64,
     )
-    selected_threshold = (
-        float(np.percentile(feature_distances, 25))
-        if distance_threshold is None
-        else distance_threshold
-    )
-    qualifying = np.flatnonzero(feature_distances <= selected_threshold)
+    if distance_threshold is None:
+        exact_threshold = _exact_percentile(feature_distances, 25.0)
+        selected_threshold = float(exact_threshold)
+        qualifying = np.flatnonzero(
+            _percentile_mask(feature_distances, 25.0, comparison="at_or_below")
+        )
+        threshold_decimal = str(exact_threshold)
+    else:
+        selected_threshold = distance_threshold
+        qualifying = np.flatnonzero(feature_distances <= selected_threshold)
+        threshold_decimal = None
     if len(qualifying) == 0:
         raise ValueError(
             "No cross-group pairs satisfy distance_threshold; the requested local "
@@ -563,16 +715,27 @@ def compute_cross_group_lipschitz_diagnostic(
     attribution_selected = attribution_distances[qualifying]
     ratios = np.empty_like(feature_selected)
     zero_distance = feature_selected == 0.0
-    ratios[~zero_distance] = attribution_selected[~zero_distance] / feature_selected[~zero_distance]
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        ratios[~zero_distance] = (
+            attribution_selected[~zero_distance] / feature_selected[~zero_distance]
+        )
+    if not np.all(np.isfinite(ratios[~zero_distance])):
+        raise FloatingPointError("cross-group attribution/input ratio is not representable")
     ratios[zero_distance & (attribution_selected == 0.0)] = 0.0
     ratios[zero_distance & (attribution_selected > 0.0)] = np.inf
 
+    mean_ratio = (
+        float(np.inf) if np.any(np.isinf(ratios)) else _finite_mean(ratios, "cross-group ratio")
+    )
+
     return {
-        "score": float(np.mean(ratios)),
+        "score": mean_ratio,
         "max_ratio": float(np.max(ratios)),
         "n_pairs_evaluated": int(len(qualifying)),
         "distance_threshold": selected_threshold,
+        "distance_threshold_exact_decimal": threshold_decimal,
         "canonical_individual_fairness": False,
+        **_fairness_conclusion_metadata(),
         "interpretation": (
             "Cross-group attribution sensitivity in the supplied, scale-dependent "
             "input and attribution representations."
@@ -658,7 +821,14 @@ def compute_sensitive_attribution_change(
                 )
             if not np.all(np.isfinite(changed)):
                 raise ValueError("counterfactual_explainer returned non-finite attributions.")
-            per_instance.append(float(np.linalg.norm(attrs[row_index] - changed)))
+            per_instance.append(
+                _finite_l2_norm(
+                    _finite_vector_difference(
+                        attrs[row_index], changed, "counterfactual attribution"
+                    ),
+                    "counterfactual attribution",
+                )
+            )
         method = "one_feature_intervention"
     else:
         non_sensitive = np.delete(data, index, axis=1)
@@ -666,20 +836,43 @@ def compute_sensitive_attribution_change(
         sensitive_column = data[:, index]
         for row_index, value in enumerate(sensitive_column):
             candidates = np.flatnonzero(sensitive_column != value)
-            distances = np.linalg.norm(non_sensitive[candidates] - non_sensitive[row_index], axis=1)
+            distances = np.asarray(
+                [
+                    _finite_l2_norm(
+                        _finite_vector_difference(
+                            non_sensitive[candidate],
+                            non_sensitive[row_index],
+                            "counterfactual matching input",
+                        ),
+                        "counterfactual matching input",
+                    )
+                    for candidate in candidates
+                ],
+                dtype=np.float64,
+            )
             match_offset = int(np.argmin(distances))
             match_index = int(candidates[match_offset])
             match_distances.append(float(distances[match_offset]))
-            per_instance.append(float(np.linalg.norm(attrs[row_index] - attrs[match_index])))
+            per_instance.append(
+                _finite_l2_norm(
+                    _finite_vector_difference(
+                        attrs[row_index],
+                        attrs[match_index],
+                        "counterfactual matching attribution",
+                    ),
+                    "counterfactual matching attribution",
+                )
+            )
         method = "nearest_opposite_group_matching"
 
     return {
-        "score": float(np.mean(per_instance)),
+        "score": _finite_mean(np.asarray(per_instance), "sensitive-attribution change"),
         "per_instance_scores": per_instance,
         "method": method,
         "match_distances": match_distances,
         "canonical_counterfactual_fairness": False,
         "requires_structural_causal_model_for_counterfactual_claim": True,
+        **_fairness_conclusion_metadata(),
         "interpretation": "Attribution-change diagnostic; lower change is not proof of fairness.",
     }
 
@@ -721,21 +914,41 @@ def compute_fidelity_gap(
     _require_multiple_groups(groups, "Fidelity gap")
 
     group_scores = {label: scores[indices] for label, indices in groups.items()}
-    group_means = {label: float(np.mean(values)) for label, values in group_scores.items()}
-    overall_mean = float(np.mean(scores))
+    group_means = {
+        label: _finite_mean(values, f"fidelity group {label!r}")
+        for label, values in group_scores.items()
+    }
+    overall_mean = _finite_mean(scores, "overall fidelity")
     if higher_is_better:
-        deficits = {label: overall_mean - mean for label, mean in group_means.items()}
+        deficits = {
+            label: _finite_difference(overall_mean, mean, f"fidelity deficit for group {label!r}")
+            for label, mean in group_means.items()
+        }
     else:
-        deficits = {label: mean - overall_mean for label, mean in group_means.items()}
+        deficits = {
+            label: _finite_difference(mean, overall_mean, f"fidelity deficit for group {label!r}")
+            for label, mean in group_means.items()
+        }
     max_gap_from_average = float(max(deficits.values()))
 
     pairwise_gaps: Dict[Tuple[Any, Any], float] = {}
     pairwise_p_values: Dict[Tuple[Any, Any], Optional[float]] = {}
+    pairwise_p_value_defined: Dict[Tuple[Any, Any], bool] = {}
+    pairwise_p_value_reasons: Dict[Tuple[Any, Any], Optional[str]] = {}
     for left, right in combinations(groups, 2):
         pair = (left, right)
-        pairwise_gaps[pair] = abs(group_means[left] - group_means[right])
-        pairwise_p_values[pair] = _mann_whitney_u(group_scores[left], group_scores[right])
-    mean_group_gap = float(np.mean(list(pairwise_gaps.values())))
+        pairwise_gaps[pair] = _finite_gap(
+            group_means[left], group_means[right], f"gap for groups {left!r} and {right!r}"
+        )
+        p_value = _mann_whitney_u(group_scores[left], group_scores[right])
+        pairwise_p_values[pair] = p_value
+        pairwise_p_value_defined[pair] = p_value is not None
+        pairwise_p_value_reasons[pair] = (
+            None if p_value is not None else "completely_tied_pooled_sample_zero_rank_variance"
+        )
+    mean_group_gap = _finite_mean(
+        np.asarray(list(pairwise_gaps.values()), dtype=np.float64), "pairwise fidelity gap"
+    )
 
     return {
         "max_gap_from_average": max_gap_from_average,
@@ -748,11 +961,20 @@ def compute_fidelity_gap(
         "group_deficits_from_average": deficits,
         "pairwise_gaps": pairwise_gaps,
         "pairwise_p_values": pairwise_p_values,
+        "pairwise_p_value_defined": pairwise_p_value_defined,
+        "pairwise_p_value_reasons": pairwise_p_value_reasons,
         "p_value_unavailable_pairs": [
             pair for pair, value in pairwise_p_values.items() if value is None
         ],
+        "p_value_defined": all(pairwise_p_value_defined.values()),
+        "p_value_reason": (
+            None
+            if all(pairwise_p_value_defined.values())
+            else "one_or_more_pairwise_p_values_are_boundary_states"
+        ),
         "higher_is_better": bool(higher_is_better),
         "canonical_definition": "Balagopalan et al. (2022), Definitions 3.3 and 3.4",
+        **_fairness_conclusion_metadata(),
     }
 
 
@@ -806,9 +1028,14 @@ def compute_sensitive_attribution_gap(
         "group_sensitive_means": statistics["group_means"],
         "pairwise_gaps": statistics["pairwise_gaps"],
         "pairwise_p_values": statistics["pairwise_p_values"],
+        "pairwise_p_value_defined": statistics["pairwise_p_value_defined"],
+        "pairwise_p_value_reasons": statistics["pairwise_p_value_reasons"],
         "p_value": statistics["p_value"],
+        "p_value_defined": statistics["p_value_defined"],
+        "p_value_reason": statistics["p_value_reason"],
         "p_value_adjustment": statistics["p_value_adjustment"],
         "canonical_fairness_metric": False,
+        **_fairness_conclusion_metadata(),
         "interpretation": (
             "Between-group gap in signed attribution assigned to the selected feature; "
             "zero gap is not proof of model or explanation fairness."
@@ -857,7 +1084,10 @@ def compute_prediction_conditioned_metric_disparity(
         class_sensitive = labels[indices]
         class_groups = _partition_by_group(class_sensitive)
         means = {
-            group: float(np.mean(class_scores[group_indices]))
+            group: _finite_mean(
+                class_scores[group_indices],
+                f"prediction {prediction_class!r}, group {group!r}",
+            )
             for group, group_indices in class_groups.items()
         }
         per_class_group_means[prediction_class] = means
@@ -866,7 +1096,14 @@ def compute_prediction_conditioned_metric_disparity(
             non_comparable_classes.append(prediction_class)
             continue
         disparity = float(
-            max(abs(means[left] - means[right]) for left, right in combinations(means, 2))
+            max(
+                _finite_gap(
+                    means[left],
+                    means[right],
+                    f"prediction-conditioned gap for groups {left!r} and {right!r}",
+                )
+                for left, right in combinations(means, 2)
+            )
         )
         per_class_disparity[prediction_class] = disparity
         comparable_values.append(disparity)
@@ -889,6 +1126,7 @@ def compute_prediction_conditioned_metric_disparity(
         "condition": "model_prediction",
         "canonical_equal_opportunity": False,
         "canonical_fairness_metric": False,
+        **_fairness_conclusion_metadata(),
         "interpretation": (
             "Prediction-conditioned scalar-property disparity; not Hardt equality "
             "of opportunity and not a standalone fairness verdict."

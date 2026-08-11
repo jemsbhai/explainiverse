@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, localcontext
 from numbers import Integral, Real
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import _percentile_mask
 
 AttributionInput = Union[np.ndarray, Explanation]
 MaskInput = Union[np.ndarray, "LocalisationMask"]
@@ -108,7 +110,7 @@ def _ordered_explanation_attribution_values(
     return [indexed[index] for index in range(len(raw))]
 
 
-@dataclass
+@dataclass(frozen=True)
 class LocalisationMask:
     """A validated one-dimensional feature mask or two-dimensional image mask.
 
@@ -146,12 +148,19 @@ class LocalisationMask:
         ):
             raise TypeError("mask must have a numeric or boolean dtype.")
 
-        mask: np.ndarray = self.mask.astype(np.float64)
+        # Own an immutable copy: retaining a caller-owned writable array lets
+        # post-construction mutation bypass every invariant established here.
+        mask: np.ndarray = self.mask.astype(np.float64, copy=True)
         if not np.all(np.isfinite(mask)):
             raise ValueError("mask must contain only finite values.")
         if not np.all((mask == 0.0) | (mask == 1.0)):
             raise ValueError("mask must be binary (contain only 0 and 1).")
-        self.mask = mask
+        # An ndarray that owns its storage can have WRITEABLE re-enabled by a
+        # caller. Re-backing it with immutable bytes makes the read-only
+        # contract irreversible through NumPy's public flag API.
+        mask = np.frombuffer(mask.tobytes(), dtype=np.float64).reshape(mask.shape)
+        object.__setattr__(self, "mask", mask)
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
     @property
     def n_relevant(self) -> int:
@@ -254,13 +263,24 @@ def _extract_attributions(attributions: AttributionInput) -> np.ndarray:
             )
         feature_names = attributions.feature_names
         values = _ordered_explanation_attribution_values(raw, feature_names)
+        candidate = np.asarray(values)
+        if not (
+            np.issubdtype(candidate.dtype, np.integer)
+            or np.issubdtype(candidate.dtype, np.floating)
+        ):
+            raise ValueError("Explanation feature attributions must be real numeric scalars.")
         try:
-            array = np.asarray(values, dtype=np.float64)
+            array = candidate.astype(np.float64, copy=False)
         except (TypeError, ValueError) as exc:
             raise ValueError("Explanation feature attributions must be numeric scalars.") from exc
     elif isinstance(attributions, np.ndarray):
         if np.issubdtype(attributions.dtype, np.complexfloating):
             raise TypeError("attributions must be real-valued, not complex.")
+        if not (
+            np.issubdtype(attributions.dtype, np.integer)
+            or np.issubdtype(attributions.dtype, np.floating)
+        ):
+            raise TypeError("attributions must have a real numeric dtype.")
         try:
             array = attributions.astype(np.float64, copy=False)
         except (TypeError, ValueError) as exc:
@@ -278,11 +298,19 @@ def _extract_attributions(attributions: AttributionInput) -> np.ndarray:
 def _extract_mask(mask: MaskInput) -> np.ndarray:
     """Extract and validate a finite binary float64 mask."""
     if isinstance(mask, LocalisationMask):
-        return mask.mask
+        # Revalidate even immutable containers. This also protects metrics
+        # from unusually deserialised instances that bypassed __post_init__.
+        return _extract_mask(mask.mask)
     if not isinstance(mask, np.ndarray):
         raise TypeError(f"Expected np.ndarray or LocalisationMask, got {type(mask).__name__}.")
     if np.issubdtype(mask.dtype, np.complexfloating):
         raise TypeError("mask must be real-valued, not complex.")
+    if not (
+        np.issubdtype(mask.dtype, np.integer)
+        or np.issubdtype(mask.dtype, np.floating)
+        or np.issubdtype(mask.dtype, np.bool_)
+    ):
+        raise TypeError("mask must have a numeric or boolean dtype.")
     try:
         array: np.ndarray = mask.astype(np.float64, copy=False)
     except (TypeError, ValueError) as exc:
@@ -330,6 +358,26 @@ def _validate_bool(value: Any, name: str) -> bool:
 
 def _rank_values(values: np.ndarray, use_abs: bool) -> np.ndarray:
     return np.abs(values) if _validate_bool(use_abs, "use_abs") else values
+
+
+def _stable_nonnegative_mass_ratio(values: np.ndarray, mask: np.ndarray) -> float:
+    """Return mass inside ``mask`` with one final binary64 rounding."""
+    with localcontext() as context:
+        context.prec = 2500 + len(str(values.size))
+        decimal_values = [Decimal.from_float(float(value)) for value in values.reshape(-1)]
+        decimal_mask = [Decimal.from_float(float(value)) for value in mask.reshape(-1)]
+        denominator = sum(decimal_values, start=Decimal(0))
+        numerator = sum(
+            (value * mask_value for value, mask_value in zip(decimal_values, decimal_mask)),
+            start=Decimal(0),
+        )
+        if denominator == 0:
+            raise ValueError("total relevance is zero; the ratio is undefined.")
+        exact = numerator / denominator
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("localisation mass ratio is not representable")
+    return result
 
 
 def _top_k_hit_fraction(
@@ -456,12 +504,11 @@ def compute_attribution_localisation(
     segmentation = _extract_mask(mask)
     flat, mask_flat = _validate_attribution_mask(array, segmentation, "Attribution Localisation")
     relevance = np.abs(flat) if _validate_bool(use_abs, "use_abs") else np.clip(flat, 0.0, None)
-    total = float(np.sum(relevance))
-    if total == 0.0:
+    if not np.any(relevance):
         raise ValueError(
             "Attribution Localisation: total positive relevance is zero; " "the ratio is undefined."
         )
-    return float(np.sum(relevance * mask_flat) / total)
+    return _stable_nonnegative_mass_ratio(relevance, mask_flat)
 
 
 def compute_batch_attribution_localisation(
@@ -556,12 +603,11 @@ def compute_relevance_mass_accuracy(
         if maximum > 0.0:
             relevance = relevance / maximum
 
-    total = float(np.sum(relevance))
-    if total == 0.0:
+    if not np.any(relevance):
         raise ValueError(
             "Relevance Mass Accuracy: total relevance is zero; the ratio is " "undefined."
         )
-    return float(np.sum(relevance * mask_flat) / total)
+    return _stable_nonnegative_mass_ratio(relevance, mask_flat)
 
 
 def compute_batch_relevance_mass_accuracy(
@@ -697,13 +743,12 @@ def compute_energy_based_pointing_game(
             "Energy-Based Pointing Game requires a non-negative saliency map; "
             "pass use_abs=True only when absolute saliency is intended."
         )
-    total = float(np.sum(energy))
-    if total == 0.0:
+    if not np.any(energy):
         raise ValueError(
             "Energy-Based Pointing Game: total saliency energy is zero; the "
             "proportion is undefined."
         )
-    return float(np.sum(energy * mask_flat) / total)
+    return _stable_nonnegative_mass_ratio(energy, mask_flat)
 
 
 def compute_batch_energy_based_pointing_game(
@@ -769,10 +814,9 @@ def compute_focus(attributions: AttributionInput, mask: MaskInput) -> float:
     segmentation = _extract_mask(mask)
     flat, mask_flat = _validate_focus_mosaic(array, segmentation)
     positive = np.clip(flat, 0.0, None)
-    total = float(np.sum(positive))
-    if total == 0.0:
+    if not np.any(positive):
         raise ValueError("Focus: total positive relevance is zero; the score is undefined.")
-    return float(np.sum(positive * mask_flat) / total)
+    return _stable_nonnegative_mass_ratio(positive, mask_flat)
 
 
 def compute_batch_focus(
@@ -815,11 +859,11 @@ def compute_attribution_iou(
     flat, mask_flat = _validate_attribution_mask(array, segmentation, "Attribution IoU")
     values = _rank_values(flat, use_abs)
     if percentile is not None:
-        cutoff = float(np.percentile(values, percentile))
+        selected = _percentile_mask(values, float(percentile), comparison="above")
     else:
         assert threshold is not None
         cutoff = float(threshold)
-    selected: np.ndarray = values > cutoff
+        selected = values > cutoff
     target: np.ndarray = mask_flat.astype(bool)
     union = int(np.count_nonzero(selected | target))
     if union == 0:

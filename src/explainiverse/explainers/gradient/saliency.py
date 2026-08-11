@@ -40,6 +40,7 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import validate_name_sequence
+from explainiverse.explainers.gradient._input import as_floating_array
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 
@@ -100,10 +101,14 @@ class SaliencyExplainer(BaseExplainer):
         validated_features = validate_name_sequence(feature_names, name="feature_names")
         assert validated_features is not None
         self.feature_names = validated_features
+        if not isinstance(absolute_value, (bool, np.bool_)):
+            raise TypeError("absolute_value must be a boolean")
         self.class_names = (
-            validate_name_sequence(class_names, name="class_names") if class_names else None
+            validate_name_sequence(class_names, name="class_names")
+            if class_names is not None
+            else None
         )
-        self.absolute_value = absolute_value
+        self.absolute_value = bool(absolute_value)
 
     def _resolve_target_class(
         self, instance: np.ndarray, target_class: Optional[int]
@@ -115,12 +120,19 @@ class SaliencyExplainer(BaseExplainer):
             target_index = int(target_class)
             if target_index < 0:
                 raise ValueError("target_class must be non-negative")
-            if self.class_names is not None and target_index >= len(self.class_names):
+            task = getattr(self.model, "task", None)
+            if (
+                task != "regression"
+                and self.class_names is not None
+                and target_index >= len(self.class_names)
+            ):
                 raise ValueError(f"target_class must be in [0, {len(self.class_names) - 1}]")
             return target_index
 
-        is_classification = getattr(self.model, "task", None) == "classification"
-        if not is_classification and self.class_names is None:
+        task = getattr(self.model, "task", None)
+        if task == "regression":
+            return None
+        if task != "classification" and self.class_names is None:
             return None
 
         with preserve_adapter_model_eval(self.model, preserve_gradients=False):
@@ -148,15 +160,17 @@ class SaliencyExplainer(BaseExplainer):
                 "instance feature count must match feature_names exactly; "
                 f"got {raw.size} values and {len(self.feature_names)} names"
             )
-        if not np.isrealobj(raw):
-            raise ValueError("instance must contain only finite real values")
-        try:
-            prepared = raw.astype(np.float32, copy=True)
-        except (TypeError, ValueError) as error:
-            raise TypeError("instance must contain real numeric values") from error
-        if not np.isfinite(prepared).all():
-            raise ValueError("instance must contain only finite real values")
-        return prepared
+        return as_floating_array(raw, name="instance")
+
+    @staticmethod
+    def _validate_method(method: str) -> str:
+        if not isinstance(method, str):
+            raise TypeError("method must be 'saliency' or 'input_times_gradient'")
+        if method not in {"saliency", "input_times_gradient"}:
+            raise ValueError(
+                f"Unknown method: {method!r}. Use 'saliency' or 'input_times_gradient'."
+            )
+        return method
 
     def _input_gradients(self, instance: np.ndarray, target_class: Optional[int]) -> np.ndarray:
         """Return one gradient per declared flat input feature."""
@@ -199,6 +213,7 @@ class SaliencyExplainer(BaseExplainer):
         Returns:
             Array of attribution scores for each input feature.
         """
+        method = self._validate_method(method)
         gradients = self._input_gradients(instance, target_class)
 
         # Apply method
@@ -206,10 +221,6 @@ class SaliencyExplainer(BaseExplainer):
             attributions = gradients
         elif method == "input_times_gradient":
             attributions = instance * gradients
-        else:
-            raise ValueError(
-                f"Unknown method: '{method}'. " f"Use 'saliency' or 'input_times_gradient'."
-            )
 
         # Apply absolute value if configured
         if self.absolute_value and method == "saliency":
@@ -238,6 +249,7 @@ class SaliencyExplainer(BaseExplainer):
             >>> explanation = explainer.explain(instance)
             >>> print(explanation.explanation_data["feature_attributions"])
         """
+        method = self._validate_method(method)
         instance = self._prepare_instance(instance)
 
         target_class = self._resolve_target_class(instance, target_class)
@@ -259,10 +271,15 @@ class SaliencyExplainer(BaseExplainer):
             explainer_name = f"Saliency_{method}"
 
         # Determine class name
-        if self.class_names and target_class is not None:
+        if (
+            self.class_names is not None
+            and target_class is not None
+            and target_class < len(self.class_names)
+        ):
             label_name = self.class_names[target_class]
         else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
+            prefix = "output" if getattr(self.model, "task", None) == "regression" else "class"
+            label_name = f"{prefix}_{target_class}" if target_class is not None else "output"
 
         explanation_data = {
             "feature_attributions": attributions_dict,
@@ -300,6 +317,7 @@ class SaliencyExplainer(BaseExplainer):
             >>> for exp in explanations:
             ...     print(exp.target_class)
         """
+        method = self._validate_method(method)
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(1, -1)

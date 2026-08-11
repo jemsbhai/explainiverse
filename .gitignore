@@ -3,6 +3,7 @@
 # Node.js
 node_modules/
 npm-debug.log
+build_debug*.txt
 yarn-error.log
 pnpm-debug.log*
 
@@ -10,6 +11,8 @@ pnpm-debug.log*
 dist/
 build/
 out/
+playwright-report/
+test-results/
 coverage/
 .coverage
 .coverage.*

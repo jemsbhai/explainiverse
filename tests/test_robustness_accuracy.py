@@ -147,6 +147,7 @@ def test_batch_reports_instances_with_undefined_same_class_estimate(monkeypatch)
     assert result["n_undefined"] == 1
 
 
+@pytest.mark.quantus_reference
 def test_relative_objectives_match_official_quantus(monkeypatch):
     quantus = pytest.importorskip("quantus")
     x = np.array([2.0, 4.0])

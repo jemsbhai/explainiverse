@@ -32,6 +32,7 @@ def test_reviewed_manifest_exactly_matches_notebook_inventory():
         "01_lime_tabular.ipynb",
         "02_kernelshap.ipynb",
         "03_treeshap.ipynb",
+        "04_finite_estimator_uncertainty.ipynb",
     }
 
 
@@ -141,8 +142,148 @@ def test_published_output_cannot_disclose_checkout_path():
         runner._validate_published_outputs(path, changed)
 
 
+def test_clean_execution_must_reproduce_published_outputs():
+    path = Path("deterministic.ipynb")
+    published = _notebook_with_code("print('fresh deterministic value')")
+    published.cells[0].execution_count = 1
+    published.cells[0].outputs = [
+        nbformat.v4.new_output("stream", name="stdout", text="stale value\n")
+    ]
+    executed = copy.deepcopy(published)
+    executed.cells[0].outputs = [
+        nbformat.v4.new_output(
+            "stream",
+            name="stdout",
+            text="fresh deterministic value\n",
+        )
+    ]
+
+    with pytest.raises(ValueError, match="no longer matches the published outputs") as exc_info:
+        runner._validate_reexecuted_outputs(path, published, executed)
+    message = str(exc_info.value)
+    assert "published_sha256=" in message
+    assert "executed_sha256=" in message
+    assert "first_differing_code_cell=1" in message
+    assert "stale value" in message
+    assert "fresh deterministic value" in message
+
+    published.cells[0].outputs = copy.deepcopy(executed.cells[0].outputs)
+    runner._validate_reexecuted_outputs(path, published, executed)
+
+
 def test_checkout_import_and_hashes_are_current_and_stable():
-    runner._assert_checkout_import()
+    assert runner._assert_checkout_import() == runner._declared_project_version()
     assert runner._lock_digest() == runner._lock_digest()
     assert runner._runner_digest() == runner._runner_digest()
     assert runner._package_source_digest() == runner._package_source_digest()
+
+
+def test_kernelshap_plot_is_a_platform_neutral_accessible_svg():
+    path = runner.TUTORIAL_DIR / "02_kernelshap.ipynb"
+    notebook = nbformat.read(path, as_version=4)
+    runner._validate_source(path, notebook)
+    runner._validate_published_provenance(path, notebook)
+
+    source = "\n".join(cell.source for cell in notebook.cells)
+    assert "display(SVG(svg))" in source
+    assert "matplotlib.pyplot" not in source
+
+    rich_outputs = [
+        output
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        for output in cell.outputs
+        if output.output_type == "display_data"
+    ]
+    assert len(rich_outputs) == 1
+    assert "image/png" not in rich_outputs[0].data
+    svg = rich_outputs[0].data["image/svg+xml"]
+    assert 'role="img"' in svg
+    assert "<title" in svg
+    assert "<desc" in svg
+
+
+def test_treeshap_plot_is_a_platform_neutral_accessible_svg():
+    path = runner.TUTORIAL_DIR / "03_treeshap.ipynb"
+    notebook = nbformat.read(path, as_version=4)
+    runner._validate_source(path, notebook)
+
+    source = "\n".join(cell.source for cell in notebook.cells)
+    assert "display(SVG(svg))" in source
+    assert "matplotlib.pyplot" not in source
+
+    rich_outputs = [
+        output
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        for output in cell.outputs
+        if output.output_type == "display_data"
+    ]
+    assert len(rich_outputs) == 1
+    assert "image/png" not in rich_outputs[0].data
+    svg = rich_outputs[0].data["image/svg+xml"]
+    assert 'role="img"' in svg
+    assert "<title" in svg
+    assert "<desc" in svg
+
+
+def test_source_only_verification_requires_absent_distribution_metadata(monkeypatch):
+    declared_version = runner._declared_project_version()
+
+    def missing_distribution(_name):
+        raise runner.PackageNotFoundError
+
+    monkeypatch.setattr(runner, "version", missing_distribution)
+    assert runner._assert_checkout_import(source_only=True) == declared_version
+
+    path = runner.DEFAULT_NOTEBOOKS[0]
+    notebook = nbformat.read(path, as_version=4)
+    runner._validate_published_provenance(path, notebook, expected_version=declared_version)
+
+    monkeypatch.setattr(runner, "version", lambda _name: declared_version)
+    with pytest.raises(RuntimeError, match="distribution.*absent"):
+        runner._assert_checkout_import(source_only=True)
+
+
+def test_source_only_mode_cannot_publish_notebooks():
+    with pytest.raises(ValueError, match="source-only.*write"):
+        runner.main(["--source-only", "--write"])
+
+
+def test_checkout_import_is_bound_to_project_metadata(monkeypatch, tmp_path):
+    project = tmp_path / "pyproject.toml"
+    project.write_text(
+        '[project]\nname = "explainiverse"\nversion = "99.0.0"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "PROJECT_FILE", project)
+    with pytest.raises(RuntimeError, match="pyproject.toml.*__version__ disagree"):
+        runner._assert_checkout_import()
+
+
+def test_uncertainty_tutorial_publishes_the_scoped_formula_and_fresh_equality_contracts():
+    path = runner.TUTORIAL_DIR / "04_finite_estimator_uncertainty.ipynb"
+    notebook = nbformat.read(path, as_version=4)
+    runner._validate_source(path, notebook)
+    runner._validate_published_provenance(path, notebook)
+
+    source = "\n".join(cell.source for cell in notebook.cells)
+    assert "load_iris()" in source
+    assert "model_probabilities, formula_probabilities" in source
+    assert "run_seeded_replicates(" in source
+    assert "evaluate_intervention_sensitivity(" in source
+    assert 'replicate_report["finite_estimate_is_global_proof"] is False' in source
+    assert 'sensitivity_report["universal_default_claimed"] is False' in source
+    assert "fresh_replicate_report == replicate_report" in source
+    assert "fresh_sensitivity_report == sensitivity_report" in source
+
+    published_text = "\n".join(
+        output.get("text", "")
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        for output in cell.outputs
+        if output.output_type == "stream"
+    )
+    assert "fresh seeded report is exactly equal: True" in published_text
+    assert "same sign across references: False" in published_text
+    assert "fresh sensitivity report is exactly equal: True" in published_text

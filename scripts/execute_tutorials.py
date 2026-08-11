@@ -21,7 +21,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TUTORIAL_DIR = ROOT / "tutorials"
 PACKAGE_SOURCE_DIR = ROOT / "src" / "explainiverse"
 LOCK_FILE = ROOT / "poetry.lock"
+PROJECT_FILE = ROOT / "pyproject.toml"
 RUNNER_LABEL = "scripts/execute_tutorials.py"
 PROVENANCE_SCHEMA_VERSION = 2
 
@@ -51,6 +52,7 @@ TUTORIAL_SPECS = (
     TutorialSpec("01_lime_tabular.ipynb", 42),
     TutorialSpec("02_kernelshap.ipynb", 17),
     TutorialSpec("03_treeshap.ipynb", 17),
+    TutorialSpec("04_finite_estimator_uncertainty.ipynb", 31),
 )
 SPEC_BY_FILENAME = {spec.filename: spec for spec in TUTORIAL_SPECS}
 DEFAULT_NOTEBOOKS = tuple(TUTORIAL_DIR / spec.filename for spec in TUTORIAL_SPECS)
@@ -198,8 +200,8 @@ def _notebook_source_digest(notebook: NotebookNode) -> str:
     )
 
 
-def _published_outputs_digest(notebook: NotebookNode) -> str:
-    outputs = [
+def _published_outputs_payload(notebook: NotebookNode) -> list[dict[str, Any]]:
+    return [
         {
             "execution_count": cell.execution_count,
             "outputs": copy.deepcopy(cell.outputs),
@@ -207,18 +209,60 @@ def _published_outputs_digest(notebook: NotebookNode) -> str:
         for cell in notebook.cells
         if cell.cell_type == "code"
     ]
-    return _json_digest(outputs)
 
 
-def _assert_checkout_import() -> None:
+def _published_outputs_digest(notebook: NotebookNode) -> str:
+    return _json_digest(_published_outputs_payload(notebook))
+
+
+def _declared_project_version() -> str:
+    in_project_table = False
+    declared_versions: list[str] = []
+    for raw_line in PROJECT_FILE.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("["):
+            if in_project_table:
+                break
+            in_project_table = stripped == "[project]"
+            continue
+        if not in_project_table:
+            continue
+        match = re.fullmatch(r'version\s*=\s*"([^"]+)"\s*(?:#.*)?', stripped)
+        if match:
+            declared_versions.append(match.group(1))
+    if len(declared_versions) != 1:
+        raise RuntimeError(
+            "pyproject.toml [project] must contain exactly one double-quoted version"
+        )
+    return declared_versions[0]
+
+
+def _assert_checkout_import(*, source_only: bool = False) -> str:
     package_file = Path(explainiverse.__file__).resolve()
     expected_root = PACKAGE_SOURCE_DIR.resolve()
     if package_file != expected_root / "__init__.py" and expected_root not in package_file.parents:
         raise RuntimeError(
             f"Explainiverse imported from {package_file}, expected the checkout under {expected_root}"
         )
-    if explainiverse.__version__ != version("explainiverse"):
-        raise RuntimeError("Package metadata and explainiverse.__version__ disagree")
+    declared_version = _declared_project_version()
+    if explainiverse.__version__ != declared_version:
+        raise RuntimeError("pyproject.toml and explainiverse.__version__ disagree")
+
+    try:
+        metadata_version = version("explainiverse")
+    except PackageNotFoundError:
+        metadata_version = None
+    if source_only:
+        if metadata_version is not None:
+            raise RuntimeError(
+                "source-only tutorial verification requires the Explainiverse distribution "
+                f"to be absent; found {metadata_version}"
+            )
+    elif metadata_version is None:
+        raise RuntimeError("Explainiverse distribution metadata is missing")
+    elif metadata_version != declared_version:
+        raise RuntimeError("Package metadata and the declared project version disagree")
+    return declared_version
 
 
 def _validate_manifest_inventory() -> None:
@@ -337,7 +381,55 @@ def _validate_published_outputs(path: Path, notebook: NotebookNode) -> None:
             raise ValueError(f"{path.name}: code cell {index + 1} contains a published error")
 
 
-def _validate_published_provenance(path: Path, notebook: NotebookNode) -> None:
+def _validate_reexecuted_outputs(
+    path: Path,
+    published: NotebookNode,
+    executed: NotebookNode,
+) -> None:
+    """Require a clean execution to reproduce the reviewed stored outputs."""
+    _validate_published_outputs(path, executed)
+    published_digest = _published_outputs_digest(published)
+    executed_digest = _published_outputs_digest(executed)
+    if executed_digest != published_digest:
+        published_payload = _published_outputs_payload(published)
+        executed_payload = _published_outputs_payload(executed)
+        differing_cell = next(
+            index
+            for index, (expected, actual) in enumerate(
+                zip(published_payload, executed_payload, strict=True), start=1
+            )
+            if expected != actual
+        )
+        expected_output = json.dumps(
+            published_payload[differing_cell - 1],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        actual_output = json.dumps(
+            executed_payload[differing_cell - 1],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        diagnostic_limit = 2_000
+        raise ValueError(
+            f"{path.name}: clean execution no longer matches the published outputs; "
+            f"published_sha256={published_digest}; executed_sha256={executed_digest}; "
+            f"first_differing_code_cell={differing_cell}; "
+            f"published={expected_output[:diagnostic_limit]!r}; "
+            f"executed={actual_output[:diagnostic_limit]!r}; "
+            "review the numerical/API change and run scripts/execute_tutorials.py --write "
+            "to publish intentionally updated outputs"
+        )
+
+
+def _validate_published_provenance(
+    path: Path,
+    notebook: NotebookNode,
+    *,
+    expected_version: str | None = None,
+) -> None:
     spec = SPEC_BY_FILENAME[path.name]
     record = notebook.metadata.get("explainiverse_execution", {})
     if not isinstance(record, dict):
@@ -346,7 +438,7 @@ def _validate_published_provenance(path: Path, notebook: NotebookNode) -> None:
     expected = {
         "schema_version": PROVENANCE_SCHEMA_VERSION,
         "status": "verified",
-        "explainiverse_version": version("explainiverse"),
+        "explainiverse_version": expected_version or version("explainiverse"),
         "poetry_lock_sha256": _lock_digest(),
         "package_source_sha256": _package_source_digest(),
         "notebook_source_sha256": _notebook_source_digest(notebook),
@@ -447,14 +539,20 @@ def _execute(notebook: NotebookNode, timeout: int) -> NotebookNode:
     return executed
 
 
-def _publish_record(path: Path, notebook: NotebookNode, executed_at: str) -> None:
+def _publish_record(
+    path: Path,
+    notebook: NotebookNode,
+    executed_at: str,
+    *,
+    expected_version: str,
+) -> None:
     spec = SPEC_BY_FILENAME[path.name]
     _parse_utc_timestamp(executed_at, path=path)
     notebook.metadata["explainiverse_execution"] = {
         "schema_version": PROVENANCE_SCHEMA_VERSION,
         "status": "verified",
         "executed_at_utc": executed_at,
-        "explainiverse_version": version("explainiverse"),
+        "explainiverse_version": expected_version,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "poetry_lock_sha256": _lock_digest(),
@@ -470,28 +568,38 @@ def _publish_record(path: Path, notebook: NotebookNode, executed_at: str) -> Non
     }
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "notebooks", nargs="*", help="Reviewed tutorials (defaults to the complete manifest)"
     )
     parser.add_argument("--write", action="store_true", help="Publish fresh outputs and provenance")
+    parser.add_argument(
+        "--source-only",
+        action="store_true",
+        help=(
+            "Verify the checkout while requiring installed Explainiverse distribution metadata "
+            "to be absent; this mode cannot publish notebooks"
+        ),
+    )
     parser.add_argument("--timeout", type=int, default=300, help="Per-cell timeout in seconds")
     parser.add_argument(
         "--executed-at",
         help="UTC ISO-8601 timestamp used with --write (defaults to the current time)",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = _parse_args()
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parse_args(argv)
     if args.timeout <= 0:
         raise ValueError("--timeout must be positive")
     if args.executed_at and not args.write:
         raise ValueError("--executed-at requires --write")
+    if args.source_only and args.write:
+        raise ValueError("--source-only cannot be combined with --write")
 
-    _assert_checkout_import()
+    expected_version = _assert_checkout_import(source_only=args.source_only)
     paths = _resolve_notebooks(args.notebooks)
     executed_at = args.executed_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -503,18 +611,19 @@ def main() -> int:
         notebook = nbformat.read(path, as_version=4)
         _validate_source(path, notebook)
         if not args.write:
-            _validate_published_provenance(path, notebook)
+            _validate_published_provenance(path, notebook, expected_version=expected_version)
 
         executed = _execute(copy.deepcopy(notebook), args.timeout)
         executions.append((path, executed))
         if not args.write:
+            _validate_reexecuted_outputs(path, notebook, executed)
             print(f"verified {path.relative_to(ROOT)}")
 
     # Execute the entire selected set successfully before changing any notebook.
     if args.write:
         for path, executed in executions:
-            _publish_record(path, executed, executed_at)
-            _validate_published_provenance(path, executed)
+            _publish_record(path, executed, executed_at, expected_version=expected_version)
+            _validate_published_provenance(path, executed, expected_version=expected_version)
             nbformat.write(executed, path)
             print(f"published {path.relative_to(ROOT)}")
 

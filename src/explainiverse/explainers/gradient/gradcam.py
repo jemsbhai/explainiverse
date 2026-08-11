@@ -28,6 +28,17 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._image_layout import (
+    channel_axis_for_layout,
+    image_to_nchw,
+    validate_image_layout,
+)
+from explainiverse.explainers.gradient._input import (
+    as_floating_array,
+    scale_safe_mean_std,
+    scale_safe_product_sum,
+    scale_safe_spatial_mean_product_sum,
+)
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 Target = Optional[Union[int, np.integer]]
@@ -62,59 +73,53 @@ def _unflatten_spatial_size(adapter) -> Optional[Tuple[int, int]]:
 
 
 def _validate_input_layout(input_layout: str) -> str:
-    if not isinstance(input_layout, str):
-        raise TypeError("input_layout must be 'auto', 'chw', or 'hwc'")
-    normalized = input_layout.strip().lower()
-    if normalized not in {"auto", "chw", "hwc"}:
-        raise ValueError("input_layout must be 'auto', 'chw', or 'hwc'")
-    return normalized
+    """Backward-compatible alias for the shared explicit layout validator."""
+
+    return validate_image_layout(input_layout)
+
+
+def _get_layer_output_with_trace(adapter, data, *, layer_name: str, **options):
+    """Use atomic trace evidence when the adapter exposes it."""
+
+    traced = getattr(adapter, "get_layer_output_with_trace", None)
+    if callable(traced):
+        return traced(data, layer_name=layer_name, **options)
+    return adapter.get_layer_output(data, layer_name=layer_name, **options), None
+
+
+def _get_layer_gradients_with_trace(
+    adapter, data, *, layer_name: str, target_class: int, **options
+):
+    """Use atomic trace evidence while preserving third-party adapter support."""
+
+    traced = getattr(adapter, "get_layer_gradients_with_trace", None)
+    if callable(traced):
+        return traced(
+            data,
+            layer_name=layer_name,
+            target_class=target_class,
+            **options,
+        )
+    activations, gradients = adapter.get_layer_gradients(
+        data,
+        layer_name=layer_name,
+        target_class=target_class,
+        **options,
+    )
+    return activations, gradients, None
 
 
 def _prepare_single_input(
     adapter, image: np.ndarray, input_layout: str = "auto"
-) -> Tuple[np.ndarray, Tuple[int, int]]:
-    """Normalize one CHW/HWC image (or an explicit flat-unflatten input)."""
+) -> Tuple[np.ndarray, Tuple[int, int], str]:
+    """Normalize one declared image (or an explicit flat-unflatten input)."""
     input_layout = _validate_input_layout(input_layout)
-    prepared = as_real_array(image, name="image", dtype=np.float32, require_finite=True)
+    prepared = as_floating_array(image, name="image")
 
     if prepared.size == 0:
         raise ValueError("image must not be empty")
 
-    if prepared.ndim == 3:
-        if input_layout == "chw":
-            prepared = prepared[np.newaxis, ...]
-        elif input_layout == "hwc":
-            prepared = np.transpose(prepared, (2, 0, 1))[np.newaxis, ...]
-        else:
-            first_is_channel = prepared.shape[0] in (1, 3, 4)
-            last_is_channel = prepared.shape[-1] in (1, 3, 4)
-            if first_is_channel and last_is_channel:
-                raise ValueError(
-                    "Ambiguous 3D image layout: both the first and last axes "
-                    "could be channels. Set input_layout='chw' or 'hwc'."
-                )
-            if first_is_channel:
-                prepared = prepared[np.newaxis, ...]
-            elif last_is_channel:
-                prepared = np.transpose(prepared, (2, 0, 1))[np.newaxis, ...]
-            else:
-                raise ValueError(
-                    "A 3D image in input_layout='auto' must have 1, 3, or 4 "
-                    "channels on exactly one edge; set input_layout explicitly "
-                    "for other channel counts"
-                )
-    elif prepared.ndim == 4:
-        if input_layout == "hwc":
-            raise ValueError(
-                "A four-dimensional input to explain() must use (1, C, H, W); "
-                "input_layout='hwc' applies only to one three-dimensional image"
-            )
-        if prepared.shape[0] != 1:
-            raise ValueError(
-                "explain() accepts exactly one image; use explain_batch() for "
-                f"a batch of size {prepared.shape[0]}"
-            )
-    elif prepared.ndim in (1, 2) and _model_has_unflatten(adapter):
+    if prepared.ndim in (1, 2) and _model_has_unflatten(adapter):
         if input_layout != "auto":
             raise ValueError("input_layout must be 'auto' for flat Unflatten inputs")
         if prepared.ndim == 1:
@@ -124,9 +129,12 @@ def _prepare_single_input(
                 "explain() accepts exactly one flat input; use explain_batch() "
                 f"for a batch of size {prepared.shape[0]}"
             )
+        resolved_layout = "flat"
+    elif prepared.ndim in (2, 3, 4):
+        prepared, resolved_layout = image_to_nchw(prepared, input_layout)
     else:
         raise ValueError(
-            "Expected one CHW/HWC image, a (1, C, H, W) tensor, or a flat "
+            "Expected one declared HW/CHW/HWC/NCHW/NHWC image or a flat "
             "input for a model with an Unflatten layer; "
             f"got shape {prepared.shape}"
         )
@@ -144,7 +152,7 @@ def _prepare_single_input(
             )
         input_size = resolved_size
 
-    return np.ascontiguousarray(prepared), input_size
+    return np.ascontiguousarray(prepared), input_size, resolved_layout
 
 
 def _validate_target(target_class: Target) -> Optional[int]:
@@ -243,10 +251,17 @@ def _normalize_cam(cam: np.ndarray) -> np.ndarray:
         raise ValueError(f"CAM must be a non-empty 2D array; got shape {cam.shape}")
     minimum = float(np.min(cam))
     maximum = float(np.max(cam))
-    span = maximum - minimum
-    if span <= np.finfo(np.float64).eps:
+    if minimum == maximum:
         return np.zeros(cam.shape, dtype=np.float64)
-    return (cam - minimum) / span
+
+    # Scale before subtracting.  Direct ``maximum - minimum`` can overflow for
+    # opposite-sign finite extremes, while an absolute epsilon threshold
+    # incorrectly erases genuine structure at very small magnitudes.
+    scale = max(abs(minimum), abs(maximum))
+    scaled = cam / scale
+    scaled_minimum = minimum / scale
+    scaled_span = maximum / scale - scaled_minimum
+    return (scaled - scaled_minimum) / scaled_span
 
 
 def _cam_normalization_metadata(cam: np.ndarray) -> dict:
@@ -256,7 +271,7 @@ def _cam_normalization_metadata(cam: np.ndarray) -> dict:
         raise ValueError("CAM normalization metadata requires one finite non-empty 2D map")
     minimum = float(np.min(values))
     maximum = float(np.max(values))
-    degenerate = bool(maximum - minimum <= np.finfo(np.float64).eps)
+    degenerate = bool(maximum == minimum)
     return {
         "normalization_input_min": minimum,
         "normalization_input_max": maximum,
@@ -346,6 +361,7 @@ class GradCAMExplainer(BaseExplainer):
         class_names: Optional[List[str]] = None,
         method: str = "gradcam",
         input_layout: str = "auto",
+        target_occurrence: Optional[int] = None,
     ):
         super().__init__(model)
         if not callable(getattr(model, "get_layer_gradients", None)):
@@ -374,13 +390,24 @@ class GradCAMExplainer(BaseExplainer):
         )
         self.method = "gradcam"
         self.input_layout = _validate_input_layout(input_layout)
+        if target_occurrence is not None and (
+            isinstance(target_occurrence, bool) or not isinstance(target_occurrence, Integral)
+        ):
+            raise TypeError("target_occurrence must be a non-negative integer or None")
+        if target_occurrence is not None and int(target_occurrence) < 0:
+            raise ValueError("target_occurrence must be a non-negative integer or None")
+        self.target_occurrence = None if target_occurrence is None else int(target_occurrence)
 
     @staticmethod
     def _compute_gradcam(activations: np.ndarray, gradients: np.ndarray) -> np.ndarray:
         """Apply Selvaraju et al. equations 1 and 2 before display scaling."""
         activations, gradients = _validate_spatial_pair(activations, gradients)
-        weights = np.mean(gradients, axis=(2, 3), keepdims=True)
-        return np.maximum(np.sum(weights * activations, axis=1)[0], 0.0)
+        try:
+            weights = scale_safe_mean_std(gradients, axis=(2, 3))[0][:, :, None, None]
+            raw_cam = scale_safe_product_sum(weights, activations, axis=1)[0]
+        except FloatingPointError:
+            raw_cam = scale_safe_spatial_mean_product_sum(activations, gradients)[0]
+        return np.maximum(raw_cam, 0.0)
 
     def _label_for_target(self, target: int) -> str:
         if self.class_names is not None and target < len(self.class_names):
@@ -401,16 +428,21 @@ class GradCAMExplainer(BaseExplainer):
             raise TypeError(f"Unexpected GradCAM option(s): {unexpected}")
         if not isinstance(resize_to_input, (bool, np.bool_)):
             raise TypeError("resize_to_input must be a boolean")
-        prepared, input_size = _prepare_single_input(
+        prepared, input_size, resolved_layout = _prepare_single_input(
             self.model, instance, input_layout=self.input_layout
         )
 
         with _preserve_adapter_model_state(self.model, preserve_gradients=True):
             target = _resolve_target(self.model, prepared, target_class)
-            activations, gradients = self.model.get_layer_gradients(
+            layer_options: dict[str, int] = {}
+            if self.target_occurrence is not None:
+                layer_options["occurrence"] = self.target_occurrence
+            activations, gradients, layer_trace = _get_layer_gradients_with_trace(
+                self.model,
                 prepared,
                 layer_name=self.target_layer,
                 target_class=target,
+                **layer_options,
             )
             cam = self._compute_gradcam(activations, gradients)
             score_space = getattr(self.model, "last_gradient_output_space", None) or "unknown"
@@ -430,7 +462,15 @@ class GradCAMExplainer(BaseExplainer):
                 "target_index": target,
                 "method": "gradcam",
                 "input_shape": list(prepared.shape),
-                "input_layout": self.input_layout,
+                "input_layout": resolved_layout,
+                "configured_input_layout": self.input_layout,
+                "channel_axis": (
+                    None if resolved_layout == "flat" else channel_axis_for_layout(resolved_layout)
+                ),
+                "target_occurrence": self.target_occurrence,
+                "target_layer_call_count": (
+                    None if layer_trace is None else layer_trace.call_count
+                ),
             },
             metadata={
                 "formula_verified": True,

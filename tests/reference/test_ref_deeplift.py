@@ -22,10 +22,20 @@ class TestDeepLIFTReferenceAgreement:
         iris_data,
         captum_deeplift_iris,
     ):
+        from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import DeepLIFTExplainer
 
+        # The trained fixture's custom root is intentionally outside the
+        # verified graph contract. Its complete computation is the owned exact
+        # Sequential child, which preserves the same weights and outputs.
+        exact_adapter = PyTorchAdapter(
+            adapted_mlp_multiclass.model.net,
+            task="classification",
+            feature_names=iris_data["feature_names"],
+            class_names=iris_data["class_names"],
+        )
         explainer = DeepLIFTExplainer(
-            adapted_mlp_multiclass,
+            exact_adapter,
             feature_names=iris_data["feature_names"],
             class_names=iris_data["class_names"],
         )

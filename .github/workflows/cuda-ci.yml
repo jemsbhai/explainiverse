@@ -1,0 +1,186 @@
+name: CUDA release contracts
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 3"
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: cuda-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  cuda-runner-routing:
+    name: Require approved CUDA runner routing
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Require exact reviewed CUDA runner labels
+        env:
+          CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
+          CUDA_TWO_RUNNER: ${{ vars.CUDA_TWO_RUNNER }}
+        run: |
+          if [[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]; then
+            echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$CUDA_TWO_RUNNER" != "explainiverse-cuda-two" ]]; then
+              echo "CUDA_TWO_RUNNER must be exactly explainiverse-cuda-two" >&2
+              exit 1
+            fi
+          fi
+
+  single-gpu:
+    name: CUDA single-GPU (Torch ${{ matrix.torch-edge }})
+    needs: cuda-runner-routing
+    if: ${{ always() }}
+    # A rejected prerequisite selects only the hosted failure reporter below;
+    # accepted work can run only on the reviewed custom GPU label.
+    runs-on: >-
+      ${{ needs.cuda-runner-routing.result == 'success' &&
+      'explainiverse-cuda-single' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - torch-edge: minimum
+            python-version: "3.10"
+            constraints: .github/constraints/captum-min.txt
+          - torch-edge: latest
+            python-version: "3.12"
+            constraints: none
+    env:
+      EXPLAINIVERSE_REQUIRED_CUDA_DEVICES: "1"
+      EXPLAINIVERSE_ENFORCE_CUDA_MANIFEST: "1"
+      CUDA_VISIBLE_DEVICES: "0"
+
+    steps:
+      - name: Fail the required check when CUDA routing is rejected
+        if: needs.cuda-runner-routing.result != 'success'
+        run: |
+          echo "approved single-GPU runner routing is unavailable" >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Require Linux GPU runner OS
+        run: test "$RUNNER_OS" = Linux
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/captum-min.txt
+
+      - name: Install the supported Torch edge
+        env:
+          CONSTRAINTS: ${{ matrix.constraints }}
+        run: |
+          python -m pip install --upgrade pip
+          constraint_args=()
+          if [[ "$CONSTRAINTS" != none ]]; then
+            constraint_args=(--constraint "$CONSTRAINTS")
+          fi
+          python -m pip install --upgrade --upgrade-strategy eager \
+            "${constraint_args[@]}" --editable ".[all]" "pytest>=8,<9"
+          python -m pip check
+
+      - name: Prove real driver, runtime, and device visibility
+        run: |
+          nvidia-smi
+          python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0)); assert torch.cuda.is_available(); assert torch.cuda.device_count() == 1"
+
+      - name: Run every CUDA contract with zero skips
+        run: python -m pytest --strict-config --strict-markers tests_cuda/test_cuda_release.py
+
+  two-gpu:
+    name: CUDA two-GPU scheduled (Torch ${{ matrix.torch-edge }})
+    needs: cuda-runner-routing
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # A rejected prerequisite selects only the hosted failure reporter below;
+    # accepted work can run only on the reviewed custom GPU label.
+    runs-on: >-
+      ${{ needs.cuda-runner-routing.result == 'success' &&
+      'explainiverse-cuda-two' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - torch-edge: minimum
+            python-version: "3.10"
+            constraints: .github/constraints/captum-min.txt
+          - torch-edge: latest
+            python-version: "3.12"
+            constraints: none
+    env:
+      EXPLAINIVERSE_REQUIRED_CUDA_DEVICES: "2"
+      EXPLAINIVERSE_ENFORCE_CUDA_MANIFEST: "1"
+      CUDA_VISIBLE_DEVICES: "0,1"
+
+    steps:
+      - name: Fail the required check when CUDA routing is rejected
+        if: needs.cuda-runner-routing.result != 'success'
+        run: |
+          echo "approved two-GPU runner routing is unavailable" >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Require Linux GPU runner OS
+        run: test "$RUNNER_OS" = Linux
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/constraints/captum-min.txt
+
+      - name: Install the supported Torch edge
+        env:
+          CONSTRAINTS: ${{ matrix.constraints }}
+        run: |
+          python -m pip install --upgrade pip
+          constraint_args=()
+          if [[ "$CONSTRAINTS" != none ]]; then
+            constraint_args=(--constraint "$CONSTRAINTS")
+          fi
+          python -m pip install --upgrade --upgrade-strategy eager \
+            "${constraint_args[@]}" --editable ".[all]" "pytest>=8,<9"
+          python -m pip check
+
+      - name: Prove two real visible CUDA devices
+        run: |
+          nvidia-smi
+          python -c "import torch; print(torch.__version__, torch.version.cuda, [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]); assert torch.cuda.is_available(); assert torch.cuda.device_count() == 2"
+
+      - name: Run every CUDA contract with zero skips
+        run: python -m pytest --strict-config --strict-markers tests_cuda/test_cuda_release.py

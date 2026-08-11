@@ -121,6 +121,7 @@ const styles: Record<string, CSSProperties> = {
   },
   header: {
     display: 'flex',
+    flexWrap: 'wrap',
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: '16px',
@@ -129,18 +130,23 @@ const styles: Record<string, CSSProperties> = {
     borderBottom: '2px solid #e5e7eb',
   },
   title: {
+    minWidth: 0,
     margin: 0,
     fontSize: '28px',
     fontWeight: '700',
     color: '#111827',
+    overflowWrap: 'anywhere',
   },
   badge: {
+    boxSizing: 'border-box',
+    maxWidth: '100%',
     padding: '6px 16px',
     backgroundColor: '#1d4ed8',
     color: '#ffffff',
     borderRadius: '20px',
     fontSize: '14px',
     fontWeight: '600',
+    overflowWrap: 'anywhere',
   },
   disclosure: {
     margin: '0 0 16px',

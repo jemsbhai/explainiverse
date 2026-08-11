@@ -5,8 +5,11 @@ explanations. Its public registry records what each explainer has actually been 
 it does not rank methods by quality or claim that one method is appropriate for a particular
 deployment.
 
-Release `0.14.0` declares Python 3.10 through 3.13. Its source distribution and wheel are built
-from the tagged `v0.14.0` revision and include the accuracy-remediation changes described below.
+The latest version published on PyPI is `0.14.0`. Its distributions were uploaded with Twine,
+without Trusted Publishing or published provenance. The matching annotated Git tag is unsigned
+and no GitHub Release exists, so the cross-service release record is incomplete. This checkout
+is the `0.15.0` stable-release candidate and still declares Python 3.10 through
+3.13. It has not been tagged or published.
 
 ## Accuracy status
 
@@ -87,17 +90,23 @@ fallback scores.
 
 ## Installation from a checkout
 
-Base dependencies:
+Base dependencies, including the image utilities required by the mandatory
+LIME backend:
 
 ```bash
 python -m pip install -e .
 ```
 
-PyTorch/Captum and image extras:
+PyTorch/Captum extras:
 
 ```bash
 python -m pip install -e ".[all]"
 ```
+
+The historical `image` extra was redundant because LIME already installed
+scikit-image. Scikit-image is now an explicit base dependency and the no-op
+extra has been removed. Consumers that previously installed `.[image]` should
+install the base package instead; `.[all]` continues to add Torch and Captum.
 
 For development, synchronize the locked all-extras environment:
 
@@ -165,12 +174,13 @@ original Python or NumPy types, so the result is not promised to be directly JSO
 
 ## Tutorials and other packages
 
-The LIME, KernelSHAP, and TreeSHAP notebooks under `tutorials/` are deterministic, offline
-teaching artifacts verified against this checkout. Each published notebook contains a dated
-execution record, package version, Python/platform record, and canonicalized `poetry.lock`
-digest. The repository harness statically rejects common package-install/network access paths,
-adds a non-loopback Python socket guard, executes a clean in-memory copy, and fails on stale
-source, output, runner, package-tree, or lock provenance:
+The LIME, KernelSHAP, TreeSHAP, and finite-estimator uncertainty/intervention-sensitivity
+notebooks under `tutorials/` are deterministic, offline teaching artifacts verified against
+this checkout. Each published notebook contains a dated execution record, package version,
+Python/platform record, and canonicalized `poetry.lock` digest. The repository harness
+statically rejects common package-install/network access paths, adds a non-loopback Python
+socket guard, executes a clean in-memory copy, and fails on stale source, output, runner,
+package-tree, or lock provenance:
 
 ```bash
 poetry run python scripts/execute_tutorials.py
@@ -215,9 +225,11 @@ job. CUDA execution is outside the verified device scope until a GPU runner is p
 release gate. Reference packages are imported explicitly before tests, and the built wheel and
 source distribution are each exercised in isolated consumer environments.
 
-See [the accuracy roadmap](docs/ROADMAP.md) for current priorities. The former competitive
-comparison was withdrawn in [SOTA_COMPARISON.md](docs/SOTA_COMPARISON.md) because raw API counts
-and cross-library marketing claims were not scientifically comparable.
+See the [0.15 migration notes](docs/MIGRATION_0_15.md), the
+[residual-limitations mitigation plan](docs/LIMITATION_MITIGATION_PLAN.md), and the
+[accuracy roadmap](docs/ROADMAP.md) for current contracts and priorities. The former
+competitive comparison was withdrawn in [SOTA_COMPARISON.md](docs/SOTA_COMPARISON.md) because
+raw API counts and cross-library marketing claims were not scientifically comparable.
 
 ## License and citation
 
@@ -227,4 +239,5 @@ published JavaScript distribution.
 
 If you use a particular explainer or metric, cite its primary source as well as the exact
 software revision and configuration you ran. For release `0.14.0`, cite the `v0.14.0` tag (or its
-commit hash) and your configuration; the PyPI `0.14.0` artifacts are built from that revision.
+commit hash) and your configuration. PyPI hosts `0.14.0` artifacts, but there is no corresponding
+GitHub Release or Trusted-Publishing provenance record.

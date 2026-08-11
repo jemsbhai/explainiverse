@@ -1,0 +1,19 @@
+{
+  "schema_version": "explainiverse.explanation.v1",
+  "explainer_name": "wire-fixture",
+  "target_class": "class-1",
+  "explanation_data": {
+    "feature_attributions": {
+      "alpha": 0.75,
+      "beta": -0.25
+    },
+    "diagnostics": [true, null, "finite", 3.5]
+  },
+  "feature_names": ["alpha", "beta"],
+  "metadata": {
+    "source": "cross-language-fixture",
+    "nested": {
+      "count": 2
+    }
+  }
+}

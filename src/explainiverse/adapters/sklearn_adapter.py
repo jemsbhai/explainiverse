@@ -1,5 +1,7 @@
 # src/explainiverse/adapters/sklearn_adapter.py
 
+from typing import Any, Iterable, cast
+
 import numpy as np
 from sklearn.base import is_classifier, is_regressor
 
@@ -22,9 +24,7 @@ class SklearnAdapter(BaseModelAdapter):
             raise ValueError(f"task must be 'classification', 'regression', or None; got {task!r}")
 
         super().__init__(model, feature_names)
-        self.class_names = list(class_names) if class_names is not None else None
-        if self.class_names is not None and len(set(self.class_names)) != len(self.class_names):
-            raise ValueError("class_names must be unique")
+        self.class_names = self._normalize_class_names(class_names)
 
         inferred_task = self._infer_task(model)
         if task is None:
@@ -43,6 +43,45 @@ class SklearnAdapter(BaseModelAdapter):
 
         if self.task == "classification":
             self._validate_class_metadata()
+            # ``predict`` always exposes full probability columns. Estimators
+            # without ``predict_proba`` are represented by one-hot indicators,
+            # which are valid endpoint probabilities rather than hard labels.
+            self.prediction_output_kind = "probabilities"
+        else:
+            self.prediction_output_kind = "regression_values"
+
+    @staticmethod
+    def _normalize_class_names(class_names):
+        """Validate display labels without treating a string as a sequence."""
+        if class_names is None:
+            return None
+        if isinstance(class_names, (str, bytes)):
+            raise TypeError("class_names must be an iterable of strings or None")
+        try:
+            names = list(class_names)
+        except TypeError as exc:
+            raise TypeError("class_names must be an iterable of strings or None") from exc
+        if not names:
+            raise ValueError("class_names must not be empty")
+        if any(not isinstance(name, str) for name in names):
+            raise TypeError("class_names must contain only strings")
+        if any(not name.strip() for name in names):
+            raise ValueError("class_names must contain non-empty, non-whitespace strings")
+        if len(set(names)) != len(names):
+            raise ValueError("class_names must be unique")
+        return names
+
+    @staticmethod
+    def _contains_complex_values(values: np.ndarray) -> bool:
+        """Detect native and object-wrapped complex values before real casts."""
+        object_values = cast(Iterable[Any], values.flat)
+        return bool(
+            np.iscomplexobj(values)
+            or (
+                values.dtype == object
+                and any(isinstance(value, (complex, np.complexfloating)) for value in object_values)
+            )
+        )
 
     @staticmethod
     def _infer_task(model):
@@ -147,6 +186,8 @@ class SklearnAdapter(BaseModelAdapter):
                 if probabilities.shape[0] != n_samples or probabilities.shape[1] == 0:
                     raise ValueError("predict_proba returned an invalid output shape")
                 self._validate_class_metadata(output_width=probabilities.shape[1])
+                if self._contains_complex_values(probabilities):
+                    raise ValueError("predict_proba outputs must not contain complex values")
                 try:
                     probabilities = probabilities.astype(float, copy=False)
                 except (TypeError, ValueError) as exc:
@@ -172,6 +213,8 @@ class SklearnAdapter(BaseModelAdapter):
             )
         if predictions.shape[0] != n_samples or predictions.shape[1] == 0:
             raise ValueError("regression predict returned an invalid output shape")
+        if self._contains_complex_values(predictions):
+            raise ValueError("regression predictions must not contain complex values")
         try:
             predictions = predictions.astype(float, copy=False)
         except (TypeError, ValueError) as exc:

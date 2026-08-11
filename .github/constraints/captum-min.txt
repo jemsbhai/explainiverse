@@ -1,0 +1,3 @@
+# Minimum supported Torch/Captum pair (Python 3.10/Linux scheduled probe).
+torch==2.0.0
+captum==0.8.0

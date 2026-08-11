@@ -19,6 +19,14 @@ from explainiverse.adapters import SklearnAdapter
 from explainiverse.core import Explanation
 from explainiverse.evaluation import compute_batch_irof, compute_irof, compute_irof_multi_segment
 
+
+def _manual_trapezoid(values, coordinates):
+    """Independent NumPy-1.24-compatible trapezoidal integration oracle."""
+    y = np.asarray(values, dtype=np.float64)
+    x = np.asarray(coordinates, dtype=np.float64)
+    return float(np.sum((y[:-1] + y[1:]) * np.diff(x) / 2.0))
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -983,7 +991,10 @@ class TestTargetClass:
             expected_predictions = expected_probabilities[:, target]
             expected_normalised = expected_predictions / expected_predictions[0]
             expected_curve = 1.0 - expected_normalised
-            expected_aoc = np.trapezoid(expected_curve, np.linspace(0.0, 1.0, len(expected_curve)))
+            expected_aoc = _manual_trapezoid(
+                expected_curve,
+                np.linspace(0.0, 1.0, len(expected_curve)),
+            )
             assert result["segment_order"] == [0, 1, 2, 3]
             np.testing.assert_allclose(result["predictions"], expected_predictions)
             np.testing.assert_allclose(result["normalised_predictions"], expected_normalised)

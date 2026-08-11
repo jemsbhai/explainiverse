@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import xgboost as xgb
 from sklearn.datasets import load_breast_cancer, load_diabetes, load_iris
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
@@ -34,6 +33,10 @@ try:
 except ImportError:  # PyTorch is an optional package dependency.
     torch = None
     nn = None
+
+# Both macOS ARM64 wheels link OpenMP. Loading PyTorch's vendored runtime first
+# avoids initializing a second incompatible runtime before PyTorch executes.
+import xgboost as xgb
 
 # ─────────────────────────────────────────────────────────────────────
 # Constants
@@ -773,88 +776,8 @@ def gradient_x_input_iris(torch_mlp_multiclass, iris_test_instances):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Quantus metric wrappers (for convenient comparison)
+# Quantus comparisons live only in the explicitly marked reference partition.
 # ─────────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(scope="session")
-def quantus_metrics():
-    """
-    Dict of pre-configured Quantus metric instances.
-
-    All configured with disable_warnings=True and consistent parameters
-    that match Explainiverse defaults where possible.
-    """
-    import quantus
-
-    return {
-        "monotonicity": quantus.Monotonicity(
-            features_in_step=1,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "monotonicity_nguyen": quantus.MonotonicityCorrelation(
-            nr_samples=10,
-            features_in_step=1,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "faithfulness_estimate": quantus.FaithfulnessEstimate(
-            features_in_step=1,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "faithfulness_correlation": quantus.FaithfulnessCorrelation(
-            nr_runs=10,
-            subset_size=2,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "sensitivity_n": quantus.SensitivityN(
-            features_in_step=1,
-            n_max_percentage=0.8,
-            similarity_func=quantus.similarity_func.correlation_pearson,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "infidelity": quantus.Infidelity(
-            perturb_baseline="mean",
-            n_perturb_samples=10,
-            disable_warnings=True,
-        ),
-        "pixel_flipping": quantus.PixelFlipping(
-            features_in_step=1,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "region_perturbation": quantus.RegionPerturbation(
-            patch_size=1,
-            regions_evaluation=5,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "selectivity": quantus.Selectivity(
-            patch_size=1,
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "irof": quantus.IterativeRemovalOfFeatures(
-            segmentation_method="felzenszwalb",
-            perturb_baseline="mean",
-            disable_warnings=True,
-        ),
-        "insertion_auc": quantus.InsertionCurve(
-            disable_warnings=True,
-        ),
-        "deletion_auc": quantus.DeletionCurve(
-            disable_warnings=True,
-        ),
-        "road": quantus.ROAD(
-            noise=0.01,
-            percentages=list(range(1, 100, 2)),
-            disable_warnings=True,
-        ),
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────

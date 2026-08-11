@@ -42,6 +42,7 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import validate_name_sequence
+from explainiverse.explainers.gradient._input import as_floating_array, scale_safe_mean_std
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
 
 
@@ -149,7 +150,9 @@ class SmoothGradExplainer(BaseExplainer):
         assert validated_features is not None
         self.feature_names: List[str] = validated_features
         self.class_names: Optional[List[str]] = (
-            validate_name_sequence(class_names, name="class_names") if class_names else None
+            validate_name_sequence(class_names, name="class_names")
+            if class_names is not None
+            else None
         )
         self.n_samples: int = int(n_samples)
         self.noise_scale: float = float(noise_scale)
@@ -166,12 +169,19 @@ class SmoothGradExplainer(BaseExplainer):
             target_index = int(target_class)
             if target_index < 0:
                 raise ValueError("target_class must be non-negative")
-            if self.class_names is not None and target_index >= len(self.class_names):
+            task = getattr(self.model, "task", None)
+            if (
+                task != "regression"
+                and self.class_names is not None
+                and target_index >= len(self.class_names)
+            ):
                 raise ValueError(f"target_class must be in [0, {len(self.class_names) - 1}]")
             return target_index
 
-        is_classification = getattr(self.model, "task", None) == "classification"
-        if not is_classification and self.class_names is None:
+        task = getattr(self.model, "task", None)
+        if task == "regression":
+            return None
+        if task != "classification" and self.class_names is None:
             return None
 
         with preserve_adapter_model_eval(self.model, preserve_gradients=False):
@@ -205,22 +215,17 @@ class SmoothGradExplainer(BaseExplainer):
                 "instance feature count must match feature_names exactly; "
                 f"got {raw.size} values and {len(self.feature_names)} names"
             )
-        if not np.isrealobj(raw):
-            raise ValueError("instance must contain only finite real values")
-        try:
-            prepared = raw.astype(np.float32, copy=True)
-        except (TypeError, ValueError) as error:
-            raise TypeError("instance must contain real numeric values") from error
-        if not np.isrealobj(prepared) or not np.isfinite(prepared).all():
-            raise ValueError("instance must contain only finite real values")
-        return prepared
+        return as_floating_array(raw, name="instance")
 
     def _new_rng(self) -> np.random.Generator:
         """Create the local generator for one public attribution call."""
         return np.random.default_rng(self.random_state)
 
     def _generate_noise(
-        self, shape: tuple, rng: Optional[np.random.Generator] = None
+        self,
+        shape: tuple,
+        rng: Optional[np.random.Generator] = None,
+        dtype=np.float32,
     ) -> np.ndarray:
         """
         Generate noise samples based on the configured noise type.
@@ -235,9 +240,21 @@ class SmoothGradExplainer(BaseExplainer):
         """
         local_rng = self._new_rng() if rng is None else rng
         if self.noise_type == "gaussian":
-            return local_rng.normal(0, self.noise_scale, shape).astype(np.float32)
+            values = local_rng.normal(0, self.noise_scale, shape)
         else:  # uniform
-            return local_rng.uniform(-self.noise_scale, self.noise_scale, shape).astype(np.float32)
+            values = local_rng.uniform(-self.noise_scale, self.noise_scale, shape)
+        return values.astype(dtype)
+
+    @staticmethod
+    def _validate_options(method: str, absolute_value: bool) -> str:
+        if not isinstance(method, str):
+            raise TypeError("method must be 'smoothgrad', 'smoothgrad_squared', or 'vargrad'")
+        valid_methods = {"smoothgrad", "smoothgrad_squared", "vargrad"}
+        if method not in valid_methods:
+            raise ValueError(f"Unknown method: {method!r}. Use one of {sorted(valid_methods)}.")
+        if not isinstance(absolute_value, (bool, np.bool_)):
+            raise TypeError("absolute_value must be a boolean")
+        return method
 
     def _compute_smoothgrad(
         self,
@@ -264,15 +281,10 @@ class SmoothGradExplainer(BaseExplainer):
         Returns:
             Tuple of (attributions, std_attributions) arrays.
         """
-        instance = instance.flatten().astype(np.float32)
+        method = self._validate_options(method, absolute_value)
+        instance = instance.reshape(-1)
         target_class = self._resolve_target_class(instance, target_class)
         local_rng = self._new_rng() if rng is None else rng
-
-        valid_methods = {"smoothgrad", "smoothgrad_squared", "vargrad"}
-        if method not in valid_methods:
-            raise ValueError(f"Unknown method: {method!r}. Use one of {sorted(valid_methods)}.")
-        if not isinstance(absolute_value, bool):
-            raise TypeError("absolute_value must be a boolean")
 
         all_gradients = self._collect_noisy_gradients(instance, target_class, local_rng)
         return self._aggregate_gradient_samples(all_gradients, method, absolute_value)
@@ -289,7 +301,7 @@ class SmoothGradExplainer(BaseExplainer):
         for _ in range(self.n_samples):
             # Add noise to input
             if self.noise_scale > 0:
-                noise = self._generate_noise(instance.shape, rng)
+                noise = self._generate_noise(instance.shape, rng, dtype=instance.dtype)
                 noisy_input = instance + noise
             else:
                 noisy_input = instance.copy()
@@ -322,18 +334,27 @@ class SmoothGradExplainer(BaseExplainer):
     ) -> tuple:
         """Apply one SmoothGrad-family aggregate to a shared sample matrix."""
 
-        # Compute attributions based on method
+        scale = np.max(np.abs(all_gradients), axis=0)
+        safe_scale = np.where(scale == 0, 1, scale)
+        normalized_gradients = all_gradients / safe_scale
+
+        # Compute in a scaled domain so representable results do not overflow
+        # merely because NumPy's direct sum or sum-of-squares does.
         if method == "smoothgrad":
-            attributions = np.mean(all_gradients, axis=0)
-            std_attributions = np.std(all_gradients, axis=0)
+            attributions, std_attributions = scale_safe_mean_std(all_gradients)
         elif method == "smoothgrad_squared":
             # Average of squared gradients
-            squared_gradients = all_gradients**2
-            attributions = np.mean(squared_gradients, axis=0)
-            std_attributions = np.std(squared_gradients, axis=0)
+            squared_normalized = normalized_gradients**2
+            normalized_mean, normalized_std = scale_safe_mean_std(squared_normalized)
+            with np.errstate(over="ignore", invalid="ignore"):
+                attributions = (normalized_mean * scale) * scale
+                std_attributions = (normalized_std * scale) * scale
         elif method == "vargrad":
             # Variance of gradients
-            attributions = np.var(all_gradients, axis=0)
+            _, normalized_std = scale_safe_mean_std(normalized_gradients)
+            scaled_std = normalized_std * scale
+            with np.errstate(over="ignore", invalid="ignore"):
+                attributions = scaled_std * scaled_std
             std_attributions = np.zeros_like(attributions)  # No std for variance
         # Apply absolute value if requested
         if absolute_value:
@@ -353,6 +374,7 @@ class SmoothGradExplainer(BaseExplainer):
         rng: Optional[np.random.Generator] = None,
     ) -> Explanation:
         """Build one explanation while consuming the supplied local RNG."""
+        method = self._validate_options(method, absolute_value)
         instance = self._prepare_instance(instance)
 
         # Resolve once before drawing noise so every sample differentiates the
@@ -380,10 +402,15 @@ class SmoothGradExplainer(BaseExplainer):
             explainer_name = f"SmoothGrad_{method}"
 
         # Determine class name
-        if self.class_names and target_class is not None:
+        if (
+            self.class_names is not None
+            and target_class is not None
+            and target_class < len(self.class_names)
+        ):
             label_name = self.class_names[target_class]
         else:
-            label_name = f"class_{target_class}" if target_class is not None else "output"
+            prefix = "output" if getattr(self.model, "task", None) == "regression" else "class"
+            label_name = f"{prefix}_{target_class}" if target_class is not None else "output"
 
         explanation_data = {
             "feature_attributions": attributions_dict,
@@ -472,6 +499,7 @@ class SmoothGradExplainer(BaseExplainer):
             >>> for exp in explanations:
             ...     print(exp.target_class)
         """
+        self._validate_options(method, absolute_value)
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(1, -1)
@@ -480,6 +508,8 @@ class SmoothGradExplainer(BaseExplainer):
                 "X must be a one- or two-dimensional tabular array; "
                 f"got shape {X.shape}. Image/spatial tensors are not supported."
             )
+        if X.shape[0] == 0:
+            raise ValueError("X must contain at least one instance")
 
         rng = self._new_rng()
         return [
@@ -588,13 +618,25 @@ class SmoothGradExplainer(BaseExplainer):
         Returns:
             Range-scaled noise value in the input's units.
         """
+        if isinstance(percentile, (bool, np.bool_)) or not isinstance(percentile, Real):
+            raise TypeError("percentile must be a finite non-negative real number")
+        percentile = float(percentile)
+        if not np.isfinite(percentile) or percentile < 0.0:
+            raise ValueError("percentile must be a finite non-negative real number")
         instance = self._prepare_instance(instance)
-        input_range = instance.max() - instance.min()
+        minimum = float(instance.min())
+        maximum = float(instance.max())
 
         # Avoid zero scale for constant inputs
-        if input_range == 0:
-            input_range = np.abs(instance).max()
-        if input_range == 0:
-            input_range = 1.0
+        if minimum == maximum:
+            scale = abs(maximum) or 1.0
+            range_ratio = 1.0
+        else:
+            scale = max(abs(minimum), abs(maximum))
+            range_ratio = maximum / scale - minimum / scale
 
-        return float(input_range * percentile / 100.0)
+        with np.errstate(over="ignore", invalid="ignore"):
+            noise_scale = (range_ratio * (percentile / 100.0)) * scale
+        if not np.isfinite(noise_scale):
+            raise FloatingPointError("adaptive noise scale exceeds the finite float range")
+        return float(noise_scale)
