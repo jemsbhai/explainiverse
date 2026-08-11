@@ -100,15 +100,32 @@ test("supports keyboard traversal and exposes signed meter values", async ({
   );
 
   await page.setViewportSize({ width: 320, height: 800 });
-  const overflowsViewport = await page.evaluate(
-    () =>
-      document.documentElement.scrollWidth >
-      document.documentElement.clientWidth,
-  );
+  const viewportLayout = await page.evaluate(() => {
+    const viewportWidth = document.documentElement.clientWidth;
+    const offenders = Array.from(document.querySelectorAll<HTMLElement>("*"))
+      .map((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          element: element.tagName.toLowerCase(),
+          id: element.id,
+          role: element.getAttribute("role"),
+          text: element.textContent?.trim().replace(/\s+/g, " ").slice(0, 80),
+          left: Math.round(bounds.left * 100) / 100,
+          right: Math.round(bounds.right * 100) / 100,
+          width: Math.round(bounds.width * 100) / 100,
+        };
+      })
+      .filter(({ left, right }) => left < 0 || right > viewportWidth);
+    return {
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth,
+      offenders,
+    };
+  });
   expect(
-    overflowsViewport,
+    viewportLayout,
     "demo must reflow without horizontal page scrolling at 320 CSS px",
-  ).toBe(false);
+  ).toEqual({ documentWidth: 320, viewportWidth: 320, offenders: [] });
 });
 
 test("has no detectable WCAG A or AA violations in the initial and empty states", async ({

@@ -537,9 +537,22 @@ def _assert_macos_openmp_contract(workflow):
     dependency_install = compatibility_job.index(
         "Install all package extras, tests, and tutorial runner dependencies"
     )
+    runtime_binding = compatibility_job.index("Use PyTorch's single OpenMP runtime on macOS")
     dependency_import = compatibility_job.index("Require every accuracy-reference dependency")
+    coexistence_probe = compatibility_job.index(
+        "Prove PyTorch and XGBoost OpenMP coexistence on macOS"
+    )
+    full_tests = compatibility_job.index("Run all-extras tests")
 
-    assert arm_check < openmp < dependency_install < dependency_import
+    assert (
+        arm_check
+        < openmp
+        < dependency_install
+        < runtime_binding
+        < dependency_import
+        < coexistence_probe
+        < full_tests
+    )
     openmp_step = compatibility_job.split("Provision the XGBoost OpenMP runtime on macOS", 1)[
         1
     ].split("\n      - name:", 1)[0]
@@ -549,9 +562,31 @@ def _assert_macos_openmp_contract(workflow):
     assert 'test -f "$(brew --prefix libomp)/lib/libomp.dylib"' in openmp_step
     assert "brew list --versions libomp" in openmp_step
 
+    runtime_step = compatibility_job.split(
+        "      - name: Use PyTorch's single OpenMP runtime on macOS", 1
+    )[1].split("\n      - name:", 1)[0]
+    assert "if: matrix.os == 'macos-15'" in runtime_step
+    assert "Path(torch.__file__).resolve().parent / 'lib'" in runtime_step
+    assert 'test -f "$torch_lib_dir/libomp.dylib"' in runtime_step
+    assert 'echo "DYLD_LIBRARY_PATH=$torch_lib_dir" >> "$GITHUB_ENV"' in runtime_step
+
+    coexistence = compatibility_job.split(
+        "      - name: Prove PyTorch and XGBoost OpenMP coexistence on macOS", 1
+    )[1].split("\n      - name:", 1)[0]
+    assert "if: matrix.os == 'macos-15'" in coexistence
+    assert '"import torch, xgboost;' in coexistence
+    assert "torch.nn.functional.cross_entropy" in coexistence
+    assert "loss.backward()" in coexistence
+
 
 def test_macos_arm_job_provisions_xgboost_openmp_before_dependency_import():
-    _assert_macos_openmp_contract(_read("python-ci.yml"))
+    workflow = _read("python-ci.yml")
+    _assert_macos_openmp_contract(workflow)
+
+    reference_fixtures = (ROOT / "tests" / "reference" / "conftest.py").read_text(encoding="utf-8")
+    assert reference_fixtures.index("    import torch") < reference_fixtures.index(
+        "import xgboost as xgb"
+    )
 
 
 def test_macos_openmp_contract_rejects_wrong_platform_or_missing_runtime_proof():
@@ -568,6 +603,16 @@ def test_macos_openmp_contract_rejects_wrong_platform_or_missing_runtime_proof()
         workflow.replace(
             '          test -f "$(brew --prefix libomp)/lib/libomp.dylib"\n',
             "",
+            1,
+        ),
+        workflow.replace(
+            '          test -f "$torch_lib_dir/libomp.dylib"\n',
+            "",
+            1,
+        ),
+        workflow.replace(
+            '          echo "DYLD_LIBRARY_PATH=$torch_lib_dir" >> "$GITHUB_ENV"\n',
+            '          echo "DYLD_LIBRARY_PATH=$(brew --prefix libomp)/lib" >> "$GITHUB_ENV"\n',
             1,
         ),
     )

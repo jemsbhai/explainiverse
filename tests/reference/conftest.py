@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import xgboost as xgb
 from sklearn.datasets import load_breast_cancer, load_diabetes, load_iris
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
@@ -34,6 +33,10 @@ try:
 except ImportError:  # PyTorch is an optional package dependency.
     torch = None
     nn = None
+
+# Both macOS ARM64 wheels link OpenMP. Loading PyTorch's vendored runtime first
+# avoids initializing a second incompatible runtime before PyTorch executes.
+import xgboost as xgb
 
 # ─────────────────────────────────────────────────────────────────────
 # Constants

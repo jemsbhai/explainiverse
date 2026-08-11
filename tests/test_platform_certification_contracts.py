@@ -63,6 +63,15 @@ def test_browser_gate_exercises_security_functionality_and_accessibility():
     assert "fontSize: 'clamp(2rem, 10vw, 42px)'" in demo
     assert "overflowWrap: 'anywhere'" in demo
 
+    visualizer = _read("packages/js/src/visualizer/ExplanationVisualizer.tsx")
+    assert "flexWrap: 'wrap'" in visualizer
+    assert "minWidth: 0" in visualizer
+    assert "maxWidth: '100%'" in visualizer
+
+    assert 'document.querySelectorAll<HTMLElement>("*")' in suite
+    assert "documentWidth: document.documentElement.scrollWidth" in suite
+    assert "offenders: []" in suite
+
 
 def test_react_peer_floor_avoids_the_shared_npm_cache_post_action():
     workflow = _read(".github/workflows/js-ci.yml")

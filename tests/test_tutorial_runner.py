@@ -158,8 +158,14 @@ def test_clean_execution_must_reproduce_published_outputs():
         )
     ]
 
-    with pytest.raises(ValueError, match="no longer matches the published outputs"):
+    with pytest.raises(ValueError, match="no longer matches the published outputs") as exc_info:
         runner._validate_reexecuted_outputs(path, published, executed)
+    message = str(exc_info.value)
+    assert "published_sha256=" in message
+    assert "executed_sha256=" in message
+    assert "first_differing_code_cell=1" in message
+    assert "stale value" in message
+    assert "fresh deterministic value" in message
 
     published.cells[0].outputs = copy.deepcopy(executed.cells[0].outputs)
     runner._validate_reexecuted_outputs(path, published, executed)

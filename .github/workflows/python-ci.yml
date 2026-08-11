@@ -81,12 +81,31 @@ jobs:
           "nbclient>=0.10,<1"
           "ipykernel>=6.29,<8"
 
+      - name: Use PyTorch's single OpenMP runtime on macOS
+        if: matrix.os == 'macos-15'
+        run: |
+          torch_lib_dir="$(python -c "from pathlib import Path; import torch; print(Path(torch.__file__).resolve().parent / 'lib')")"
+          test -f "$torch_lib_dir/libomp.dylib"
+          echo "DYLD_LIBRARY_PATH=$torch_lib_dir" >> "$GITHUB_ENV"
+          echo "using PyTorch OpenMP runtime: $torch_lib_dir/libomp.dylib"
+
       - name: Require every accuracy-reference dependency
         run: >-
           python -c
           "import captum, lime, quantus, shap, skimage, torch, xgboost;
           import pytorch_grad_cam;
           print('all accuracy-reference dependencies imported')"
+
+      - name: Prove PyTorch and XGBoost OpenMP coexistence on macOS
+        if: matrix.os == 'macos-15'
+        run: >-
+          python -c
+          "import torch, xgboost;
+          logits = torch.tensor([[1.0, -1.0]], requires_grad=True);
+          loss = torch.nn.functional.cross_entropy(logits, torch.tensor([0]));
+          loss.backward();
+          assert torch.isfinite(loss);
+          print('PyTorch-first OpenMP coexistence verified')"
 
       - name: Run all-extras tests
         run: python -m pytest --strict-config --strict-markers

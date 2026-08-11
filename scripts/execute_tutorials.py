@@ -200,8 +200,8 @@ def _notebook_source_digest(notebook: NotebookNode) -> str:
     )
 
 
-def _published_outputs_digest(notebook: NotebookNode) -> str:
-    outputs = [
+def _published_outputs_payload(notebook: NotebookNode) -> list[dict[str, Any]]:
+    return [
         {
             "execution_count": cell.execution_count,
             "outputs": copy.deepcopy(cell.outputs),
@@ -209,7 +209,10 @@ def _published_outputs_digest(notebook: NotebookNode) -> str:
         for cell in notebook.cells
         if cell.cell_type == "code"
     ]
-    return _json_digest(outputs)
+
+
+def _published_outputs_digest(notebook: NotebookNode) -> str:
+    return _json_digest(_published_outputs_payload(notebook))
 
 
 def _declared_project_version() -> str:
@@ -388,8 +391,34 @@ def _validate_reexecuted_outputs(
     published_digest = _published_outputs_digest(published)
     executed_digest = _published_outputs_digest(executed)
     if executed_digest != published_digest:
+        published_payload = _published_outputs_payload(published)
+        executed_payload = _published_outputs_payload(executed)
+        differing_cell = next(
+            index
+            for index, (expected, actual) in enumerate(
+                zip(published_payload, executed_payload, strict=True), start=1
+            )
+            if expected != actual
+        )
+        expected_output = json.dumps(
+            published_payload[differing_cell - 1],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        actual_output = json.dumps(
+            executed_payload[differing_cell - 1],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        diagnostic_limit = 2_000
         raise ValueError(
             f"{path.name}: clean execution no longer matches the published outputs; "
+            f"published_sha256={published_digest}; executed_sha256={executed_digest}; "
+            f"first_differing_code_cell={differing_cell}; "
+            f"published={expected_output[:diagnostic_limit]!r}; "
+            f"executed={actual_output[:diagnostic_limit]!r}; "
             "review the numerical/API change and run scripts/execute_tutorials.py --write "
             "to publish intentionally updated outputs"
         )
