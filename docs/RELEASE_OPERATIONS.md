@@ -154,8 +154,9 @@ legacy disclosure decision; it cannot be represented as a successful recovery dr
 ## CUDA capacity acceptance
 
 Set `CUDA_SINGLE_RUNNER` and `CUDA_TWO_RUNNER` only to GitHub-managed GPU runners or isolated,
-ephemeral runners approved for public-repository code. With variables absent, the hosted CPU
-default fails the CUDA hardware assertion rather than skipping. Require both single-GPU Torch
+ephemeral runners approved for public-repository code. With variables absent or incorrect, a
+hosted reporter fails the routing contract before checkout, dependency installation, or hardware
+execution; it cannot produce CUDA evidence. Require both single-GPU Torch
 minimum/latest contexts on `main`; run both two-GPU edges on the scheduled workflow. A green gate
 means the checked-in exact node manifest matched collection and all 15 CUDA tests ran with zero
 skips, including adapter prediction/gradients, every vector and CAM gradient family,

@@ -59,6 +59,26 @@ def test_browser_gate_exercises_security_functionality_and_accessibility():
     assert "script-src 'self'" in html
     assert 'name="referrer" content="no-referrer"' in html
 
+    demo = _read("packages/js/src/demo/main.tsx")
+    assert "fontSize: 'clamp(2rem, 10vw, 42px)'" in demo
+    assert "overflowWrap: 'anywhere'" in demo
+
+
+def test_react_peer_floor_avoids_the_shared_npm_cache_post_action():
+    workflow = _read(".github/workflows/js-ci.yml")
+    build_job = workflow.split("  build:", 1)[1].split("\n  react-peer-floor:", 1)[0]
+    peer_floor_job = workflow.split("  react-peer-floor:", 1)[1].split("\n  real-browser-demo:", 1)[
+        0
+    ]
+    browser_job = workflow.split("  real-browser-demo:", 1)[1]
+
+    assert "cache: npm" in build_job
+    assert "cache-dependency-path: packages/js/package-lock.json" in build_job
+    assert "cache: npm" not in peer_floor_job
+    assert "cache-dependency-path:" not in peer_floor_job
+    assert "cache: npm" in browser_job
+    assert "cache-dependency-path: packages/js/package-lock.json" in browser_job
+
 
 def test_javascript_ci_publish_and_deploy_gates_run_the_high_severity_audit():
     audited_gates = {

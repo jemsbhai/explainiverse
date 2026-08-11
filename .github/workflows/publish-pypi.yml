@@ -57,6 +57,15 @@ jobs:
             exit 1
           fi
 
+      - name: Require exact reviewed single-GPU runner routing
+        env:
+          CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
+        run: |
+          if [[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]; then
+            echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
+            exit 1
+          fi
+
       - name: Check out the immutable release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -116,7 +125,7 @@ jobs:
   cuda-release:
     name: Release CUDA single-GPU (Torch ${{ matrix.torch-edge }}, zero skips)
     needs: preflight
-    runs-on: ${{ vars.CUDA_SINGLE_RUNNER || 'ubuntu-latest' }}
+    runs-on: explainiverse-cuda-single
     timeout-minutes: 45
     permissions:
       contents: read

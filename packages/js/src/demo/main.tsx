@@ -283,10 +283,11 @@ const styles: Record<string, CSSProperties> = {
         marginBottom: '40px',
     },
     mainTitle: {
-        fontSize: '42px',
+        fontSize: 'clamp(2rem, 10vw, 42px)',
         fontWeight: '800',
         color: '#111827',
         margin: '0 0 8px 0',
+        overflowWrap: 'anywhere',
     },
     subtitle: {
         fontSize: '18px',

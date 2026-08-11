@@ -21,12 +21,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  cuda-runner-routing:
+    name: Require approved CUDA runner routing
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Require exact reviewed CUDA runner labels
+        env:
+          CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
+          CUDA_TWO_RUNNER: ${{ vars.CUDA_TWO_RUNNER }}
+        run: |
+          if [[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]; then
+            echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$CUDA_TWO_RUNNER" != "explainiverse-cuda-two" ]]; then
+              echo "CUDA_TWO_RUNNER must be exactly explainiverse-cuda-two" >&2
+              exit 1
+            fi
+          fi
+
   single-gpu:
     name: CUDA single-GPU (Torch ${{ matrix.torch-edge }})
-    # Set this repository variable to a GitHub-managed or isolated ephemeral
-    # CUDA runner label. The safe hosted default fails the hardware assertion
-    # instead of silently skipping when external GPU capacity is unconfigured.
-    runs-on: ${{ vars.CUDA_SINGLE_RUNNER || 'ubuntu-latest' }}
+    needs: cuda-runner-routing
+    if: ${{ always() }}
+    # A rejected prerequisite selects only the hosted failure reporter below;
+    # accepted work can run only on the reviewed custom GPU label.
+    runs-on: >-
+      ${{ needs.cuda-runner-routing.result == 'success' &&
+      'explainiverse-cuda-single' || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -44,6 +69,12 @@ jobs:
       CUDA_VISIBLE_DEVICES: "0"
 
     steps:
+      - name: Fail the required check when CUDA routing is rejected
+        if: needs.cuda-runner-routing.result != 'success'
+        run: |
+          echo "approved single-GPU runner routing is unavailable" >&2
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -84,9 +115,15 @@ jobs:
 
   two-gpu:
     name: CUDA two-GPU scheduled (Torch ${{ matrix.torch-edge }})
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    # The scheduled lane remains visibly red until two-GPU capacity is wired.
-    runs-on: ${{ vars.CUDA_TWO_RUNNER || 'ubuntu-latest' }}
+    needs: cuda-runner-routing
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # A rejected prerequisite selects only the hosted failure reporter below;
+    # accepted work can run only on the reviewed custom GPU label.
+    runs-on: >-
+      ${{ needs.cuda-runner-routing.result == 'success' &&
+      'explainiverse-cuda-two' || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -104,6 +141,12 @@ jobs:
       CUDA_VISIBLE_DEVICES: "0,1"
 
     steps:
+      - name: Fail the required check when CUDA routing is rejected
+        if: needs.cuda-runner-routing.result != 'success'
+        run: |
+          echo "approved two-GPU runner routing is unavailable" >&2
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

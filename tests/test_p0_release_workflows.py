@@ -6,12 +6,86 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 def _read(name):
     return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def _assert_cuda_runner_routing_contract(workflow, publish):
+    policy = json.loads(
+        (ROOT / ".github" / "release-control-policy.json").read_text(encoding="utf-8")
+    )
+    required_labels = policy["cuda_evidence"]["required_runner_labels"]
+    single_label = required_labels["CUDA single-GPU (Torch latest)"]
+    assert required_labels["CUDA single-GPU (Torch minimum)"] == single_label
+    two_label = required_labels["CUDA two-GPU scheduled (Torch latest)"]
+    assert required_labels["CUDA two-GPU scheduled (Torch minimum)"] == two_label
+
+    routing = workflow.split("  cuda-runner-routing:", 1)[1].split("\n  single-gpu:", 1)[0]
+    single = workflow.split("  single-gpu:", 1)[1].split("\n  two-gpu:", 1)[0]
+    two = workflow.split("  two-gpu:", 1)[1]
+    assert workflow.index("  cuda-runner-routing:") < workflow.index("  single-gpu:")
+    assert "runs-on: ubuntu-latest" in routing
+    assert "CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}" in routing
+    assert "CUDA_TWO_RUNNER: ${{ vars.CUDA_TWO_RUNNER }}" in routing
+    assert f'[[ "$CUDA_SINGLE_RUNNER" != "{single_label}" ]]' in routing
+    assert f'[[ "$CUDA_TWO_RUNNER" != "{two_label}" ]]' in routing
+    assert '"schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch"' in routing
+    assert routing.count("exit 1") == 2
+    assert "continue-on-error" not in routing
+    assert "needs: cuda-runner-routing" in single
+    assert "if: ${{ always() }}" in single
+    assert (
+        "${{ needs.cuda-runner-routing.result == 'success' &&\n"
+        f"      '{single_label}' || 'ubuntu-latest' }}" in single
+    )
+    single_reporter = single.split(
+        "      - name: Fail the required check when CUDA routing is rejected", 1
+    )[1].split("\n      - name: Checkout", 1)[0]
+    single_steps = single.split("\n    steps:", 1)[1]
+    assert single_steps.index("Fail the required check when CUDA routing is rejected") < (
+        single_steps.index("      - name: Checkout")
+    )
+    assert "if: needs.cuda-runner-routing.result != 'success'" in single_reporter
+    assert single_reporter.count("exit 1") == 1
+    assert "continue-on-error" not in single_reporter
+    assert "if: always()" not in single_steps
+    assert "needs: cuda-runner-routing" in two
+    assert "always() &&" in two
+    assert (
+        "${{ needs.cuda-runner-routing.result == 'success' &&\n"
+        f"      '{two_label}' || 'ubuntu-latest' }}" in two
+    )
+    two_reporter = two.split(
+        "      - name: Fail the required check when CUDA routing is rejected", 1
+    )[1].split("\n      - name: Checkout", 1)[0]
+    two_steps = two.split("\n    steps:", 1)[1]
+    assert two_steps.index("Fail the required check when CUDA routing is rejected") < (
+        two_steps.index("      - name: Checkout")
+    )
+    assert "if: needs.cuda-runner-routing.result != 'success'" in two_reporter
+    assert two_reporter.count("exit 1") == 1
+    assert "continue-on-error" not in two_reporter
+    assert "if: always()" not in two_steps
+
+    preflight = publish.split("  preflight:", 1)[1].split("\n  cuda-release:", 1)[0]
+    publish_cuda = publish.split("  cuda-release:", 1)[1].split("\n  build:", 1)[0]
+    assert "Require exact reviewed single-GPU runner routing" in preflight
+    publish_routing = preflight.split(
+        "      - name: Require exact reviewed single-GPU runner routing", 1
+    )[1].split("\n      - name:", 1)[0]
+    assert "CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}" in publish_routing
+    assert f'[[ "$CUDA_SINGLE_RUNNER" != "{single_label}" ]]' in publish_routing
+    assert publish_routing.count("exit 1") == 1
+    assert "continue-on-error" not in publish_routing
+    assert "needs: preflight" in publish_cuda
+    assert f"runs-on: {single_label}" in publish_cuda
+    assert "ubuntu-latest" not in publish_cuda
 
 
 def test_every_external_action_is_pinned_to_a_full_commit_sha():
@@ -275,6 +349,63 @@ def test_cuda_workflow_has_required_and_scheduled_minimum_latest_zero_skip_lanes
     assert 'CUDA_VISIBLE_DEVICES: "0"' in publish_cuda
 
 
+def test_cuda_workflows_route_only_through_exact_reviewed_labels():
+    _assert_cuda_runner_routing_contract(_read("cuda-ci.yml"), _read("publish-pypi.yml"))
+
+
+def test_cuda_runner_routing_contract_rejects_fail_open_drift():
+    workflow = _read("cuda-ci.yml")
+    publish = _read("publish-pypi.yml")
+    mutations = (
+        (
+            workflow.replace(
+                "      'explainiverse-cuda-single' || 'ubuntu-latest'",
+                "      'ubuntu-latest' || 'ubuntu-latest'",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "      'explainiverse-cuda-two' || 'ubuntu-latest'",
+                "      'explainiverse-cuda-single' || 'ubuntu-latest'",
+                1,
+            ),
+            publish,
+        ),
+        (workflow.replace("    needs: cuda-runner-routing\n", "", 1), publish),
+        (
+            workflow.replace(
+                '[[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]',
+                '[[ "$CUDA_SINGLE_RUNNER" != "" ]]',
+                1,
+            ),
+            publish,
+        ),
+        (workflow.replace("            exit 1\n", "            exit 0\n", 1), publish),
+        (
+            workflow,
+            publish.replace(
+                "    runs-on: explainiverse-cuda-single",
+                "    runs-on: ubuntu-latest",
+                1,
+            ),
+        ),
+        (
+            workflow,
+            publish.replace(
+                '[[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]',
+                '[[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-two" ]]',
+                1,
+            ),
+        ),
+    )
+
+    for mutated_workflow, mutated_publish in mutations:
+        with pytest.raises(AssertionError):
+            _assert_cuda_runner_routing_contract(mutated_workflow, mutated_publish)
+
+
 def test_cuda_cam_matrix_uses_each_family_valid_target_contract():
     suite = (ROOT / "tests_cuda" / "test_cuda_release.py").read_text(encoding="utf-8")
     assert "def _vector_classifier" in suite
@@ -397,14 +528,110 @@ def test_pypi_cryptographic_verifier_is_pinned_in_the_hash_locked_release_graph(
     assert "--hash=sha256:" in package_block
 
 
-def test_quantus_job_installs_every_collection_dependency_and_runs_exact_marker():
+def _assert_macos_openmp_contract(workflow):
+    compatibility_job = workflow.split("  test:", 1)[1].split(
+        "\n  minimum-direct-dependencies:", 1
+    )[0]
+    arm_check = compatibility_job.index("Require the advertised macOS ARM64 runner")
+    openmp = compatibility_job.index("Provision the XGBoost OpenMP runtime on macOS")
+    dependency_install = compatibility_job.index(
+        "Install all package extras, tests, and tutorial runner dependencies"
+    )
+    dependency_import = compatibility_job.index("Require every accuracy-reference dependency")
+
+    assert arm_check < openmp < dependency_install < dependency_import
+    openmp_step = compatibility_job.split("Provision the XGBoost OpenMP runtime on macOS", 1)[
+        1
+    ].split("\n      - name:", 1)[0]
+    assert "if: matrix.os == 'macos-15'" in openmp_step
+    assert 'HOMEBREW_NO_AUTO_UPDATE: "1"' in openmp_step
+    assert "brew install libomp" in openmp_step
+    assert 'test -f "$(brew --prefix libomp)/lib/libomp.dylib"' in openmp_step
+    assert "brew list --versions libomp" in openmp_step
+
+
+def test_macos_arm_job_provisions_xgboost_openmp_before_dependency_import():
+    _assert_macos_openmp_contract(_read("python-ci.yml"))
+
+
+def test_macos_openmp_contract_rejects_wrong_platform_or_missing_runtime_proof():
     workflow = _read("python-ci.yml")
+    mutations = (
+        workflow.replace(
+            "      - name: Provision the XGBoost OpenMP runtime on macOS\n"
+            "        if: matrix.os == 'macos-15'",
+            "      - name: Provision the XGBoost OpenMP runtime on macOS\n"
+            "        if: matrix.os == 'ubuntu-latest'",
+            1,
+        ),
+        workflow.replace("          brew install libomp\n", "          true\n", 1),
+        workflow.replace(
+            '          test -f "$(brew --prefix libomp)/lib/libomp.dylib"\n',
+            "",
+            1,
+        ),
+    )
+
+    for mutated in mutations:
+        with pytest.raises(AssertionError):
+            _assert_macos_openmp_contract(mutated)
+
+
+def _assert_quantus_job_contract(workflow):
     quantus_job = workflow.split("  quantus-reference:", 1)[1].split("\n  base-install:", 1)[0]
+    manifest = ROOT / ".github" / "constraints" / "quantus-reference-tests.txt"
+    manifest_entries = [
+        line.strip()
+        for line in manifest.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    assert len(manifest_entries) == 9
+    assert manifest_entries == sorted(set(manifest_entries))
     assert '--editable ".[all]"' in quantus_job
     assert '"quantus>=0.6,<0.7"' in quantus_job
     assert '"grad-cam>=1.5.5,<2"' in quantus_job
     assert "validate_quantus_partition.py" in quantus_job
-    assert "-m quantus_reference" in quantus_job
+    assert ".github/constraints/quantus-reference-tests.txt" in quantus_job
+    assert "mapfile -t quantus_tests" in quantus_job
+    assert "grep -Ev '^[[:space:]]*(#|$)'" in quantus_job
+    assert 'test "${#quantus_tests[@]}" -eq 9' in quantus_job
+    assert '"${quantus_tests[@]}"' in quantus_job
+    assert quantus_job.index("validate_quantus_partition.py") < quantus_job.index(
+        "mapfile -t quantus_tests"
+    )
+    pytest_command = quantus_job.split("python -m pytest", 1)[1]
+    assert "-m quantus_reference" in pytest_command
+    assert '"${quantus_tests[@]}"' in pytest_command
+
+
+def test_quantus_job_runs_only_the_exact_fail_closed_reference_manifest():
+    _assert_quantus_job_contract(_read("python-ci.yml"))
+
+
+def test_quantus_job_contract_rejects_full_collection_or_weakened_manifest_count():
+    workflow = _read("python-ci.yml")
+    mutations = (
+        workflow.replace(
+            ".github/constraints/quantus-reference-tests.txt",
+            "tests",
+            1,
+        ),
+        workflow.replace(
+            '          test "${#quantus_tests[@]}" -eq 9',
+            '          test "${#quantus_tests[@]}" -ge 1',
+            1,
+        ),
+        workflow.replace(
+            '            "${quantus_tests[@]}"',
+            "            tests",
+            1,
+        ),
+    )
+
+    for mutated in mutations:
+        with pytest.raises(AssertionError):
+            _assert_quantus_job_contract(mutated)
 
 
 def test_release_runbook_records_legacy_incident_without_fabricating_recovery():

@@ -172,6 +172,31 @@ def test_checkout_import_and_hashes_are_current_and_stable():
     assert runner._package_source_digest() == runner._package_source_digest()
 
 
+def test_kernelshap_plot_is_a_platform_neutral_accessible_svg():
+    path = runner.TUTORIAL_DIR / "02_kernelshap.ipynb"
+    notebook = nbformat.read(path, as_version=4)
+    runner._validate_source(path, notebook)
+    runner._validate_published_provenance(path, notebook)
+
+    source = "\n".join(cell.source for cell in notebook.cells)
+    assert "display(SVG(svg))" in source
+    assert "matplotlib.pyplot" not in source
+
+    rich_outputs = [
+        output
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        for output in cell.outputs
+        if output.output_type == "display_data"
+    ]
+    assert len(rich_outputs) == 1
+    assert "image/png" not in rich_outputs[0].data
+    svg = rich_outputs[0].data["image/svg+xml"]
+    assert 'role="img"' in svg
+    assert "<title" in svg
+    assert "<desc" in svg
+
+
 def test_source_only_verification_requires_absent_distribution_metadata(monkeypatch):
     declared_version = runner._declared_project_version()
 
