@@ -5,7 +5,9 @@ explanations. Its public registry records what each explainer has actually been 
 it does not rank methods by quality or claim that one method is appropriate for a particular
 deployment.
 
-The latest published release is `0.14.0`, built from the matching `v0.14.0` tag. This checkout
+The latest version published on PyPI is `0.14.0`. Its distributions were uploaded with Twine,
+without Trusted Publishing or published provenance. The matching annotated Git tag is unsigned
+and no GitHub Release exists, so the cross-service release record is incomplete. This checkout
 is the unreleased `0.15.0.dev0` accuracy-remediation line and still declares Python 3.10 through
 3.13. It has not been tagged or published.
 
@@ -172,12 +174,13 @@ original Python or NumPy types, so the result is not promised to be directly JSO
 
 ## Tutorials and other packages
 
-The LIME, KernelSHAP, and TreeSHAP notebooks under `tutorials/` are deterministic, offline
-teaching artifacts verified against this checkout. Each published notebook contains a dated
-execution record, package version, Python/platform record, and canonicalized `poetry.lock`
-digest. The repository harness statically rejects common package-install/network access paths,
-adds a non-loopback Python socket guard, executes a clean in-memory copy, and fails on stale
-source, output, runner, package-tree, or lock provenance:
+The LIME, KernelSHAP, TreeSHAP, and finite-estimator uncertainty/intervention-sensitivity
+notebooks under `tutorials/` are deterministic, offline teaching artifacts verified against
+this checkout. Each published notebook contains a dated execution record, package version,
+Python/platform record, and canonicalized `poetry.lock` digest. The repository harness
+statically rejects common package-install/network access paths, adds a non-loopback Python
+socket guard, executes a clean in-memory copy, and fails on stale source, output, runner,
+package-tree, or lock provenance:
 
 ```bash
 poetry run python scripts/execute_tutorials.py
@@ -236,4 +239,5 @@ published JavaScript distribution.
 
 If you use a particular explainer or metric, cite its primary source as well as the exact
 software revision and configuration you ran. For release `0.14.0`, cite the `v0.14.0` tag (or its
-commit hash) and your configuration; the PyPI `0.14.0` artifacts are built from that revision.
+commit hash) and your configuration. PyPI hosts `0.14.0` artifacts, but there is no corresponding
+GitHub Release or Trusted-Publishing provenance record.
