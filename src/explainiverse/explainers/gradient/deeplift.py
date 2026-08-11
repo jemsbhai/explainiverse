@@ -17,14 +17,14 @@ Reference:
 
 from __future__ import annotations
 
-import operator
 from decimal import Decimal, localcontext
 from numbers import Integral
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 
-from explainiverse.core.explainer import BaseExplainer
+from explainiverse._torch_module_graph import registered_module_graph
+from explainiverse.core.explainer import BaseExplainer, synchronized_explainer_method
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
 from explainiverse.explainers.gradient._input import (
@@ -33,6 +33,11 @@ from explainiverse.explainers.gradient._input import (
     scale_safe_sum,
 )
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
+from explainiverse.explainers.gradient._module_integrity import (
+    capture_canonical_forwards,
+    require_module_integrity,
+    require_no_global_execution_hooks,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -168,7 +173,6 @@ if TORCH_AVAILABLE:
         nn.Sigmoid,
         nn.Tanh,
         nn.Softplus,
-        nn.Softmax,
         nn.MaxPool1d,
         nn.MaxPool2d,
         nn.MaxPool3d,
@@ -202,77 +206,130 @@ if TORCH_AVAILABLE:
         nn.ConstantPad2d,
         nn.ConstantPad3d,
     )
+    # ZeroPad classes are distinct ConstantPad subclasses on newer Torch
+    # releases. Exact-type validation lists them explicitly when exported.
+    _SUPPORTED_LINEAR_TYPES += tuple(
+        padding_type
+        for name in ("ZeroPad1d", "ZeroPad2d", "ZeroPad3d")
+        if (padding_type := getattr(nn, name, None)) is not None
+        and padding_type not in _SUPPORTED_LINEAR_TYPES
+    )
 else:  # pragma: no cover
     _SUPPORTED_NONLINEAR_TYPES = ()
     _SUPPORTED_LINEAR_TYPES = ()
 
+_DEEPLIFT_STANDARD_TYPES = (
+    (nn.Sequential,) + _SUPPORTED_LINEAR_TYPES + _SUPPORTED_NONLINEAR_TYPES
+    if TORCH_AVAILABLE
+    else ()
+)
+_CANONICAL_DEEPLIFT_FORWARDS = (
+    capture_canonical_forwards(_DEEPLIFT_STANDARD_TYPES) if TORCH_AVAILABLE else {}
+)
+_CANONICAL_CAPTUM_METHODS = (
+    {
+        name: getattr(nn.Module, name)
+        for name in (
+            "__call__",
+            "_call_impl",
+            "_wrapped_call_impl",
+            "apply",
+            "children",
+            "register_forward_hook",
+            "register_forward_pre_hook",
+        )
+        if hasattr(nn.Module, name)
+    }
+    if TORCH_AVAILABLE
+    else {}
+)
+_BATCH_NORM_TYPES = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d) if TORCH_AVAILABLE else ()
 
-def _validate_supported_model(model: "nn.Module") -> None:
-    """Reject graphs for which Captum would silently use ordinary gradients.
 
-    Captum implements DeepLIFT by attaching hooks to supported nonlinear
-    modules.  Functional activations and unsupported module types would evade
-    those hooks, yielding gradient-times-input while still being labelled
-    DeepLIFT.  FX tracing lets us reject that case before attribution.
+def _validate_supported_model(model: "nn.Module") -> tuple:
+    """Validate the exact sequential graph Captum's rules can prove.
+
+    Arbitrary custom ``forward`` programs cannot be certified by FX tracing:
+    Python type-dependent branches and leaf-spoofing can make the traced graph
+    differ from tensor execution. The supported caller graph is therefore an
+    exact ``nn.Sequential`` (nested Sequentials are allowed) or one exact
+    supported leaf module.
     """
 
-    try:
-        traced = torch.fx.symbolic_trace(model)
-    except Exception as exc:
+    allowed_leaves = _SUPPORTED_LINEAR_TYPES + _SUPPORTED_NONLINEAR_TYPES
+    if type(model) is not nn.Sequential and type(model) not in allowed_leaves:
         raise NotImplementedError(
-            "DeepLIFT currently requires a torch.fx-traceable, feed-forward "
-            "module graph. Dynamic control flow and untraceable models are not "
-            "silently approximated."
-        ) from exc
+            "DeepLIFT requires an exact nn.Sequential graph or one exact documented "
+            f"supported leaf module; got {type(model).__name__}. Arbitrary custom, "
+            "dynamic, functional, and FX-traced forwards are unsupported."
+        )
 
-    allowed_modules = _SUPPORTED_LINEAR_TYPES + _SUPPORTED_NONLINEAR_TYPES
-    nonlinear_call_counts: dict[str, int] = {}
+    require_no_global_execution_hooks(context="DeepLIFT")
+    modules = registered_module_graph(model)
+    for module in modules:
+        module_type = type(module)
+        if module_type is nn.Softmax:
+            raise NotImplementedError(
+                "DeepLIFT does not support nn.Softmax because its coupled-output "
+                "Captum rule does not satisfy the verified completeness contract."
+            )
+        if module_type is not nn.Sequential and module_type not in allowed_leaves:
+            raise NotImplementedError(
+                "DeepLIFT does not have a verified exact-type Rescale rule for "
+                f"{module_type.__name__}. Use only the documented exact module types."
+            )
+        require_module_integrity(
+            module,
+            path="<root>" if module is model else module_type.__name__,
+            context="DeepLIFT",
+            canonical_forward=_CANONICAL_DEEPLIFT_FORWARDS[module_type],
+            canonical_methods=_CANONICAL_CAPTUM_METHODS,
+        )
+        if module_type in _BATCH_NORM_TYPES:
+            buffers = object.__getattribute__(module, "__dict__")["_buffers"]
+            if (
+                module.track_running_stats is not True
+                or buffers.get("running_mean") is None
+                or buffers.get("running_var") is None
+            ):
+                raise NotImplementedError(
+                    f"{module_type.__name__} requires tracked running statistics for "
+                    "deterministic, conservative DeepLIFT/DeepSHAP attribution."
+                )
+        if module_type in (nn.MaxPool1d, nn.MaxPool2d, nn.MaxPool3d) and module.return_indices:
+            raise NotImplementedError(
+                f"{module_type.__name__}(return_indices=True) is unsupported by DeepLIFT"
+            )
 
-    for node in traced.graph.nodes:
-        if node.op == "call_module":
-            module = traced.get_submodule(str(node.target))
-            if not isinstance(module, allowed_modules):
-                raise NotImplementedError(
-                    "DeepLIFT does not have a verified Rescale rule for module "
-                    f"{node.target!r} ({type(module).__name__}). Use only the "
-                    "documented supported modules or choose another explainer."
-                )
-            if isinstance(module, _SUPPORTED_NONLINEAR_TYPES):
-                module_name = str(node.target)
-                nonlinear_call_counts[module_name] = nonlinear_call_counts.get(module_name, 0) + 1
-        elif node.op == "call_method":
-            if node.target not in {
-                "view",
-                "reshape",
-                "flatten",
-                "squeeze",
-                "unsqueeze",
-                "contiguous",
-            }:
-                raise NotImplementedError(
-                    "DeepLIFT requires nonlinear operations to be explicit "
-                    f"supported nn.Modules; method call {node.target!r} is not "
-                    "in the verified graph subset."
-                )
-        elif node.op == "call_function":
-            # Indexing is a linear routing operation. Arithmetic between graph
-            # values can introduce products / interactions for which this
-            # wrapper has no independently verified propagation contract.
-            if node.target is not operator.getitem:
-                name = getattr(node.target, "__name__", repr(node.target))
-                raise NotImplementedError(
-                    "DeepLIFT requires nonlinear operations to be explicit "
-                    f"supported nn.Modules; function call {name!r} is not in "
-                    "the verified graph subset."
-                )
+    nonlinear_call_counts: dict[int, tuple[str, int]] = {}
+    topology = []
 
-    reused = [name for name, count in nonlinear_call_counts.items() if count > 1]
+    def visit(module: "nn.Module", path: str, active: set[int]) -> None:
+        identity = id(module)
+        if identity in active:
+            raise NotImplementedError("DeepLIFT does not support module registration cycles")
+        active.add(identity)
+        module_type = type(module)
+        topology.append((path, identity, module_type, _CANONICAL_DEEPLIFT_FORWARDS[module_type]))
+        if module_type is nn.Sequential:
+            children = object.__getattribute__(module, "__dict__")["_modules"]
+            for name, child in children.items():
+                child_path = f"{path}.{name}" if path else str(name)
+                visit(child, child_path, active)
+        elif module_type in _SUPPORTED_NONLINEAR_TYPES:
+            first_path, count = nonlinear_call_counts.get(identity, (path or "<root>", 0))
+            nonlinear_call_counts[identity] = (first_path, count + 1)
+        active.remove(identity)
+
+    visit(model, "", set())
+    reused = [path for path, count in nonlinear_call_counts.values() if count > 1]
     if reused:
         raise NotImplementedError(
             "Captum DeepLIFT cannot safely reuse one nonlinear module more than "
             f"once in a forward graph. Reused modules: {reused}. Instantiate a "
             "separate activation module at each use site."
         )
+    return tuple(topology)
 
 
 if TYPE_CHECKING:
@@ -368,7 +425,17 @@ class DeepLIFTExplainer(BaseExplainer):
                 raise ValueError("random_state must be non-negative")
 
         super().__init__(model)
-        _validate_supported_model(model.model)
+        if (
+            model.task == "classification"
+            and model.gradient_output == "prediction"
+            and model.output_activation == "softmax"
+        ):
+            raise NotImplementedError(
+                "DeepLIFT/DeepSHAP do not support multiclass softmax prediction-score "
+                "attribution. Use gradient_output='model' for raw class scores; the "
+                "single-logit complementary-sigmoid contract remains separate."
+            )
+        self._model_topology = _validate_supported_model(model.model)
 
         assert validated_features is not None
         self.feature_names: List[str] = validated_features
@@ -383,6 +450,14 @@ class DeepLIFTExplainer(BaseExplainer):
         # owns the model's device placement; attribution enters a temporary eval
         # context instead and restores every caller-visible state afterwards.
         self._score_model: _AdapterScoreModel = _AdapterScoreModel(model)
+
+    def _validate_current_graph(self) -> None:
+        current = _validate_supported_model(self.model.model)
+        if current != self._model_topology:
+            raise RuntimeError(
+                "The DeepLIFT model graph changed after explainer construction; "
+                "construct a new explainer for the new exact module graph."
+            )
 
     def _as_feature_vector(self, value, name: str) -> np.ndarray:
         raw = as_real_array(value, name=name)
@@ -428,6 +503,7 @@ class DeepLIFTExplainer(BaseExplainer):
             baseline = self.baseline
         return self._as_feature_vector(baseline, "baseline")
 
+    @synchronized_explainer_method
     def set_baseline(self, data: np.ndarray, method: str = "mean") -> "DeepLIFTExplainer":
         data = as_floating_array(data, name="data")
         if data.ndim == 1:
@@ -451,6 +527,7 @@ class DeepLIFTExplainer(BaseExplainer):
         baselines: np.ndarray,
         target_class: Optional[int],
     ) -> Tuple["torch.Tensor", "torch.Tensor", int, str]:
+        self._validate_current_graph()
         instance_tensor = self.model._to_tensor(instance.reshape(1, -1)).detach().clone()
         if not instance_tensor.is_floating_point():
             raise TypeError("DeepLIFT inputs must resolve to a floating-point model dtype")
@@ -515,6 +592,7 @@ class DeepLIFTExplainer(BaseExplainer):
         target: int,
         return_delta: bool = False,
     ):
+        self._validate_current_graph()
         with preserve_adapter_model_eval(self.model):
             backend = CaptumDeepLift(
                 self._score_model,
@@ -549,6 +627,7 @@ class DeepLIFTExplainer(BaseExplainer):
             return f"class_{target}"
         return "output" if target == 0 else f"output_{target}"
 
+    @synchronized_explainer_method
     def explain(
         self,
         instance: np.ndarray,
@@ -601,6 +680,7 @@ class DeepLIFTExplainer(BaseExplainer):
         }
 
         if return_convergence_delta:
+            self._validate_current_graph()
             with preserve_adapter_model_eval(self.model), torch.no_grad():
                 actual = float(self._score_model(input_tensor)[0, target].item())
                 reference = float(self._score_model(baseline_tensor)[0, target].item())
@@ -624,6 +704,7 @@ class DeepLIFTExplainer(BaseExplainer):
             feature_names=self.feature_names,
         )
 
+    @synchronized_explainer_method
     def explain_batch(
         self,
         X: np.ndarray,
@@ -662,6 +743,7 @@ class DeepLIFTExplainer(BaseExplainer):
                     "Captum DeepLiftShap does not expose a configurable epsilon; "
                     "multiple-baseline attribution requires eps=1e-10."
                 )
+            self._validate_current_graph()
             with preserve_adapter_model_eval(self.model):
                 backend = CaptumDeepLiftShap(
                     self._score_model,
@@ -692,6 +774,7 @@ class DeepLIFTExplainer(BaseExplainer):
 
         return averaged, individual_values, target, output_space
 
+    @synchronized_explainer_method
     def explain_with_multiple_baselines(
         self,
         instance: np.ndarray,
@@ -733,6 +816,7 @@ class DeepLIFTExplainer(BaseExplainer):
             },
         )
 
+    @synchronized_explainer_method
     def compare_with_integrated_gradients(
         self,
         instance: np.ndarray,
@@ -753,6 +837,7 @@ class DeepLIFTExplainer(BaseExplainer):
             instance_array, baseline_array.reshape(1, -1), target_class
         )
         dl_tensor = self._attribute_single(input_tensor, baseline_tensor, target)
+        self._validate_current_graph()
         with preserve_adapter_model_eval(self.model):
             ig_tensor = CaptumIntegratedGradients(
                 self._score_model, multiply_by_inputs=self.multiply_by_inputs
@@ -822,6 +907,7 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
         if background_data is not None:
             self.set_background(background_data)
 
+    @synchronized_explainer_method
     def set_background(self, data: np.ndarray) -> "DeepLIFTShapExplainer":
         data = as_floating_array(data, name="background data")
         if data.ndim == 1:
@@ -838,6 +924,7 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
         self._background_data = data.copy()
         return self
 
+    @synchronized_explainer_method
     def set_baseline(self, data: np.ndarray, method: str = "mean") -> "DeepLIFTShapExplainer":
         """Reject the inherited single-reference API for distributional DeepSHAP."""
         del data, method
@@ -846,6 +933,7 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
             "the single-baseline set_baseline() API."
         )
 
+    @synchronized_explainer_method
     def explain_with_multiple_baselines(
         self,
         instance: np.ndarray,
@@ -860,6 +948,7 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
             "and then explain(instance)."
         )
 
+    @synchronized_explainer_method
     def compare_with_integrated_gradients(
         self,
         instance: np.ndarray,
@@ -874,6 +963,7 @@ class DeepLIFTShapExplainer(DeepLIFTExplainer):
             "background expectation. Use DeepLIFTExplainer for that comparison."
         )
 
+    @synchronized_explainer_method
     def explain(
         self,
         instance: np.ndarray,

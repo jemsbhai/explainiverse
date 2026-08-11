@@ -12,6 +12,7 @@ Reference:
 
 import subprocess
 import sys
+from types import MethodType
 
 import numpy as np
 import pytest
@@ -615,18 +616,17 @@ assert nn.ConstantPad1d in deeplift._SUPPORTED_LINEAR_TYPES
 
         assert completed.returncode == 0, completed.stdout + completed.stderr
 
-    @pytest.mark.skipif(
-        not hasattr(nn, "ZeroPad1d"),
-        reason="This Torch version does not export ZeroPad1d",
-    )
-    def test_zeropad1d_is_supported_via_constant_pad_base(self):
-        """Newer Torch ZeroPad1d remains in the verified linear subset."""
+    def test_available_constant_padding_types_are_supported_without_version_skips(self):
+        """The Torch floor and newer ZeroPad alias share one verified base."""
         import explainiverse.explainers.gradient.deeplift as module
 
-        model = nn.Sequential(nn.ZeroPad1d(1), nn.Linear(3, 1))
-
-        assert isinstance(model[0], module._SUPPORTED_LINEAR_TYPES)
-        module._validate_supported_model(model)
+        padding_modules = [nn.ConstantPad1d(1, 0.0)]
+        if hasattr(nn, "ZeroPad1d"):
+            padding_modules.append(nn.ZeroPad1d(1))
+        for padding in padding_modules:
+            model = nn.Sequential(padding, nn.Linear(3, 1))
+            assert isinstance(model[0], module._SUPPORTED_LINEAR_TYPES)
+            module._validate_supported_model(model)
 
     def test_saturated_sigmoid_matches_output_delta(self):
         """Rescale handles saturation where midpoint gradient is badly wrong."""
@@ -819,7 +819,7 @@ assert nn.ConstantPad1d in deeplift._SUPPORTED_LINEAR_TYPES
                 return torch.relu(self.linear(x))
 
         adapter = PyTorchAdapter(FunctionalReLU(), task="regression")
-        with pytest.raises(NotImplementedError, match="function call"):
+        with pytest.raises(NotImplementedError, match="exact nn.Sequential.*functional"):
             DeepLIFTExplainer(adapter, ["x"])
 
     def test_unsupported_nonlinear_module_is_rejected(self):
@@ -834,31 +834,92 @@ assert nn.ConstantPad1d in deeplift._SUPPORTED_LINEAR_TYPES
         with pytest.raises(NotImplementedError, match="GELU"):
             DeepLIFTExplainer(adapter, ["x"])
 
+    @pytest.mark.parametrize("method", ["deeplift", "deepshap"])
+    def test_reused_nonlinear_module_is_rejected_before_model_work(self, method):
+        """Captum hook ambiguity cannot return a DeepLIFT/DeepSHAP attribution."""
+        from explainiverse.adapters import PyTorchAdapter
+        from explainiverse.explainers.gradient import DeepLIFTExplainer, DeepLIFTShapExplainer
+
+        shared_relu = nn.ReLU()
+        model = nn.Sequential(
+            nn.Linear(2, 2),
+            shared_relu,
+            nn.Linear(2, 2),
+            shared_relu,
+            nn.Linear(2, 1),
+        )
+        adapter = PyTorchAdapter(model, task="regression")
+
+        with pytest.raises(NotImplementedError, match="cannot safely reuse.*nonlinear module"):
+            if method == "deeplift":
+                DeepLIFTExplainer(adapter, ["x0", "x1"])
+            else:
+                DeepLIFTShapExplainer(
+                    adapter,
+                    ["x0", "x1"],
+                    background_data=np.zeros((2, 2), dtype=np.float32),
+                )
+
+    @pytest.mark.parametrize("method", ["deeplift", "deepshap"])
+    def test_dynamic_untraceable_graph_is_rejected_before_model_work(self, method):
+        """Tensor-dependent control flow fails closed for both Captum surfaces."""
+        from explainiverse.adapters import PyTorchAdapter
+        from explainiverse.explainers.gradient import DeepLIFTExplainer, DeepLIFTShapExplainer
+
+        class TensorBranch(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.positive = nn.Linear(2, 1)
+                self.negative = nn.Linear(2, 1)
+                self.tensor_forward_calls = 0
+
+            def forward(self, values):
+                if isinstance(values, torch.Tensor):
+                    self.tensor_forward_calls += 1
+                if values.sum() > 0:
+                    return self.positive(values)
+                return self.negative(values)
+
+        model = TensorBranch()
+        adapter = PyTorchAdapter(model, task="regression")
+
+        with pytest.raises(
+            NotImplementedError,
+            match="exact nn.Sequential.*dynamic",
+        ):
+            if method == "deeplift":
+                DeepLIFTExplainer(adapter, ["x0", "x1"])
+            else:
+                DeepLIFTShapExplainer(
+                    adapter,
+                    ["x0", "x1"],
+                    background_data=np.zeros((2, 2), dtype=np.float32),
+                )
+
+        assert model.tensor_forward_calls == 0
+
     def test_training_state_is_temporarily_isolated_and_restored(self):
         """Construction and attribution preserve mixed modes, buffers, and grads."""
         from explainiverse.adapters import PyTorchAdapter
         from explainiverse.explainers.gradient import DeepLIFTExplainer
 
-        class StatefulNet(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.batch_norm = nn.BatchNorm1d(2)
-                self.dropout = nn.Dropout(p=0.95)
-                self.output = nn.Linear(2, 1, bias=False)
-                with torch.no_grad():
-                    self.output.weight.fill_(1.0)
-
-            def forward(self, inputs):
-                return self.output(self.dropout(self.batch_norm(inputs)))
-
-        network = StatefulNet()
+        network = nn.Sequential(
+            nn.BatchNorm1d(2),
+            nn.Dropout(p=0.95),
+            nn.Linear(2, 1, bias=False),
+        )
+        batch_norm = network[0]
+        dropout = network[1]
+        output = network[2]
+        with torch.no_grad():
+            output.weight.fill_(1.0)
         adapter = PyTorchAdapter(network, task="regression")
         network.train()
-        network.dropout.eval()
-        network.output.weight.grad = torch.full_like(network.output.weight, 5.0)
+        dropout.eval()
+        output.weight.grad = torch.full_like(output.weight, 5.0)
         flags_before = [module.training for module in network.modules()]
-        mean_before = network.batch_norm.running_mean.detach().clone()
-        gradient_object = network.output.weight.grad
+        mean_before = batch_norm.running_mean.detach().clone()
+        gradient_object = output.weight.grad
 
         explainer = DeepLIFTExplainer(adapter, ["a", "b"])
         assert [module.training for module in network.modules()] == flags_before
@@ -872,11 +933,11 @@ assert nn.ConstantPad1d in deeplift._SUPPORTED_LINEAR_TYPES
             second.explanation_data["attributions_raw"],
         )
         assert [module.training for module in network.modules()] == flags_before
-        torch.testing.assert_close(network.batch_norm.running_mean, mean_before)
-        assert network.output.weight.grad is gradient_object
+        torch.testing.assert_close(batch_norm.running_mean, mean_before)
+        assert output.weight.grad is gradient_object
         torch.testing.assert_close(
-            network.output.weight.grad,
-            torch.full_like(network.output.weight, 5.0),
+            output.weight.grad,
+            torch.full_like(output.weight, 5.0),
         )
 
     def test_missing_captum_has_clear_error(self, monkeypatch):
@@ -1004,6 +1065,161 @@ class TestDeepLIFTRegistry:
             "deeplift", model=adapter, feature_names=feature_names, class_names=class_names
         )
         assert explainer is not None
+
+
+def _integrity_deep_explainer(kind, model, *, task="regression", adapter_kwargs=None):
+    from explainiverse.adapters import PyTorchAdapter
+    from explainiverse.explainers.gradient import DeepLIFTExplainer, DeepLIFTShapExplainer
+
+    adapter = PyTorchAdapter(model, task=task, **(adapter_kwargs or {}))
+    if kind == "deeplift":
+        return DeepLIFTExplainer(adapter, ["x0", "x1"])
+    return DeepLIFTShapExplainer(
+        adapter,
+        ["x0", "x1"],
+        background_data=np.zeros((2, 2), dtype=np.float32),
+    )
+
+
+@pytest.mark.parametrize("kind", ["deeplift", "deepshap"])
+def test_canonical_forward_identity_rejects_wrong_feature_swap_and_clean_control(kind):
+    relu = nn.ReLU()
+    output = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        output.weight.copy_(torch.tensor([[1.0, 0.0]]))
+    model = nn.Sequential(relu, output)
+
+    def swapped_forward(self, values):
+        return torch.relu(values.flip(1))
+
+    relu.forward = MethodType(swapped_forward, relu)
+    with pytest.raises(RuntimeError, match="instance-shadowed forward"):
+        _integrity_deep_explainer(kind, model)
+
+    clean_output = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        clean_output.weight.copy_(torch.tensor([[1.0, 0.0]]))
+    explainer = _integrity_deep_explainer(kind, nn.Sequential(nn.ReLU(), clean_output))
+    result = explainer.explain(np.array([2.0, 3.0], dtype=np.float32), target_class=0)
+    np.testing.assert_allclose(result.explanation_data["attributions_raw"], [2.0, 0.0])
+
+
+@pytest.mark.parametrize("kind", ["deeplift", "deepshap"])
+@pytest.mark.parametrize("target", ["root_forward", "root_hook", "relu_call_impl"])
+def test_root_and_call_pipeline_integrity_fail_closed(kind, target):
+    model = nn.Sequential(nn.ReLU(), nn.Linear(2, 1, bias=False))
+    if target == "root_forward":
+        model.forward = MethodType(lambda self, values: values.flip(1), model)
+    elif target == "root_hook":
+        model.register_forward_hook(lambda _module, _inputs, output: output.flip(1))
+    else:
+        model[0]._call_impl = MethodType(lambda self, values: values * values, model[0])
+
+    with pytest.raises(RuntimeError, match="instance-shadowed|pre-existing"):
+        _integrity_deep_explainer(kind, model)
+
+
+@pytest.mark.parametrize("kind", ["deeplift", "deepshap"])
+def test_batchnorm_requires_tracked_statistics_and_tracked_control_is_conservative(kind):
+    untracked = nn.Sequential(
+        nn.BatchNorm1d(2, track_running_stats=False),
+        nn.Linear(2, 1, bias=False),
+    )
+    with pytest.raises(NotImplementedError, match="tracked running statistics"):
+        _integrity_deep_explainer(kind, untracked)
+
+    tracked_output = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        tracked_output.weight.copy_(torch.tensor([[1.0, -1.0]]))
+    explainer = _integrity_deep_explainer(kind, nn.Sequential(nn.BatchNorm1d(2), tracked_output))
+    result = explainer.explain(
+        np.array([2.0, 1.0], dtype=np.float32),
+        target_class=0,
+        return_convergence_delta=True,
+    )
+    assert result.explanation_data["convergence_delta"] < 1e-6
+
+
+@pytest.mark.parametrize("kind", ["deeplift", "deepshap"])
+def test_softmax_is_rejected_before_nonconservative_attribution(kind):
+    model = nn.Sequential(nn.Softmax(dim=1), nn.Linear(2, 1, bias=False))
+    with pytest.raises(NotImplementedError, match="Softmax.*completeness"):
+        _integrity_deep_explainer(kind, model)
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        "register_module_forward_pre_hook",
+        "register_module_forward_hook",
+        "register_module_full_backward_pre_hook",
+        "register_module_full_backward_hook",
+    ],
+)
+def test_global_module_execution_hooks_are_rejected(registration):
+    import torch.nn.modules.module as module_runtime
+
+    register = getattr(module_runtime, registration)
+    handle = register(lambda *_args: None)
+    try:
+        with pytest.raises(RuntimeError, match="process-global"):
+            _integrity_deep_explainer("deeplift", nn.Sequential(nn.ReLU(), nn.Linear(2, 1)))
+    finally:
+        handle.remove()
+
+
+@pytest.mark.parametrize("kind", ["deeplift", "deepshap"])
+@pytest.mark.parametrize("mutation", ["replace_child", "forward", "hook", "call_impl"])
+def test_post_construction_graph_mutations_are_revalidated_before_model_work(kind, mutation):
+    model = nn.Sequential(nn.ReLU(), nn.Linear(2, 1, bias=False))
+    explainer = _integrity_deep_explainer(kind, model)
+    if mutation == "replace_child":
+        model[0] = nn.Sigmoid()
+        match = "model graph changed"
+    elif mutation == "forward":
+        model[0].forward = MethodType(lambda self, values: values.flip(1), model[0])
+        match = "instance-shadowed forward"
+    elif mutation == "hook":
+        model[0].register_forward_hook(lambda _module, _inputs, output: output.flip(1))
+        match = "pre-existing"
+    else:
+        model[0]._call_impl = MethodType(lambda self, values: values * values, model[0])
+        match = "instance-shadowed _call_impl"
+
+    with pytest.raises(RuntimeError, match=match):
+        explainer.explain(np.array([2.0, 3.0], dtype=np.float32), target_class=0)
+
+
+def test_class_level_forward_monkeypatch_is_not_blessed_by_runtime_validation(monkeypatch):
+    model = nn.Sequential(nn.ReLU(), nn.Linear(2, 1, bias=False))
+    explainer = _integrity_deep_explainer("deeplift", model)
+    monkeypatch.setattr(nn.ReLU, "forward", lambda self, values: values.flip(1))
+
+    with pytest.raises(RuntimeError, match="canonical forward"):
+        explainer.explain(np.array([2.0, 3.0], dtype=np.float32), target_class=0)
+
+
+def test_multiclass_softmax_prediction_score_is_rejected_but_raw_scores_work():
+    from explainiverse.adapters import PyTorchAdapter
+    from explainiverse.explainers.gradient import DeepLIFTExplainer
+
+    prediction_adapter = PyTorchAdapter(
+        nn.Sequential(nn.Linear(2, 2, bias=False)),
+        task="classification",
+        gradient_output="prediction",
+    )
+    with pytest.raises(NotImplementedError, match="softmax prediction-score"):
+        DeepLIFTExplainer(prediction_adapter, ["x0", "x1"])
+
+    raw_adapter = PyTorchAdapter(
+        nn.Sequential(nn.Linear(2, 2, bias=False)),
+        task="classification",
+        gradient_output="model",
+    )
+    result = DeepLIFTExplainer(raw_adapter, ["x0", "x1"]).explain(
+        np.array([1.0, 2.0], dtype=np.float32), target_class=0
+    )
+    assert result.explanation_data["output_space"] == "model"
 
 
 if __name__ == "__main__":

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "claim_status": "blocked_pending_manual_evidence",
+  "max_evidence_age_days": 180,
+  "required_profiles": [
+    {
+      "id": "macos-safari-voiceover",
+      "platform": "A currently supported macOS release on Apple Silicon",
+      "browser": "Current stable Safari",
+      "assistive_technology": "Built-in VoiceOver"
+    },
+    {
+      "id": "windows-edge-nvda",
+      "platform": "Current Windows 11 on physical hardware",
+      "browser": "Current stable Microsoft Edge",
+      "assistive_technology": "Current stable NVDA"
+    }
+  ],
+  "required_scenarios": [
+    "disclosure-and-landmarks",
+    "keyboard-order-and-focus",
+    "task-and-class-state-change",
+    "signed-attribution-semantics",
+    "add-and-remove-feature",
+    "empty-state-announcement",
+    "zoom-and-320-css-px-reflow"
+  ],
+  "required_artifact_kinds": ["interaction-transcript", "screen-recording"]
+}

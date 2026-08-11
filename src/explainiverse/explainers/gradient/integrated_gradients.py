@@ -16,15 +16,15 @@ Reference:
 Example:
     from explainiverse.explainers.gradient import IntegratedGradientsExplainer
     from explainiverse.adapters import PyTorchAdapter
-    
+
     adapter = PyTorchAdapter(model, task="classification")
-    
+
     explainer = IntegratedGradientsExplainer(
         model=adapter,
         feature_names=feature_names,
         n_steps=50
     )
-    
+
     explanation = explainer.explain(instance)
 """
 
@@ -33,9 +33,16 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 
-from explainiverse.core.explainer import BaseExplainer
+from explainiverse.core.explainer import BaseExplainer, synchronized_explainer_method
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import validate_name_sequence
+from explainiverse.explainers.gradient._image_layout import (
+    channel_axis_for_layout,
+    gradient_from_nchw,
+    image_to_nchw,
+    resolve_image_layout,
+    validate_image_layout,
+)
 from explainiverse.explainers.gradient._input import (
     as_floating_array,
     scale_safe_integrated_gradient,
@@ -100,6 +107,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
         method: str = "riemann_middle",
         input_shape: Optional[Tuple[int, ...]] = None,
         random_state: Optional[int] = None,
+        input_layout: str = "auto",
     ):
         """
         Initialize the Integrated Gradients explainer.
@@ -128,7 +136,12 @@ class IntegratedGradientsExplainer(BaseExplainer):
             random_state: Optional non-negative seed for random baselines and
                         noisy-baseline averaging. Every public call uses a
                         local NumPy Generator and never advances NumPy's
-                        process-global random state.
+                         process-global random state.
+            input_layout: Image layout declaration. ``"auto"`` uses a
+                        rank-only convention (HW for rank 2, CHW for rank 3,
+                        NCHW for rank 4) and never guesses from channel size.
+                        Use ``"hwc"``/``"nhwc"`` explicitly for channel-last
+                        inputs. Ignored for one-dimensional tabular inputs.
         """
         super().__init__(model)
 
@@ -190,6 +203,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
         self.method: str = method
         self.input_shape: Optional[Tuple[int, ...]] = input_shape
         self.random_state: Optional[int] = None if random_state is None else int(random_state)
+        self.input_layout: str = validate_image_layout(input_layout)
 
     def _new_rng(self) -> np.random.Generator:
         """Create one operation-local generator without touching global state."""
@@ -214,7 +228,15 @@ class IntegratedGradientsExplainer(BaseExplainer):
                 "instance shape must match input_shape exactly; "
                 f"expected {self.input_shape}, got {actual_shape}"
             )
+        self._resolved_input_layout(prepared)
         return prepared
+
+    def _resolved_input_layout(self, value: np.ndarray) -> str:
+        """Return tabular or one explicit image layout without model work."""
+
+        if value.ndim == 1:
+            return "tabular"
+        return resolve_image_layout(value, self.input_layout)
 
     @staticmethod
     def _prepare_baseline(value, expected_shape: Tuple[int, ...]) -> np.ndarray:
@@ -233,26 +255,34 @@ class IntegratedGradientsExplainer(BaseExplainer):
                 raise ValueError("baseline must contain only finite real values") from exc
             raise
 
-    @staticmethod
-    def _as_model_batch(value: np.ndarray) -> np.ndarray:
-        """Add the batch axis and the implicit channel for a 2-D grayscale image."""
-        if value.ndim == 2:
-            return value[np.newaxis, np.newaxis, ...]
-        return value[np.newaxis, ...]
+    def _as_model_batch(self, value: np.ndarray) -> np.ndarray:
+        """Map a caller instance to its one declared sample-first model input."""
 
-    @staticmethod
-    def _gradient_for_instance(gradients: np.ndarray, shape: Tuple[int, ...]) -> np.ndarray:
+        if value.ndim == 1:
+            return value[np.newaxis, ...]
+        return image_to_nchw(value, self.input_layout)[0]
+
+    def _gradient_for_instance(self, gradients: np.ndarray, shape: Tuple[int, ...]) -> np.ndarray:
         """Map a model-batch gradient back to the caller's single-input shape."""
-        expected = (1, 1) + shape if len(shape) == 2 else (1,) + shape
-        if gradients.shape != expected:
+        if len(shape) == 1:
+            expected = (1,) + shape
+            if gradients.shape != expected:
+                raise ValueError(
+                    "predict_with_gradients returned the wrong gradient shape; "
+                    f"expected {expected}, got {gradients.shape}"
+                )
+            return gradients[0]
+        # Layout resolution depends only on rank here. Avoid allocating an
+        # image-sized throwaway array while validating the returned gradient.
+        rank_probe = np.empty((1,) * len(shape))
+        resolved_layout = resolve_image_layout(rank_probe, self.input_layout)
+        try:
+            return gradient_from_nchw(gradients, shape, resolved_layout)
+        except ValueError as exc:
             raise ValueError(
                 "predict_with_gradients returned the wrong gradient shape; "
-                f"expected {expected}, got {gradients.shape}"
-            )
-        sample = gradients[0]
-        if len(shape) == 2:
-            sample = sample[0]
-        return sample
+                f"got {gradients.shape} for caller layout {resolved_layout!r} and shape {shape}"
+            ) from exc
 
     def _resolve_target_class(
         self, instance: np.ndarray, target_class: Optional[int]
@@ -503,6 +533,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
 
         return integrated_gradients
 
+    @synchronized_explainer_method
     def explain(
         self,
         instance: np.ndarray,
@@ -532,6 +563,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
             raise TypeError("return_convergence_delta must be a boolean")
         instance = self._prepare_instance(instance)
         original_shape = instance.shape
+        resolved_layout = self._resolved_input_layout(instance)
 
         # Infer data type
         data_type = self._infer_data_type(instance)
@@ -559,6 +591,11 @@ class IntegratedGradientsExplainer(BaseExplainer):
             "input_shape": list(original_shape),
             "data_type": data_type,
             "random_state": self.random_state,
+            "input_layout": resolved_layout,
+            "configured_input_layout": self.input_layout,
+            "channel_axis": (
+                None if resolved_layout == "tabular" else channel_axis_for_layout(resolved_layout)
+            ),
         }
 
         # For tabular data, create named attributions
@@ -570,8 +607,14 @@ class IntegratedGradientsExplainer(BaseExplainer):
             # For images, retain the attribution tensor and a magnitude-pooled map.
             explanation_data["attribution_map"] = ig_attributions
             # Also store channel-aggregated saliency for visualization
-            if ig_attributions.ndim == 3:  # (C, H, W)
+            if resolved_layout == "chw":
                 explanation_data["saliency_map"] = np.abs(ig_attributions).sum(axis=0)
+            elif resolved_layout == "hwc":
+                explanation_data["saliency_map"] = np.abs(ig_attributions).sum(axis=-1)
+            elif resolved_layout == "nchw":
+                explanation_data["saliency_map"] = np.abs(ig_attributions).sum(axis=1)[0]
+            elif resolved_layout == "nhwc":
+                explanation_data["saliency_map"] = np.abs(ig_attributions).sum(axis=-1)[0]
             else:
                 explanation_data["saliency_map"] = np.abs(ig_attributions)
 
@@ -627,12 +670,21 @@ class IntegratedGradientsExplainer(BaseExplainer):
             target_class=label_name,
             explanation_data=explanation_data,
             feature_names=self.feature_names,
-            metadata=self._score_space_metadata(),
+            metadata={
+                **self._score_space_metadata(),
+                "input_layout": resolved_layout,
+                "channel_axis": (
+                    None
+                    if resolved_layout == "tabular"
+                    else channel_axis_for_layout(resolved_layout)
+                ),
+            },
         )
         if self.input_shape is None:
             self.input_shape = original_shape
         return explanation
 
+    @synchronized_explainer_method
     def explain_batch(self, X: np.ndarray, target_class: Optional[int] = None) -> List[Explanation]:
         """
         Generate explanations for multiple instances.
@@ -657,6 +709,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
 
         return [self.explain(X[i], target_class=target_class) for i in range(X.shape[0])]
 
+    @synchronized_explainer_method
     def compute_attributions_with_noise(
         self,
         instance: np.ndarray,
@@ -692,6 +745,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
 
         instance = self._prepare_instance(instance)
         original_shape = instance.shape
+        resolved_layout = self._resolved_input_layout(instance)
         data_type = self._infer_data_type(instance)
         self._validate_tabular_feature_names(instance, data_type)
 
@@ -720,6 +774,12 @@ class IntegratedGradientsExplainer(BaseExplainer):
             "noise_scale": noise_scale,
             "data_type": data_type,
             "random_state": self.random_state,
+            "input_shape": list(original_shape),
+            "input_layout": resolved_layout,
+            "configured_input_layout": self.input_layout,
+            "channel_axis": (
+                None if resolved_layout == "tabular" else channel_axis_for_layout(resolved_layout)
+            ),
         }
 
         # For tabular data, create named attributions
@@ -743,7 +803,15 @@ class IntegratedGradientsExplainer(BaseExplainer):
             target_class=label_name,
             explanation_data=explanation_data,
             feature_names=self.feature_names,
-            metadata=self._score_space_metadata(),
+            metadata={
+                **self._score_space_metadata(),
+                "input_layout": resolved_layout,
+                "channel_axis": (
+                    None
+                    if resolved_layout == "tabular"
+                    else channel_axis_for_layout(resolved_layout)
+                ),
+            },
         )
         if self.input_shape is None:
             self.input_shape = original_shape

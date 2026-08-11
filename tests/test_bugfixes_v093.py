@@ -626,7 +626,7 @@ class TestBug4GradCAMFlatInput:
         with pytest.raises(
             ValueError,
             match=(
-                r"Expected one CHW/HWC image, a \(1, C, H, W\) tensor, or a flat input "
+                r"Expected one declared HW/CHW/HWC/NCHW/NHWC image or a flat input "
                 r"for a model with an Unflatten layer; got shape \(192,\)"
             ),
         ):

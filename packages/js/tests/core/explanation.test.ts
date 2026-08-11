@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -13,7 +14,23 @@ describe('Explanation', () => {
   it('emits the shared Python/JavaScript wire fixture exactly', () => {
     const fixturePath = resolve(process.cwd(), 'tests/fixtures/explanation-wire.json');
     const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as unknown;
-    expect(Explanation.fromObject(fixture).toObject()).toEqual(fixture);
+    expect(Explanation.fromWireObject(fixture).toWireObject()).toEqual(fixture);
+  });
+
+  it('rejects every shared cross-language rejection fixture', () => {
+    const fixturePath = resolve(
+      process.cwd(),
+      'tests/fixtures/explanation-wire-rejections.json',
+    );
+    const fixtures = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      cases: { name: string; payload: unknown }[];
+    };
+    for (const fixture of fixtures.cases) {
+      expect(
+        () => Explanation.fromWireObject(fixture.payload),
+        fixture.name,
+      ).toThrow();
+    }
   });
 
   it('validates, copies, and exposes its constructor values', () => {
@@ -262,6 +279,22 @@ describe('Explanation', () => {
     expect(Explanation.fromObject(transported).toObject()).toEqual(original.toObject());
   });
 
+  it('survives an exact versioned JSON wire round trip', () => {
+    const original = new Explanation(
+      'Test',
+      'cat',
+      { diagnostics: [true, null, 'finite', 3.5] },
+      undefined,
+      { source: 'javascript' },
+    );
+    const transported = JSON.parse(
+      JSON.stringify(original.toWireObject()),
+    ) as unknown;
+    expect(Explanation.fromWireObject(transported).toWireObject()).toEqual(
+      original.toWireObject(),
+    );
+  });
+
   it('rejects lossy JSON integers outside the JavaScript safe-integer range', () => {
     const lossyPayload = JSON.parse(
       '{"explainer_name":"Test","target_class":"cat","explanation_data":{"count":9007199254740993},"feature_names":null,"metadata":{}}',
@@ -375,5 +408,106 @@ describe('Explanation', () => {
           callback: (() => 'not serializable') as unknown as ExplanationValue,
         }),
     ).toThrow(TypeError);
+  });
+
+  it('bridges Python producer to Node consumer to Python consumer and aligns rejections', () => {
+    const candidates = [
+      process.env.PYTHON,
+      ...(process.platform === 'win32' ? ['python'] : ['python3', 'python']),
+    ].filter(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.length > 0,
+    );
+    let selectedPython: string | undefined;
+    for (const candidate of [...new Set(candidates)]) {
+      const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+      if (probe.status === 0) {
+        selectedPython = candidate;
+        break;
+      }
+    }
+    if (selectedPython === undefined) {
+      throw new Error('the wire bridge requires a Python 3 executable');
+    }
+    const pythonExecutable = selectedPython;
+    const modulePath = resolve(
+      process.cwd(),
+      '..',
+      '..',
+      'src',
+      'explainiverse',
+      'core',
+      'explanation.py',
+    );
+    const moduleLoader = String.raw`
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("explainiverse_wire_bridge", sys.argv[1])
+if spec is None or spec.loader is None:
+    raise RuntimeError("could not load the Python Explanation module")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+Explanation = module.Explanation
+`;
+    const producerScript = `${moduleLoader}
+import json
+
+explanation = Explanation(
+    "python-node-bridge",
+    "class-1",
+    {"safe_boundaries": [float(2**53 - 1), float(-(2**53 - 1)), float(2**51) + 0.5]},
+    feature_names=["alpha"],
+    metadata={"producer": "python"},
+)
+print(json.dumps(explanation.to_wire_dict(), allow_nan=False, separators=(",", ":")))
+`;
+    const consumerScript = `${moduleLoader}
+import json
+
+payload = json.load(sys.stdin)
+restored = Explanation.from_wire_dict(payload)
+print(json.dumps(restored.to_wire_dict(), allow_nan=False, separators=(",", ":")))
+`;
+    const runPython = (script: string, input?: string) =>
+      spawnSync(pythonExecutable, ['-c', script, modulePath], {
+        encoding: 'utf8',
+        input,
+      });
+
+    const produced = runPython(producerScript);
+    expect(produced.status, produced.stderr).toBe(0);
+    const producedByPython = JSON.parse(produced.stdout) as unknown;
+    const emittedByNode = Explanation.fromWireObject(
+      producedByPython,
+    ).toWireObject();
+    const consumed = runPython(consumerScript, JSON.stringify(emittedByNode));
+    expect(consumed.status, consumed.stderr).toBe(0);
+    expect(JSON.parse(consumed.stdout)).toEqual(producedByPython);
+
+    const unsafeIntegerPayload = {
+      ...emittedByNode,
+      explanation_data: { unsafe_integer: Number.MAX_SAFE_INTEGER + 1 },
+    };
+    expect(() => Explanation.fromWireObject(unsafeIntegerPayload)).toThrow(
+      /safe-integer/,
+    );
+    const pythonUnsafe = runPython(
+      consumerScript,
+      JSON.stringify(unsafeIntegerPayload),
+    );
+    expect(pythonUnsafe.status).not.toBe(0);
+    expect(pythonUnsafe.stderr).toMatch(/safe-integer/);
+
+    const nonStringTargetPayload = { ...emittedByNode, target_class: 0 };
+    expect(() => Explanation.fromWireObject(nonStringTargetPayload)).toThrow(
+      /targetClass must be a string/,
+    );
+    const pythonTarget = runPython(
+      consumerScript,
+      JSON.stringify(nonStringTargetPayload),
+    );
+    expect(pythonTarget.status).not.toBe(0);
+    expect(pythonTarget.stderr).toMatch(/target_class must be a non-empty string/);
   });
 });

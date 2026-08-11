@@ -2201,7 +2201,10 @@ def compute_batch_relative_stability(
 def _get_top_k_features(
     attribution_vector: np.ndarray,
     k: int,
-) -> frozenset:
+    tie_policy: str = "stable_order",
+    *,
+    return_tie_incidence: bool = False,
+) -> Union[frozenset, Tuple[frozenset, bool]]:
     """
     Extract the indices of the top-k features by absolute attribution magnitude.
 
@@ -2214,14 +2217,33 @@ def _get_top_k_features(
     Returns:
         frozenset of integer indices.
     """
+    if tie_policy not in {"stable_order", "reject", "include_all"}:
+        raise ValueError("tie_policy must be 'stable_order', 'reject', or 'include_all'.")
     k = min(k, len(attribution_vector))
     magnitudes = np.abs(attribution_vector)
     feature_indices = np.arange(len(attribution_vector))
+    ordered = np.lexsort((feature_indices, -magnitudes))
+    cutoff = magnitudes[ordered[k - 1]]
+    strictly_above = int(np.sum(magnitudes > cutoff))
+    tied_at_cutoff = np.flatnonzero(magnitudes == cutoff)
+    tie_spans_cutoff = strictly_above < k < strictly_above + len(tied_at_cutoff)
+
+    if tie_policy == "reject" and tie_spans_cutoff:
+        raise ValueError(
+            "top-k attribution magnitudes contain a tie spanning the cutoff; "
+            "choose tie_policy='stable_order' or 'include_all' explicitly"
+        )
+    if tie_policy == "include_all":
+        indices = np.flatnonzero(magnitudes >= cutoff)
+    else:
+        indices = ordered[:k]
     # The discretisation needs exactly k features. Ties are resolved by the
     # declared feature order (lowest index first), an explicit deterministic
     # policy rather than an accidental consequence of NumPy's sort algorithm.
-    indices = np.lexsort((feature_indices, -magnitudes))[:k]
-    return frozenset(indices.tolist())
+    selected = frozenset(indices.tolist())
+    if return_tie_incidence:
+        return selected, tie_spans_cutoff
+    return selected
 
 
 def _get_model_prediction(
@@ -2251,7 +2273,9 @@ def compute_consistency(
     top_k: int = 3,
     max_pairs: Optional[int] = None,
     seed: Optional[int] = None,
-) -> float:
+    tie_policy: str = "stable_order",
+    return_details: bool = False,
+) -> Union[float, Dict[str, object]]:
     """
     Compute a top-k-discretised empirical Consistency estimate.
 
@@ -2301,6 +2325,11 @@ def compute_consistency(
             its same-explanation peers uniformly. This is an unbiased estimate
             of the same query-weighted target.
         seed: Random seed for Monte Carlo sampling when max_pairs is set.
+        tie_policy: ``"stable_order"`` selects exactly ``top_k`` features and
+            breaks a cutoff tie by feature index; ``"reject"`` refuses such a
+            tie; ``"include_all"`` includes every feature tied at the cutoff.
+        return_details: If true, return the score together with the selected
+            tie policy, cutoff-tie incidence, and selected-set sizes.
 
     Returns:
         Consistency score (float) in [0, 1]. Higher = more consistent.
@@ -2320,6 +2349,12 @@ def compute_consistency(
     X = _validate_batch(X)
     n_instances, n_features = X.shape
 
+    if tie_policy not in {"stable_order", "reject", "include_all"}:
+        raise ValueError("tie_policy must be 'stable_order', 'reject', or 'include_all'.")
+    if not isinstance(return_details, (bool, np.bool_)):
+        raise TypeError("return_details must be a boolean.")
+    return_details = bool(return_details)
+
     if isinstance(top_k, (bool, np.bool_)) or not isinstance(top_k, (int, np.integer)):
         raise TypeError("top_k must be an integer.")
     if top_k < 1:
@@ -2331,7 +2366,19 @@ def compute_consistency(
             "match and the metric becomes uninformative."
         )
     if n_instances < 2:
-        return float("nan")
+        score = float("nan")
+        if not return_details:
+            return score
+        return {
+            "score": score,
+            "tie_policy": tie_policy,
+            "requested_top_k": int(top_k),
+            "cutoff_tie_count": 0,
+            "cutoff_tie_fraction": 0.0,
+            "selected_feature_counts": [],
+            "n_instances": n_instances,
+            "estimator": "undefined_fewer_than_two_instances",
+        }
     if max_pairs is not None:
         if isinstance(max_pairs, bool) or not isinstance(max_pairs, (int, np.integer)):
             raise TypeError("max_pairs must be an integer or None.")
@@ -2342,11 +2389,19 @@ def compute_consistency(
 
     # Step 1: Compute explanations and predictions for all instances
     top_k_sets = []  # frozenset per instance
+    cutoff_ties: List[bool] = []
     predictions = []  # predicted class per instance
     for i in range(n_instances):
         attr = _get_explanation_vector(explainer, X[i], n_features)
         pred = _get_model_prediction(model, X[i])
-        top_k_sets.append(_get_top_k_features(attr, top_k))
+        selected, cutoff_tie = _get_top_k_features(
+            attr,
+            top_k,
+            tie_policy,
+            return_tie_incidence=True,
+        )
+        top_k_sets.append(selected)
+        cutoff_ties.append(cutoff_tie)
         predictions.append(pred)
 
     # Step 2: Group instances by their top-k explanation set
@@ -2370,20 +2425,39 @@ def compute_consistency(
                 local_scores.append(0.0)
                 continue
             local_scores.append(float(np.mean([predictions[j] == predictions[i] for j in peers])))
-        return float(np.mean(local_scores))
+        score = float(np.mean(local_scores))
+        estimator = "exact_query_weighted"
+    else:
+        # Unbiased Monte Carlo approximation of the same query-weighted quantity:
+        # draw x uniformly, then x' uniformly from x's same-explanation peers.
+        sampled_scores = []
+        query_indices = rng.integers(0, n_instances, size=max_pairs)
+        for i in query_indices:
+            peers = [j for j in groups[top_k_sets[i]] if j != i]
+            if not peers:
+                sampled_scores.append(0.0)
+                continue
+            j = peers[int(rng.integers(0, len(peers)))]
+            sampled_scores.append(float(predictions[j] == predictions[i]))
+        score = float(np.mean(sampled_scores))
+        estimator = "monte_carlo_query_peer"
 
-    # Unbiased Monte Carlo approximation of the same query-weighted quantity:
-    # draw x uniformly, then x' uniformly from x's same-explanation peers.
-    sampled_scores = []
-    query_indices = rng.integers(0, n_instances, size=max_pairs)
-    for i in query_indices:
-        peers = [j for j in groups[top_k_sets[i]] if j != i]
-        if not peers:
-            sampled_scores.append(0.0)
-            continue
-        j = peers[int(rng.integers(0, len(peers)))]
-        sampled_scores.append(float(predictions[j] == predictions[i]))
-    return float(np.mean(sampled_scores))
+    if not return_details:
+        return score
+    tie_count = int(sum(cutoff_ties))
+    return {
+        "score": score,
+        "tie_policy": tie_policy,
+        "requested_top_k": int(top_k),
+        "cutoff_tie_count": tie_count,
+        "cutoff_tie_fraction": tie_count / n_instances,
+        "selected_feature_counts": [len(features) for features in top_k_sets],
+        "n_instances": n_instances,
+        "n_explanation_groups": len(groups),
+        "estimator": estimator,
+        "max_pairs": None if max_pairs is None else int(max_pairs),
+        "seed": seed,
+    }
 
 
 def compute_batch_consistency(
@@ -2393,6 +2467,7 @@ def compute_batch_consistency(
     top_k_values: Optional[List[int]] = None,
     max_pairs: Optional[int] = None,
     seed: Optional[int] = None,
+    tie_policy: str = "stable_order",
 ) -> dict:
     """
     Compute Consistency across multiple top-k values.
@@ -2411,6 +2486,7 @@ def compute_batch_consistency(
         max_pairs: Historical name for the number of Monte Carlo query-peer
             draws per top-k evaluation; None computes the exact estimator.
         seed: Seed for Monte Carlo query-peer sampling only.
+        tie_policy: Shared cutoff-tie policy for every selected ``top_k``.
 
     Returns:
         Dictionary with:
@@ -2421,6 +2497,9 @@ def compute_batch_consistency(
     """
     X = _validate_batch(X)
     n_features = X.shape[1]
+
+    if tie_policy not in {"stable_order", "reject", "include_all"}:
+        raise ValueError("tie_policy must be 'stable_order', 'reject', or 'include_all'.")
 
     if top_k_values is None:
         top_k_values = [k for k in [1, 2, 3, 5] if k < n_features]
@@ -2443,18 +2522,30 @@ def compute_batch_consistency(
             "mean": float("nan"),
             "top_k_values": [],
             "n_instances": len(X),
+            "tie_policy": tie_policy,
+            "details": {},
         }
 
     scores = {}
+    details = {}
     for k in top_k_values:
-        scores[k] = compute_consistency(
+        detail = compute_consistency(
             explainer,
             model,
             X,
             top_k=k,
             max_pairs=max_pairs,
             seed=seed,
+            tie_policy=tie_policy,
+            return_details=True,
         )
+        if not isinstance(detail, dict):
+            raise RuntimeError("compute_consistency unexpectedly returned a scalar")
+        details[k] = detail
+        score_value = detail.get("score")
+        if isinstance(score_value, (bool, np.bool_)) or not isinstance(score_value, Real):
+            raise RuntimeError("compute_consistency detail payload has no real score")
+        scores[k] = float(score_value)
 
     valid_scores = [s for s in scores.values() if not np.isnan(s)]
     mean_score = float(np.mean(valid_scores)) if valid_scores else float("nan")
@@ -2464,6 +2555,47 @@ def compute_batch_consistency(
         "mean": mean_score,
         "top_k_values": top_k_values,
         "n_instances": len(X),
+        "tie_policy": tie_policy,
+        "details": details,
+    }
+
+
+def compare_consistency_results(
+    results: Mapping[str, Mapping[str, object]],
+) -> Dict[str, object]:
+    """Validate and collect detailed Consistency results under one tie policy.
+
+    The helper deliberately refuses scalar-only payloads and mixed policies;
+    without the recorded discretisation policy, numeric scores are not a
+    defensible comparison.
+    """
+
+    if not isinstance(results, Mapping) or not results:
+        raise ValueError("results must be a non-empty mapping of named detail payloads")
+    scores: Dict[str, float] = {}
+    policies = set()
+    for name, payload in results.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("result names must be non-empty strings")
+        if not isinstance(payload, Mapping):
+            raise TypeError("every consistency result must be a detail mapping")
+        policy = payload.get("tie_policy")
+        if policy not in {"stable_order", "reject", "include_all"}:
+            raise ValueError("every consistency result must record a valid tie_policy")
+        score = payload.get("score")
+        if isinstance(score, (bool, np.bool_)) or not isinstance(score, Real):
+            raise TypeError("every consistency result must contain a real scalar score")
+        numeric_score = float(score)
+        if not np.isfinite(numeric_score):
+            raise ValueError("consistency comparison scores must be finite")
+        policies.add(policy)
+        scores[name] = numeric_score
+    if len(policies) != 1:
+        raise ValueError("consistency results with mixed tie_policy values are incomparable")
+    return {
+        "tie_policy": next(iter(policies)),
+        "scores": scores,
+        "comparison_contract": "same_consistency_cutoff_tie_policy",
     }
 
 

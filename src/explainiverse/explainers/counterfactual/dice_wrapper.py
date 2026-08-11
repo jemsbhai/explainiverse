@@ -495,6 +495,9 @@ class CounterfactualExplainer(BaseExplainer):
         explanation_data = {
             "algorithm": "constrained_multistart_search",
             "is_dice_implementation": False,
+            "claim_status": "quarantined",
+            "promotion_requires_joint_proximity_diversity_optimization": True,
+            "official_dice_parity_established": False,
             "counterfactuals": [candidate.tolist() for candidate in counterfactuals],
             "counterfactual_predictions": predictions,
             "changes": all_changes,

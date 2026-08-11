@@ -23,10 +23,16 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from explainiverse.core.explainer import BaseExplainer
+from explainiverse._torch_module_graph import registered_module_graph
+from explainiverse.core.explainer import BaseExplainer, synchronized_explainer_method
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers.gradient._input import as_floating_array, scale_safe_sum
 from explainiverse.explainers.gradient._model_state import preserve_adapter_model_eval
+from explainiverse.explainers.gradient._module_integrity import (
+    capture_canonical_forwards,
+    require_module_integrity,
+    require_no_global_execution_hooks,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -105,6 +111,43 @@ class LRPExplainer(BaseExplainer):
     _WEIGHTED = (nn.Linear, nn.Conv2d) if TORCH_AVAILABLE else ()
     _NORMALIZATION = (nn.BatchNorm1d, nn.BatchNorm2d) if TORCH_AVAILABLE else ()
     _POOLING = (nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d) if TORCH_AVAILABLE else ()
+    _STANDARD_TYPES = (
+        (nn.Sequential,)
+        + _WEIGHTED
+        + _NORMALIZATION
+        + _POOLING
+        + _POINTWISE_NATIVE
+        + _POINTWISE_IDENTITY
+        + _RESHAPE
+        if TORCH_AVAILABLE
+        else ()
+    )
+    _CANONICAL_FORWARDS = capture_canonical_forwards(_STANDARD_TYPES) if TORCH_AVAILABLE else {}
+    _CANONICAL_CAPTUM_METHODS = (
+        {
+            name: getattr(nn.Module, name)
+            for name in (
+                "__call__",
+                "_call_impl",
+                "_wrapped_call_impl",
+                "children",
+                "modules",
+                "register_forward_hook",
+                "register_forward_pre_hook",
+            )
+            if hasattr(nn.Module, name)
+        }
+        if TORCH_AVAILABLE
+        else {}
+    )
+    _CANONICAL_STATE_METHODS = (
+        {
+            "state_dict": nn.Module.state_dict,
+            "load_state_dict": nn.Module.load_state_dict,
+        }
+        if TORCH_AVAILABLE
+        else {}
+    )
 
     def __init__(
         self,
@@ -157,6 +200,7 @@ class LRPExplainer(BaseExplainer):
         self._layers_info: Optional[List[Dict[str, Any]]] = None
 
         self._leaf_layers = self._validate_architecture(model.model)
+        self._model_topology = self._architecture_token(model.model, self._leaf_layers)
         if self.rule == "alpha_beta":
             self._validate_alpha_beta_architecture()
 
@@ -191,24 +235,38 @@ class LRPExplainer(BaseExplainer):
                 f"supported leaf module; got {type(model).__name__}."
             )
 
+        require_no_global_execution_hooks(context="LRP")
+        registered_module_graph(model)
+
         leaves: List[Tuple[int, str, nn.Module]] = []
         seen: set[int] = set()
 
         def visit(module: nn.Module, path: str) -> None:
-            if type(module) is nn.Sequential:
-                for name, child in module._modules.items():
-                    child_path = f"{path}.{name}" if path else name
-                    visit(child, child_path)
-                return
-            if type(module) not in supported:
-                raise TypeError(
-                    f"Unsupported LRP layer {type(module).__name__} at {path or '<root>'}."
-                )
             if id(module) in seen:
                 raise TypeError(
                     f"Layer {path or '<root>'} is reused; shared modules are unsupported."
                 )
             seen.add(id(module))
+            module_type = type(module)
+            if module_type is not nn.Sequential and module_type not in supported:
+                raise TypeError(
+                    f"Unsupported LRP layer {module_type.__name__} at {path or '<root>'}."
+                )
+            require_module_integrity(
+                module,
+                path=path,
+                context="LRP",
+                canonical_forward=self._CANONICAL_FORWARDS[module_type],
+                canonical_methods=self._CANONICAL_CAPTUM_METHODS,
+                check_state_io=True,
+                canonical_state_methods=self._CANONICAL_STATE_METHODS,
+            )
+            if type(module) is nn.Sequential:
+                children = object.__getattribute__(module, "__dict__")["_modules"]
+                for name, child in children.items():
+                    child_path = f"{path}.{name}" if path else name
+                    visit(child, child_path)
+                return
             if isinstance(module, self._NORMALIZATION) and (
                 not module.track_running_stats
                 or module.running_mean is None
@@ -226,6 +284,22 @@ class LRPExplainer(BaseExplainer):
         if not leaves:
             raise TypeError("LRP requires at least one supported leaf layer")
         return leaves
+
+    @staticmethod
+    def _architecture_token(model: nn.Module, leaves) -> tuple:
+        return (
+            id(model),
+            type(model),
+            tuple((index, path, id(layer), type(layer)) for index, path, layer in leaves),
+        )
+
+    def _validate_current_architecture(self, model: nn.Module) -> None:
+        leaves = self._validate_architecture(model)
+        if self._architecture_token(model, leaves) != self._model_topology:
+            raise RuntimeError(
+                "The LRP model graph changed after explainer construction; construct "
+                "a new explainer for the new exact module graph."
+            )
 
     def _validate_alpha_beta_architecture(self) -> None:
         supported = (nn.Linear,) + self._POINTWISE_NATIVE + self._POINTWISE_IDENTITY + self._RESHAPE
@@ -394,6 +468,7 @@ class LRPExplainer(BaseExplainer):
             return self._layer_rules[layer_idx]
         return "epsilon"
 
+    @synchronized_explainer_method
     def set_composite_rule(self, layer_rules: Dict[int, str]) -> "LRPExplainer":
         if self.rule != "composite":
             raise ValueError("set_composite_rule requires rule='composite'")
@@ -474,7 +549,7 @@ class LRPExplainer(BaseExplainer):
         ):
             self._validate_z_plus_activations(records)
 
-        training_flags = {module: module.training for module in model.modules()}
+        training_flags = {module: module.training for module in registered_module_graph(model)}
         state = {name: value.detach().clone() for name, value in model.state_dict().items()}
         old_rules = {
             layer: (hasattr(layer, "rule"), getattr(layer, "rule", None))
@@ -589,13 +664,14 @@ class LRPExplainer(BaseExplainer):
         return relevance.detach(), layer_relevances
 
     def _compute(self, instance: np.ndarray, target_class: Optional[int]) -> Dict[str, Any]:
-        x = self._prepare_input_tensor(instance)
         model = self._get_pytorch_model()
         # The preliminary leafwise forward is model work too: user hooks can
         # consume Torch RNG or mutate registered buffers before Captum's own
         # state snapshot. Preserve the complete operation, including failures.
         with preserve_adapter_model_eval(self.model), _LRP_LOCK:
-            training_flags = {module: module.training for module in model.modules()}
+            self._validate_current_architecture(model)
+            x = self._prepare_input_tensor(instance)
+            training_flags = {module: module.training for module in registered_module_graph(model)}
             try:
                 model.eval()
                 with torch.no_grad():
@@ -701,6 +777,7 @@ class LRPExplainer(BaseExplainer):
             parameters[index] = values
         return parameters
 
+    @synchronized_explainer_method
     def explain(
         self,
         instance: np.ndarray,
@@ -749,6 +826,7 @@ class LRPExplainer(BaseExplainer):
             feature_names=self.feature_names,
         )
 
+    @synchronized_explainer_method
     def explain_batch(self, X: np.ndarray, target_class: Optional[int] = None) -> List[Explanation]:
         array = np.asarray(X)
         if array.ndim == 1:
@@ -759,6 +837,7 @@ class LRPExplainer(BaseExplainer):
             self.explain(array[index], target_class=target_class) for index in range(array.shape[0])
         ]
 
+    @synchronized_explainer_method
     def explain_with_layer_relevances(
         self, instance: np.ndarray, target_class: Optional[int] = None
     ) -> Dict[str, Any]:
@@ -781,6 +860,7 @@ class LRPExplainer(BaseExplainer):
             ),
         }
 
+    @synchronized_explainer_method
     def compare_rules(
         self,
         instance: np.ndarray,

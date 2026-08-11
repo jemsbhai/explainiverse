@@ -35,6 +35,23 @@ class _EndpointBinaryModel:
         return (np.asarray(X)[:, 0] >= 0.5).astype(float)
 
 
+class _UndeclaredEndpointBinaryModel:
+    task = "classification"
+
+    def predict(self, X):
+        return (np.asarray(X)[:, 0] >= 0.5).astype(float)
+
+
+class _UndeclaredEndpointBinaryColumnModel(_UndeclaredEndpointBinaryModel):
+    def predict(self, X):
+        return super().predict(X).reshape(-1, 1)
+
+
+class _EndpointBinaryColumnModel(_EndpointBinaryModel):
+    def predict(self, X):
+        return super().predict(X).reshape(-1, 1)
+
+
 class _ProbabilityModel:
     task = "classification"
     classes_ = np.array([0, 1])
@@ -108,6 +125,47 @@ def test_explicit_output_kind_disambiguates_endpoint_probabilities_and_labels():
             require_probabilities=True,
             allow_label_predictions=False,
         )
+
+
+def test_probability_consumer_rejects_undeclared_one_dimensional_endpoint_values():
+    X = np.array([[0.0], [1.0]])
+
+    with pytest.raises(
+        ValueError,
+        match=r"cannot infer.*undeclared one-dimensional \{0, 1\}.*prediction_output_kind",
+    ):
+        normalize_classifier_outputs(
+            _UndeclaredEndpointBinaryModel(),
+            X,
+            context="endpoint oracle",
+            require_probabilities=True,
+            allow_label_predictions=False,
+        )
+
+
+def test_probability_consumer_rejects_undeclared_one_column_endpoint_values():
+    X = np.array([[0.0], [1.0]])
+
+    with pytest.raises(
+        ValueError,
+        match=r"cannot infer.*undeclared one-column \{0, 1\}.*prediction_output_kind",
+    ):
+        normalize_classifier_outputs(
+            _UndeclaredEndpointBinaryColumnModel(),
+            X,
+            context="endpoint oracle",
+            require_probabilities=True,
+            allow_label_predictions=False,
+        )
+
+    declared = normalize_classifier_outputs(
+        _EndpointBinaryColumnModel("probabilities"),
+        X,
+        context="endpoint oracle",
+        require_probabilities=True,
+        allow_label_predictions=False,
+    )
+    np.testing.assert_array_equal(declared, np.eye(2))
 
 
 def test_counterfactual_accepts_declared_endpoint_probability_adapter():
@@ -225,7 +283,9 @@ def test_protodash_preserves_zero_objective_mass_and_suppresses_undefined_mmd():
     assert data["normalized_weights_defined"] is False
     assert data["mmd_defined"] is False
     assert "mmd_score" not in data
-    assert data["mmd_undefined_reason"] == "objective_weights_have_zero_normalizable_mass"
+    assert data["mmd_undefined_reason"] == "objective_weight_mass_is_exactly_zero"
+    assert data["normalization_threshold"] == 1e-10
+    assert data["objective_weight_mass_threshold_relation"] == "exactly_zero"
 
     local = ProtoDashExplainer(n_prototypes=1, kernel="linear").explain(
         np.array([0.0]),

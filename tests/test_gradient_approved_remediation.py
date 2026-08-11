@@ -566,50 +566,41 @@ def test_pytorch_prediction_output_kind_matches_activation_contract():
     )
 
 
-class _FailingMove(nn.Linear):
-    fail_move = False
-
-    def to(self, *args, **kwargs):
-        if self.fail_move:
-            self.fail_move = False
-            raise RuntimeError("injected move failure")
-        return super().to(*args, **kwargs)
-
-
-def test_failed_adapter_move_does_not_poison_device_state():
-    model = _FailingMove(2, 1)
+def test_rejected_meta_move_does_not_poison_device_state():
+    model = nn.Linear(2, 1)
     adapter = PyTorchAdapter(model, task="regression")
     original_device = adapter.device
-    model.fail_move = True
 
-    with pytest.raises(RuntimeError, match="injected move failure"):
+    with pytest.raises(ValueError, match="do not support the meta device"):
         adapter.to("meta")
 
     assert adapter.device == original_device
     assert next(model.parameters()).device == original_device
+    assert adapter.predict(np.ones((1, 2), dtype=np.float32)).shape == (1, 1)
 
 
 class _FailingAfterMove(nn.Linear):
-    fail_after_move = False
+    failing_moves = 0
 
     def to(self, *args, **kwargs):
-        result = super().to(*args, **kwargs)
-        if self.fail_after_move:
-            self.fail_after_move = False
-            raise RuntimeError("injected failure after mutation")
-        return result
+        if self.failing_moves:
+            self.failing_moves -= 1
+            raise RuntimeError("injected move/rollback failure")
+        return super().to(*args, **kwargs)
 
 
 def test_partial_device_move_with_impossible_rollback_reports_inconsistent_state():
     model = _FailingAfterMove(2, 1)
     adapter = PyTorchAdapter(model, task="regression")
-    model.fail_after_move = True
+    model.failing_moves = 2
 
     with pytest.raises(RuntimeError, match="rollback failed.*may be inconsistent"):
-        adapter.to("meta")
+        adapter.to("cpu")
 
     assert adapter.device == torch.device("cpu")
-    assert next(model.parameters()).device == torch.device("meta")
+    assert next(model.parameters()).device == torch.device("cpu")
+    with pytest.raises(RuntimeError, match="is poisoned.*Reconstruct"):
+        adapter.predict(np.ones((1, 2), dtype=np.float32))
 
 
 class _UnusedLayerModel(nn.Module):
@@ -1053,7 +1044,7 @@ class _FailingEvalTransition(nn.Linear):
         return result
 
 
-def test_failed_eval_transition_restores_rng_mode_buffer_and_gradient_identity():
+def test_custom_eval_transition_is_rejected_before_rng_or_model_state_mutation():
     model = _FailingEvalTransition()
     with torch.no_grad():
         model.weight.fill_(1.0)
@@ -1066,7 +1057,7 @@ def test_failed_eval_transition_restores_rng_mode_buffer_and_gradient_identity()
     torch.manual_seed(9876)
     rng_before = torch.random.get_rng_state().clone()
 
-    with pytest.raises(RuntimeError, match="eval transition failure"):
+    with pytest.raises(RuntimeError, match="train overrides canonical"):
         SaliencyExplainer(adapter, ["x"]).explain(np.array([1.0], dtype=np.float64), target_class=0)
 
     assert model.training is True
@@ -1076,6 +1067,8 @@ def test_failed_eval_transition_restores_rng_mode_buffer_and_gradient_identity()
     assert model.weight.grad is original_gradient
     np.testing.assert_array_equal(model.weight.grad.detach().numpy(), [[5.0]])
     assert torch.equal(torch.random.get_rng_state(), rng_before)
+    with pytest.raises(RuntimeError, match="is poisoned.*Reconstruct"):
+        adapter.predict(np.ones((1, 1), dtype=np.float64))
 
 
 class _ResizingBufferGradientModel(nn.Module):
@@ -1515,35 +1508,25 @@ def test_deeplift_ig_comparison_handles_extreme_range_and_unrepresentable_mse():
         _stable_attribution_comparison(np.asarray([np.nextafter(0.0, 1.0)]), np.asarray([0.0]))
 
 
-@pytest.mark.parametrize("raise_from_hook", [False, True])
 @pytest.mark.skipif(importlib.util.find_spec("captum") is None, reason="Captum is optional")
-def test_lrp_restores_rng_and_buffer_mutations_from_pre_captum_forward(raise_from_hook):
+def test_lrp_rejects_preexisting_mutating_hook_before_rng_or_buffer_change():
     layer = nn.Linear(1, 1, bias=False, dtype=torch.float64)
     with torch.no_grad():
         layer.weight.fill_(1.0)
     layer.register_buffer("calls", torch.zeros((), dtype=torch.int64))
     original_buffer = layer.calls
-    should_raise = raise_from_hook
 
     def mutating_hook(module, inputs):
         del inputs
-        nonlocal should_raise
         module.calls.add_(1)
         torch.rand(())
-        if should_raise:
-            should_raise = False
-            raise RuntimeError("injected LRP forward failure")
 
     layer.register_forward_pre_hook(mutating_hook)
-    explainer = LRPExplainer(PyTorchAdapter(nn.Sequential(layer), task="regression"), ["x"])
     torch.manual_seed(123456)
     rng_before = torch.random.get_rng_state().clone()
 
-    if raise_from_hook:
-        with pytest.raises(RuntimeError, match="injected LRP forward failure"):
-            explainer.explain(np.array([2.0], dtype=np.float64), target_class=0)
-    else:
-        explainer.explain(np.array([2.0], dtype=np.float64), target_class=0)
+    with pytest.raises(RuntimeError, match="pre-existing.*forward_pre_hooks"):
+        LRPExplainer(PyTorchAdapter(nn.Sequential(layer), task="regression"), ["x"])
 
     assert layer.calls is original_buffer
     assert int(layer.calls.item()) == 0

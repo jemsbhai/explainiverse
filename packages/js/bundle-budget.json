@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "scope": "built synthetic demo only; not a browser-support claim for the CommonJS library",
+  "maxTotalOutputBytes": 225280,
+  "maxSingleJavaScriptBytes": 220000,
+  "maxTotalJavaScriptGzipBytes": 73728
+}

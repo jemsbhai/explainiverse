@@ -28,8 +28,9 @@ tie-invariant.
 import re
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from numbers import Integral, Real
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from scipy import stats
@@ -41,6 +42,13 @@ except AttributeError:
     _trapezoid = getattr(np, "trapz")
 
 from explainiverse.core.explanation import Explanation
+from explainiverse.core.scaled_detail import (
+    LEGACY_DETAIL_FORMAT,
+    SCALED_DECIMAL_DETAIL_FORMAT,
+    DetailRepresentationError,
+    encode_scaled_detail,
+    validate_detail_format,
+)
 from explainiverse.evaluation._utils import (
     _stable_dot,
     _stable_mean,
@@ -91,6 +99,15 @@ def _validate_bool(value, name: str) -> bool:
     if not isinstance(value, (bool, np.bool_)):
         raise TypeError(f"{name} must be a boolean")
     return bool(value)
+
+
+def _validate_detail_request(requested: bool, detail_format: str) -> str:
+    """Validate an opt-in detail encoding without silently ignoring it."""
+
+    result = validate_detail_format(detail_format)
+    if not requested and result != LEGACY_DETAIL_FORMAT:
+        raise ValueError("detail_format requires the corresponding detail-return flag")
+    return result
 
 
 def _validate_nonnegative_real(value, name: str) -> float:
@@ -645,10 +662,8 @@ def compute_road(
     use_absolute: bool = True,
     seed: Optional[int] = None,
     return_details: bool = False,
-) -> Union[
-    float,
-    Dict[str, Union[float, np.ndarray, List[float], List[int], str]],
-]:
+    detail_format: str = LEGACY_DETAIL_FORMAT,
+) -> Union[float, Dict[str, Any]]:
     """
     Compute a local, ROAD-inspired prediction-change diagnostic.
 
@@ -718,6 +733,7 @@ def compute_road(
     n_features = len(instance)
     use_absolute = _validate_bool(use_absolute, "use_absolute")
     return_details = _validate_bool(return_details, "return_details")
+    detail_format = _validate_detail_request(return_details, detail_format)
 
     # Validate background_data
     if background_data is None:
@@ -827,19 +843,27 @@ def compute_road(
     score = _stable_mean_difference(original_value, prediction_array)
 
     if return_details:
-        try:
-            prediction_change_array = np.asarray(
-                [
-                    _finite_difference(original_value, value, "ROAD prediction change")
-                    for value in prediction_array
-                ],
-                dtype=np.float64,
-            )
-        except FloatingPointError as exc:
-            raise FloatingPointError(
-                "return_details cannot represent an individual ROAD prediction_change; "
-                "use return_details=False for the representable aggregate"
-            ) from exc
+        exact_changes = [
+            Fraction.from_float(original_value) - Fraction.from_float(float(value))
+            for value in prediction_array
+        ]
+        prediction_change_array: Any
+        if detail_format == SCALED_DECIMAL_DETAIL_FORMAT:
+            prediction_change_array = encode_scaled_detail(exact_changes)
+        else:
+            try:
+                prediction_change_array = np.asarray(
+                    [
+                        _finite_difference(original_value, value, "ROAD prediction change")
+                        for value in prediction_array
+                    ],
+                    dtype=np.float64,
+                )
+            except FloatingPointError as exc:
+                raise DetailRepresentationError(
+                    "return_details cannot represent an individual ROAD prediction_change; "
+                    "use detail_format='scaled_decimal_v1' or return_details=False"
+                ) from exc
         return {
             "score": score,
             "prediction_changes": prediction_change_array,
@@ -1697,7 +1721,8 @@ def compute_irof(
     segment_size: Optional[int] = None,
     use_absolute: bool = True,
     return_details: bool = False,
-) -> Union[float, Dict[str, Union[float, np.ndarray, List]]]:
+    detail_format: str = LEGACY_DETAIL_FORMAT,
+) -> Union[float, Dict[str, Any]]:
     """
     Compute a one-dimensional, per-instance IROF adaptation.
 
@@ -1757,6 +1782,7 @@ def compute_irof(
     n_features = len(instance)
     use_absolute = _validate_bool(use_absolute, "use_absolute")
     return_details = _validate_bool(return_details, "return_details")
+    detail_format = _validate_detail_request(return_details, detail_format)
 
     # Get baseline values
     baseline_values = _validated_baseline_values(baseline, background_data, n_features)
@@ -1782,8 +1808,16 @@ def compute_irof(
     # IROF's segment equation uses mean L1 relevance. The signed branch is an
     # explicit option of this one-dimensional adaptation.
     segment_importance_exact = []
+    segment_importance_fractions = []
     for segment in segments:
         segment_values = np.abs(attr_array[segment]) if use_absolute else attr_array[segment]
+        segment_importance_fractions.append(
+            sum(
+                (Fraction.from_float(float(value)) for value in segment_values),
+                start=Fraction(0),
+            )
+            / len(segment)
+        )
         segment_importance_exact.append(
             sum(
                 (Decimal.from_float(float(value)) for value in segment_values),
@@ -1841,37 +1875,51 @@ def compute_irof(
     )
 
     if return_details:
-        segment_importance = np.asarray(
-            [float(value) for value in segment_importance_exact], dtype=np.float64
-        )
-        if np.any(~np.isfinite(segment_importance)) or any(
-            result == 0.0 and exact != 0
-            for result, exact in zip(segment_importance, segment_importance_exact)
-        ):
-            raise FloatingPointError(
-                "IROF scalar area is representable, but an exact segment importance "
-                "cannot be represented in the requested details"
+        denominator = Fraction.from_float(original_value)
+        exact_normalised = [
+            Fraction.from_float(float(value)) / denominator for value in prediction_array
+        ]
+        exact_drops = [Fraction(1) - value for value in exact_normalised]
+        segment_importance: Any
+        normalised_predictions: Any
+        prediction_drops: Any
+        if detail_format == SCALED_DECIMAL_DETAIL_FORMAT:
+            segment_importance = encode_scaled_detail(segment_importance_fractions)
+            normalised_predictions = encode_scaled_detail(exact_normalised)
+            prediction_drops = encode_scaled_detail(exact_drops)
+        else:
+            segment_importance = np.asarray(
+                [float(value) for value in segment_importance_exact], dtype=np.float64
             )
-        try:
-            normalised_predictions = np.asarray(
-                [
-                    _finite_ratio(value, original_value, "IROF normalized prediction")
-                    for value in prediction_array
-                ],
-                dtype=float,
-            )
-            prediction_drops = np.asarray(
-                [
-                    _finite_difference(1.0, value, "IROF normalized prediction drop")
-                    for value in normalised_predictions
-                ],
-                dtype=float,
-            )
-        except FloatingPointError as exc:
-            raise FloatingPointError(
-                "IROF scalar area is representable, but the requested per-step "
-                "normalized details are not representable"
-            ) from exc
+            if np.any(~np.isfinite(segment_importance)) or any(
+                result == 0.0 and exact != 0
+                for result, exact in zip(segment_importance, segment_importance_exact)
+            ):
+                raise DetailRepresentationError(
+                    "IROF scalar area is representable, but an exact segment importance "
+                    "cannot be represented in the requested details"
+                )
+            try:
+                normalised_predictions = np.asarray(
+                    [
+                        _finite_ratio(value, original_value, "IROF normalized prediction")
+                        for value in prediction_array
+                    ],
+                    dtype=float,
+                )
+                prediction_drops = np.asarray(
+                    [
+                        _finite_difference(1.0, value, "IROF normalized prediction drop")
+                        for value in normalised_predictions
+                    ],
+                    dtype=float,
+                )
+            except FloatingPointError as exc:
+                raise DetailRepresentationError(
+                    "IROF scalar area is representable, but the requested per-step "
+                    "normalized details are not representable; use "
+                    "detail_format='scaled_decimal_v1'"
+                ) from exc
         return {
             "aoc": float(aoc),
             "curve": prediction_drops,
@@ -2037,7 +2085,8 @@ def compute_infidelity(
     subset_size: Optional[int] = None,
     seed: Optional[int] = None,
     return_details: bool = False,
-) -> Union[float, Dict[str, Union[float, np.ndarray, str]]]:
+    detail_format: str = LEGACY_DETAIL_FORMAT,
+) -> Union[float, Dict[str, Any]]:
     """
     Compute Infidelity score (Yeh et al., 2019).
 
@@ -2127,6 +2176,7 @@ def compute_infidelity(
     if perturbation_type == "square" and noise_scale > 1.0:
         raise ValueError("noise_scale must lie in [0, 1] for 'square'")
     return_details = _validate_bool(return_details, "return_details")
+    detail_format = _validate_detail_request(return_details, detail_format)
 
     instance = _as_feature_vector(instance)
     n_features = len(instance)
@@ -2226,15 +2276,22 @@ def compute_infidelity(
     infidelity = _stable_mean_square(residual_array)
 
     if return_details:
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            squared_error_array = residual_array * residual_array
-        if not np.all(np.isfinite(squared_error_array)) or np.any(
-            (squared_error_array == 0.0) & (residual_array != 0.0)
-        ):
-            raise FloatingPointError(
-                "return_details cannot represent individual infidelity squared_errors; "
-                "use return_details=False for the representable aggregate"
-            )
+        exact_squared_errors = [
+            Fraction.from_float(float(residual)) ** 2 for residual in residual_array
+        ]
+        squared_error_array: Any
+        if detail_format == SCALED_DECIMAL_DETAIL_FORMAT:
+            squared_error_array = encode_scaled_detail(exact_squared_errors)
+        else:
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                squared_error_array = residual_array * residual_array
+            if not np.all(np.isfinite(squared_error_array)) or np.any(
+                (squared_error_array == 0.0) & (residual_array != 0.0)
+            ):
+                raise DetailRepresentationError(
+                    "return_details cannot represent individual infidelity squared_errors; "
+                    "use detail_format='scaled_decimal_v1' or return_details=False"
+                )
         return {
             "infidelity": infidelity,
             "squared_errors": squared_error_array,
@@ -2401,7 +2458,8 @@ def compute_selectivity(
     n_steps: Optional[int] = None,
     use_absolute: bool = True,
     return_details: bool = False,
-) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    detail_format: str = LEGACY_DETAIL_FORMAT,
+) -> Union[float, Dict[str, Any]]:
     """
     Compute a one-dimensional, per-instance AOPC selectivity proxy.
 
@@ -2459,6 +2517,7 @@ def compute_selectivity(
     n_features = len(instance)
     use_absolute = _validate_bool(use_absolute, "use_absolute")
     return_details = _validate_bool(return_details, "return_details")
+    detail_format = _validate_detail_request(return_details, detail_format)
 
     # Get baseline values
     baseline_values = _validated_baseline_values(baseline, background_data, n_features)
@@ -2509,19 +2568,28 @@ def compute_selectivity(
     aopc = _stable_mean_difference(original_value, prediction_array)
 
     if return_details:
-        try:
-            prediction_drop_array = np.asarray(
-                [
-                    _finite_difference(original_value, value, "selectivity drop")
-                    for value in prediction_array
-                ],
-                dtype=np.float64,
-            )
-        except FloatingPointError as exc:
-            raise FloatingPointError(
-                "return_details cannot represent an individual selectivity prediction_drop; "
-                "use return_details=False for the representable aggregate"
-            ) from exc
+        exact_drops = [
+            Fraction.from_float(original_value) - Fraction.from_float(float(value))
+            for value in prediction_array
+        ]
+        prediction_drop_array: Any
+        if detail_format == SCALED_DECIMAL_DETAIL_FORMAT:
+            prediction_drop_array = encode_scaled_detail(exact_drops)
+        else:
+            try:
+                prediction_drop_array = np.asarray(
+                    [
+                        _finite_difference(original_value, value, "selectivity drop")
+                        for value in prediction_array
+                    ],
+                    dtype=np.float64,
+                )
+            except FloatingPointError as exc:
+                raise DetailRepresentationError(
+                    "return_details cannot represent an individual selectivity "
+                    "prediction_drop; use detail_format='scaled_decimal_v1' or "
+                    "return_details=False"
+                ) from exc
         return {
             "aopc": float(aopc),
             "prediction_drops": prediction_drop_array,
@@ -2593,7 +2661,8 @@ def compute_sensitivity_n(
     use_absolute: bool = False,
     seed: Optional[int] = None,
     return_details: bool = False,
-) -> Union[float, Dict[str, Union[float, np.ndarray, List]]]:
+    detail_format: str = LEGACY_DETAIL_FORMAT,
+) -> Union[float, Dict[str, Any]]:
     """
     Compute Sensitivity-n score (Ancona et al., 2018).
 
@@ -2652,6 +2721,7 @@ def compute_sensitivity_n(
         raise ValueError("n_subsets must be at least 2 for correlation")
     use_absolute = _validate_bool(use_absolute, "use_absolute")
     return_details = _validate_bool(return_details, "return_details")
+    detail_format = _validate_detail_request(return_details, detail_format)
 
     instance = _as_feature_vector(instance)
     n_features = len(instance)
@@ -2675,6 +2745,7 @@ def compute_sensitivity_n(
 
     # Sample random subsets and compute correlations
     attribution_sums = []
+    attribution_sum_fractions = []
     perturbed_values = []
     subsets = []
 
@@ -2690,6 +2761,12 @@ def compute_sensitivity_n(
             start=Decimal(0),
         )
         attribution_sums.append(attr_sum)
+        attribution_sum_fractions.append(
+            sum(
+                (Fraction.from_float(float(value)) for value in subset_values),
+                start=Fraction(0),
+            )
+        )
 
         # Create perturbed instance with subset features removed
         perturbed = instance.copy()
@@ -2707,30 +2784,42 @@ def compute_sensitivity_n(
     corr = _stable_pearson_decimal_affine(attribution_sums, original_value, perturbed_array)
 
     if return_details:
-        attribution_sum_array = np.asarray(
-            [float(value) for value in attribution_sums], dtype=np.float64
-        )
-        if np.any(~np.isfinite(attribution_sum_array)) or any(
-            result == 0.0 and exact != 0
-            for result, exact in zip(attribution_sum_array, attribution_sums)
-        ):
-            raise FloatingPointError(
-                "Sensitivity-n scalar correlation is representable, but an exact "
-                "attribution_sum cannot be represented in the requested details"
+        exact_prediction_drops = [
+            Fraction.from_float(original_value) - Fraction.from_float(float(value))
+            for value in perturbed_array
+        ]
+        attribution_sum_array: Any
+        prediction_drop_array: Any
+        if detail_format == SCALED_DECIMAL_DETAIL_FORMAT:
+            attribution_sum_array = encode_scaled_detail(attribution_sum_fractions)
+            prediction_drop_array = encode_scaled_detail(exact_prediction_drops)
+        else:
+            attribution_sum_array = np.asarray(
+                [float(value) for value in attribution_sums], dtype=np.float64
             )
-        try:
-            prediction_drop_array = np.asarray(
-                [
-                    _finite_difference(original_value, value, "Sensitivity-n prediction drop")
-                    for value in perturbed_array
-                ]
-            )
-        except FloatingPointError as exc:
-            raise FloatingPointError(
-                "Sensitivity-n scalar correlation is representable, but the requested "
-                "individual prediction_drops are not representable"
-            ) from exc
-        p_value = _pearson_p_value(corr, attribution_sum_array.size)
+            if np.any(~np.isfinite(attribution_sum_array)) or any(
+                result == 0.0 and exact != 0
+                for result, exact in zip(attribution_sum_array, attribution_sums)
+            ):
+                raise DetailRepresentationError(
+                    "Sensitivity-n scalar correlation is representable, but an exact "
+                    "attribution_sum cannot be represented in the requested details; "
+                    "use detail_format='scaled_decimal_v1'"
+                )
+            try:
+                prediction_drop_array = np.asarray(
+                    [
+                        _finite_difference(original_value, value, "Sensitivity-n prediction drop")
+                        for value in perturbed_array
+                    ]
+                )
+            except FloatingPointError as exc:
+                raise DetailRepresentationError(
+                    "Sensitivity-n scalar correlation is representable, but the requested "
+                    "individual prediction_drops are not representable; use "
+                    "detail_format='scaled_decimal_v1'"
+                ) from exc
+        p_value = _pearson_p_value(corr, len(attribution_sums))
         return {
             "correlation": float(corr),
             "p_value": float(p_value),
@@ -2906,7 +2995,8 @@ def compute_region_perturbation(
     region_size: Optional[int] = None,
     use_absolute: bool = True,
     return_curve: bool = False,
-) -> Union[float, Dict[str, Union[float, np.ndarray]]]:
+    detail_format: str = LEGACY_DETAIL_FORMAT,
+) -> Union[float, Dict[str, Any]]:
     """
     Compute a one-dimensional contiguous-group perturbation diagnostic.
 
@@ -2954,6 +3044,7 @@ def compute_region_perturbation(
     n_features = len(instance)
     use_absolute = _validate_bool(use_absolute, "use_absolute")
     return_curve = _validate_bool(return_curve, "return_curve")
+    detail_format = _validate_detail_request(return_curve, detail_format)
 
     # Get baseline values
     baseline_values = _validated_baseline_values(baseline, background_data, n_features)
@@ -3041,19 +3132,28 @@ def compute_region_perturbation(
     )
 
     if return_curve:
-        try:
-            curve = np.asarray(
-                [
-                    _finite_ratio(value, original_value, "region perturbation curve")
-                    for value in prediction_array
-                ],
-                dtype=float,
-            )
-        except FloatingPointError as exc:
-            raise FloatingPointError(
-                "region perturbation scalar AUC is representable, but the "
-                "requested per-step normalized curve is not representable"
-            ) from exc
+        denominator = Fraction.from_float(original_value)
+        exact_curve = [
+            Fraction.from_float(float(value)) / denominator for value in prediction_array
+        ]
+        curve: Any
+        if detail_format == SCALED_DECIMAL_DETAIL_FORMAT:
+            curve = encode_scaled_detail(exact_curve)
+        else:
+            try:
+                curve = np.asarray(
+                    [
+                        _finite_ratio(value, original_value, "region perturbation curve")
+                        for value in prediction_array
+                    ],
+                    dtype=float,
+                )
+            except FloatingPointError as exc:
+                raise DetailRepresentationError(
+                    "region perturbation scalar AUC is representable, but the "
+                    "requested per-step normalized curve is not representable; use "
+                    "detail_format='scaled_decimal_v1'"
+                ) from exc
         return {
             "auc": float(auc),
             "curve": curve,

@@ -12,6 +12,7 @@ iterates independently so each row can resolve and retain its own target.
 
 from __future__ import annotations
 
+from decimal import Decimal, localcontext
 from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
@@ -19,6 +20,7 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers.gradient._image_layout import channel_axis_for_layout
 from explainiverse.explainers.gradient._input import (
     scale_safe_multi_product_sum,
     scale_safe_product,
@@ -28,6 +30,8 @@ from explainiverse.explainers.gradient._input import (
 from explainiverse.explainers.gradient.gradcam import (
     Target,
     _cam_normalization_metadata,
+    _get_layer_gradients_with_trace,
+    _get_layer_output_with_trace,
     _normalize_cam,
     _prepare_single_input,
     _preserve_adapter_model_state,
@@ -121,9 +125,9 @@ def _principal_projection(activations: np.ndarray, *, center: bool) -> np.ndarra
     matrix: np.ndarray = (
         activations[0].reshape(channels, height * width).T.astype(np.float64, copy=False)
     )
-    # A positive global scale leaves the principal direction and the final
-    # display-normalized projection unchanged, while preventing SVD/centering
-    # reductions from overflowing on large finite activation-gradient values.
+    # A positive global scale prevents SVD/centering reductions from
+    # overflowing on large finite values. Restore it before returning so raw
+    # projection metadata remains truthful.
     matrix_scale = float(np.max(np.abs(matrix)))
     if matrix_scale > 0:
         matrix = matrix / matrix_scale
@@ -134,13 +138,138 @@ def _principal_projection(activations: np.ndarray, *, center: bool) -> np.ndarra
     if matrix_scale > 0:
         with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
             amplitude_projection = projection * matrix_scale
-        # Preserve the raw reference-operation amplitude whenever it is
-        # representable. If it is not, the scaled projection has the identical
-        # sign/order and remains valid for the subsequent min-max display map.
-        if np.isfinite(amplitude_projection).all():
-            projection = amplitude_projection
+        lost_nonzero = (amplitude_projection == 0.0) & (projection != 0.0)
+        if not np.isfinite(amplitude_projection).all() or np.any(lost_nonzero):
+            raise FloatingPointError("principal projection is not representable")
+        projection = amplitude_projection
     projection = _orient_principal_projection(projection)
     return projection.reshape(height, width)
+
+
+def _principal_projection_of_products(
+    gradients: np.ndarray,
+    activations: np.ndarray,
+) -> np.ndarray:
+    """Project centered exact activation-gradient products without materializing them.
+
+    EigenGradCAM's library formula first forms the element-wise product and
+    then mean-centers each channel before its principal projection.  A direct
+    binary64 product can overflow or underflow even when the centered,
+    globally scaled matrix supplied to the SVD is finite.  The exceptional
+    path below evaluates the products and centering from the exact binary64
+    operands, applies one shared positive scale for the SVD, and restores that
+    scale to the raw projection. A genuinely unrepresentable restored cell
+    fails explicitly instead of returning a direction-only surrogate.
+    """
+
+    activation_values, gradient_values = _validate_spatial_pair(activations, gradients)
+    channels, height, width = activation_values.shape[1:]
+    activation_matrix = activation_values[0].reshape(channels, height * width).T
+    gradient_matrix = gradient_values[0].reshape(channels, height * width).T
+
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        direct_products = gradient_matrix * activation_matrix
+    product_underflow = (
+        (direct_products == 0.0) & (gradient_matrix != 0.0) & (activation_matrix != 0.0)
+    )
+    with localcontext() as context:
+        context.prec = 3500 + len(str(height * width))
+        exact_columns: list[list[Decimal]] = []
+        maximum = Decimal(0)
+        for channel in range(channels):
+            products = [
+                Decimal.from_float(float(gradient_matrix[row, channel]))
+                * Decimal.from_float(float(activation_matrix[row, channel]))
+                for row in range(height * width)
+            ]
+            mean = sum(products, start=Decimal(0)) / Decimal(height * width)
+            centered = [value - mean for value in products]
+            exact_columns.append(centered)
+            maximum = max(maximum, *(abs(value) for value in centered))
+
+        # Preserve the bit-identical ordinary path only when both direct
+        # centering and the global pre-SVD scale retain every exact non-zero
+        # centered contribution. A finite product alone is not sufficient:
+        # centering subnormals can round asymmetrically, and an unrelated huge
+        # constant channel can scale a decisive tiny channel to zero.
+        if np.all(np.isfinite(direct_products)) and not np.any(product_underflow):
+            exact_nonzero = np.asarray(
+                [
+                    [exact_columns[channel][row] != 0 for channel in range(channels)]
+                    for row in range(height * width)
+                ],
+                dtype=bool,
+            )
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                rounded_exact_centered = np.asarray(
+                    [
+                        [float(exact_columns[channel][row]) for channel in range(channels)]
+                        for row in range(height * width)
+                    ],
+                    dtype=np.float64,
+                )
+                direct_centered = direct_products - np.mean(direct_products, axis=0, keepdims=True)
+                raw_scale = float(np.max(np.abs(direct_products)))
+                if raw_scale > 0.0:
+                    scaled_products = direct_products / raw_scale
+                    scaled_centered = scaled_products - np.mean(
+                        scaled_products, axis=0, keepdims=True
+                    )
+                else:
+                    scaled_centered = direct_centered
+            centered_value_lost = (rounded_exact_centered == 0.0) & exact_nonzero
+            pre_svd_scale_lost = (scaled_centered == 0.0) & exact_nonzero
+            if (
+                np.all(np.isfinite(rounded_exact_centered))
+                and np.all(np.isfinite(direct_centered))
+                and np.array_equal(direct_centered, rounded_exact_centered)
+                and not np.any(centered_value_lost)
+                and not np.any(pre_svd_scale_lost)
+            ):
+                return _principal_projection(
+                    direct_products.T.reshape(1, channels, height, width),
+                    center=True,
+                )
+
+        if maximum == 0:
+            return np.zeros((height, width), dtype=np.float64)
+        matrix = np.asarray(
+            [
+                [float(exact_columns[channel][row] / maximum) for channel in range(channels)]
+                for row in range(height * width)
+            ],
+            dtype=np.float64,
+        )
+        scaled_value_lost = np.asarray(
+            [
+                [
+                    matrix[row, channel] == 0.0 and exact_columns[channel][row] != 0
+                    for channel in range(channels)
+                ]
+                for row in range(height * width)
+            ],
+            dtype=bool,
+        )
+        if np.any(scaled_value_lost):
+            raise FloatingPointError(
+                "EigenGradCAM exact centered values exceed the binary64 dynamic range "
+                "of one globally scaled SVD input"
+            )
+
+    _, _, right_vectors = np.linalg.svd(matrix, full_matrices=False)
+    scaled_projection = _orient_principal_projection(matrix @ right_vectors[0])
+    with localcontext() as context:
+        context.prec = 3500 + len(str(height * width))
+        restored_values = []
+        for value in scaled_projection:
+            exact_value = Decimal.from_float(float(value)) * maximum
+            restored = float(exact_value)
+            if not np.isfinite(restored) or (restored == 0.0 and exact_value != 0):
+                raise FloatingPointError(
+                    "EigenGradCAM centered principal projection is not representable"
+                )
+            restored_values.append(restored)
+    return np.asarray(restored_values, dtype=np.float64).reshape(height, width)
 
 
 class BaseCAMExplainer(BaseExplainer):
@@ -161,6 +290,7 @@ class BaseCAMExplainer(BaseExplainer):
         target_layer: str,
         class_names: Optional[List[str]] = None,
         input_layout: str = "auto",
+        target_occurrence: Optional[int] = None,
     ):
         super().__init__(model)
         required_method = "get_layer_gradients" if self._uses_gradients else "get_layer_output"
@@ -177,6 +307,14 @@ class BaseCAMExplainer(BaseExplainer):
             allow_none=True,
         )
         self.input_layout = _validate_input_layout(input_layout)
+        if target_occurrence is not None and (
+            isinstance(target_occurrence, bool)
+            or not isinstance(target_occurrence, (int, np.integer))
+        ):
+            raise TypeError("target_occurrence must be a non-negative integer or None")
+        if target_occurrence is not None and int(target_occurrence) < 0:
+            raise ValueError("target_occurrence must be a non-negative integer or None")
+        self.target_occurrence = None if target_occurrence is None else int(target_occurrence)
 
     def _compute_cam(
         self,
@@ -210,9 +348,12 @@ class BaseCAMExplainer(BaseExplainer):
             raise TypeError(f"Unexpected CAM option(s): {unexpected}")
         if not isinstance(resize_to_input, (bool, np.bool_)):
             raise TypeError("resize_to_input must be a boolean")
-        prepared, input_size = _prepare_single_input(
+        prepared, input_size, resolved_layout = _prepare_single_input(
             self.model, instance, input_layout=self.input_layout
         )
+        layer_options = {}
+        if self.target_occurrence is not None:
+            layer_options["occurrence"] = self.target_occurrence
 
         with _preserve_adapter_model_state(self.model, preserve_gradients=self._uses_gradients):
             if self._class_agnostic:
@@ -221,25 +362,35 @@ class BaseCAMExplainer(BaseExplainer):
                         f"{self._explainer_name} is class-agnostic; target_class " "must be None"
                     )
                 target = None
-                activations = self.model.get_layer_output(prepared, layer_name=self.target_layer)
+                activations, layer_trace = _get_layer_output_with_trace(
+                    self.model,
+                    prepared,
+                    layer_name=self.target_layer,
+                    **layer_options,
+                )
                 gradients = None
                 activations = _validate_spatial_activations(activations)
                 score_space = "not_applicable"
             else:
                 target = _resolve_target(self.model, prepared, target_class)
                 if self._uses_gradients:
-                    activations, gradients = self.model.get_layer_gradients(
+                    activations, gradients, layer_trace = _get_layer_gradients_with_trace(
+                        self.model,
                         prepared,
                         layer_name=self.target_layer,
                         target_class=target,
+                        **layer_options,
                     )
                     activations, gradients = _validate_spatial_pair(activations, gradients)
                     score_space = (
                         getattr(self.model, "last_gradient_output_space", None) or "unknown"
                     )
                 else:
-                    activations = self.model.get_layer_output(
-                        prepared, layer_name=self.target_layer
+                    activations, layer_trace = _get_layer_output_with_trace(
+                        self.model,
+                        prepared,
+                        layer_name=self.target_layer,
+                        **layer_options,
                     )
                     activations = _validate_spatial_activations(activations)
                     gradients = None
@@ -294,7 +445,15 @@ class BaseCAMExplainer(BaseExplainer):
                 "target_index": target,
                 "method": self._method_key,
                 "input_shape": list(prepared.shape),
-                "input_layout": self.input_layout,
+                "input_layout": resolved_layout,
+                "configured_input_layout": self.input_layout,
+                "channel_axis": (
+                    None if resolved_layout == "flat" else channel_axis_for_layout(resolved_layout)
+                ),
+                "target_occurrence": self.target_occurrence,
+                "target_layer_call_count": (
+                    None if layer_trace is None else layer_trace.call_count
+                ),
             },
             metadata=metadata,
         )
@@ -527,8 +686,15 @@ class ScoreCAMExplainer(BaseCAMExplainer):
         class_names: Optional[List[str]] = None,
         batch_size: int = 16,
         input_layout: str = "auto",
+        target_occurrence: Optional[int] = None,
     ):
-        super().__init__(model, target_layer, class_names, input_layout=input_layout)
+        super().__init__(
+            model,
+            target_layer,
+            class_names,
+            input_layout=input_layout,
+            target_occurrence=target_occurrence,
+        )
         self.batch_size = _validate_batch_size(batch_size)
         _wrapped_torch_module(model)
 
@@ -615,7 +781,7 @@ class EigenGradCAMExplainer(BaseCAMExplainer):
 
     def _compute_cam(self, activations, gradients, image, target_class):
         del image, target_class
-        return _principal_projection(gradients * activations, center=True)
+        return _principal_projection_of_products(gradients, activations)
 
     def _method_metadata(self):
         return {
@@ -623,6 +789,8 @@ class EigenGradCAMExplainer(BaseCAMExplainer):
             "paper_attribution": None,
             "svd_centered": True,
             "svd_sign_convention": "largest_absolute_projection_is_positive",
+            "claim_status": "quarantined",
+            "promotion_requires_primary_formula": True,
         }
 
 
@@ -637,10 +805,36 @@ class GradCAMElementWiseExplainer(BaseCAMExplainer):
 
     def _compute_cam(self, activations, gradients, image, target_class):
         del image, target_class
-        return scale_safe_sum(np.maximum(gradients * activations, 0.0), axis=1)[0]
+        same_sign = ((gradients > 0.0) & (activations > 0.0)) | (
+            (gradients < 0.0) & (activations < 0.0)
+        )
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            direct_products = gradients * activations
+            direct_cam = np.sum(np.maximum(direct_products, 0.0), axis=1)
+        lost_positive_product = (
+            same_sign & (gradients != 0.0) & (activations != 0.0) & (direct_products == 0.0)
+        )
+        direct_safe = np.isfinite(direct_cam) & ~np.any(
+            ~np.isfinite(direct_products) | lost_positive_product,
+            axis=1,
+        )
+        if np.all(direct_safe):
+            return direct_cam[0]
+
+        stable_cam = scale_safe_product_sum(
+            np.where(same_sign, np.abs(gradients), 0.0),
+            np.abs(activations),
+            axis=1,
+        )
+        return np.where(direct_safe, direct_cam, stable_cam)[0]
 
     def _method_metadata(self):
-        return {"variant_origin": "pytorch-grad-cam library", "paper_attribution": None}
+        return {
+            "variant_origin": "pytorch-grad-cam library",
+            "paper_attribution": None,
+            "claim_status": "quarantined",
+            "promotion_requires_primary_formula": True,
+        }
 
 
 class AblationCAMExplainer(BaseCAMExplainer):
@@ -665,8 +859,15 @@ class AblationCAMExplainer(BaseCAMExplainer):
         class_names: Optional[List[str]] = None,
         batch_size: int = 16,
         input_layout: str = "auto",
+        target_occurrence: Optional[int] = None,
     ):
-        super().__init__(model, target_layer, class_names, input_layout=input_layout)
+        super().__init__(
+            model,
+            target_layer,
+            class_names,
+            input_layout=input_layout,
+            target_occurrence=target_occurrence,
+        )
         self.batch_size = _validate_batch_size(batch_size)
         module = _wrapped_torch_module(model)
         if target_layer not in dict(module.named_modules()):
@@ -685,7 +886,15 @@ class AblationCAMExplainer(BaseCAMExplainer):
         def zero_selected_channels(module, inputs, output):
             del module, inputs
             nonlocal hook_calls
+            call_index = hook_calls
             hook_calls += 1
+            selected = (
+                call_index == 0
+                if self.target_occurrence is None
+                else call_index == self.target_occurrence
+            )
+            if not selected:
+                return None
             if not isinstance(output, torch.Tensor) or output.ndim != 4:
                 raise TypeError("Ablation-CAM target layer must return one 4D torch tensor")
             if output.shape[0] != expected_batch:
@@ -702,10 +911,18 @@ class AblationCAMExplainer(BaseCAMExplainer):
             scores = _adapter_forward(self.model, repeated, prediction_space=False)
         finally:
             handle.remove()
-        if hook_calls != 1:
+        trace_validator = getattr(self.model, "_validate_layer_occurrence_trace", None)
+        if callable(trace_validator):
+            trace_validator(self.target_layer, hook_calls, self.target_occurrence)
+        elif self.target_occurrence is None and hook_calls != 1:
             raise ValueError(
-                "Ablation-CAM requires the target module to be invoked exactly "
-                f"once per model forward; observed {hook_calls} calls"
+                "Ablation-CAM requires an explicit target_occurrence when the target "
+                f"module runs {hook_calls} times"
+            )
+        elif self.target_occurrence is not None and self.target_occurrence >= hook_calls:
+            raise ValueError(
+                f"target_occurrence {self.target_occurrence} is out of range for "
+                f"{hook_calls} traced target-layer call(s)"
             )
         return scores
 

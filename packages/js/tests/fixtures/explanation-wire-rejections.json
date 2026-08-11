@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "name": "unsafe_integer",
+      "payload": {
+        "schema_version": "explainiverse.explanation.v1",
+        "explainer_name": "wire-fixture",
+        "target_class": "class-1",
+        "explanation_data": {"count": 9007199254740993},
+        "feature_names": null,
+        "metadata": {}
+      }
+    },
+    {
+      "name": "unknown_schema",
+      "payload": {
+        "schema_version": "explainiverse.explanation.v999",
+        "explainer_name": "wire-fixture",
+        "target_class": "class-1",
+        "explanation_data": {},
+        "feature_names": null,
+        "metadata": {}
+      }
+    },
+    {
+      "name": "unknown_top_level_field",
+      "payload": {
+        "schema_version": "explainiverse.explanation.v1",
+        "explainer_name": "wire-fixture",
+        "target_class": "class-1",
+        "explanation_data": {},
+        "feature_names": null,
+        "metadata": {},
+        "unexpected": true
+      }
+    },
+    {
+      "name": "unsafe_integer_valued_float",
+      "payload": {
+        "schema_version": "explainiverse.explanation.v1",
+        "explainer_name": "wire-fixture",
+        "target_class": "class-1",
+        "explanation_data": {"count": 9007199254740992.0},
+        "feature_names": null,
+        "metadata": {}
+      }
+    },
+    {
+      "name": "non_string_target",
+      "payload": {
+        "schema_version": "explainiverse.explanation.v1",
+        "explainer_name": "wire-fixture",
+        "target_class": 0,
+        "explanation_data": {},
+        "feature_names": null,
+        "metadata": {}
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "package": "explainiverse",
+  "claim_status": "blocked",
+  "forbidden_marker": "src/explainiverse/py.typed",
+  "forbidden_classifier": "Typing :: Typed",
+  "acceptance": {
+    "mypy": "poetry run mypy --strict src/explainiverse",
+    "pyright": "pyright --verifytypes explainiverse --ignoreexternal",
+    "required_result": "Both commands exit zero, Pyright reports 100% type completeness, and an annotated built wheel passes strict external consumer fixtures before this guard is replaced."
+  },
+  "baseline_evidence": {
+    "scope": "local mitigation branch audit; pre-commit working tree",
+    "observed_on": "2026-08-10",
+    "mypy_strict": "487 errors in 41 files",
+    "pyright_version": "1.1.411",
+    "pyright_verifytypes": "No py.typed marker; type completeness score 0%."
+  }
+}

@@ -3,6 +3,12 @@
   "version": "0.0.0-experimental",
   "private": true,
   "description": "Private experimental TypeScript core contracts and attribution visualizer for Explainiverse",
+  "explainiverseCapability": {
+    "claimStatus": "experimental",
+    "wireSchema": "explainiverse.explanation.v1",
+    "algorithmParityWithPython": false,
+    "publicationReady": false
+  },
   "license": "UNLICENSED",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -42,6 +48,9 @@
     "lint": "eslint src tests --max-warnings=0",
     "dev": "vite",
     "build:demo": "npm run typecheck && vite build",
+    "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "preview:demo": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "test:browser": "npm run build:demo && npm run check:bundle && playwright test",
     "prepack": "npm run build"
   },
   "peerDependencies": {
@@ -49,7 +58,9 @@
     "react-dom": ">=18 <20"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
     "@eslint/js": "^9.39.5",
+    "@playwright/test": "1.62.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^25.2.3",

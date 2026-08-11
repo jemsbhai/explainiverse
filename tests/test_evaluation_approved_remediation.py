@@ -1336,8 +1336,30 @@ def test_ssim_owns_small_spatial_window_behavior():
 
 @pytest.mark.parametrize("size", [3, 4, 5, 6, 7])
 def test_ssim_supports_each_declared_adaptive_window_size(size):
+    metrics = pytest.importorskip("skimage.metrics")
     values = np.arange(float(size * size)).reshape(size, size)
-    assert _ssim_similarity(values, values.copy()) == pytest.approx(1.0)
+    changed = values.copy()
+    changed[size // 2, size // 2] += float(size * size)
+    scale = float(max(np.max(np.abs(values)), np.max(np.abs(changed))))
+    scaled_values = values / scale
+    scaled_changed = changed / scale
+    data_range = float(
+        max(np.max(scaled_values), np.max(scaled_changed))
+        - min(np.min(scaled_values), np.min(scaled_changed))
+    )
+    expected_win_size = min(7, size)
+    if expected_win_size % 2 == 0:
+        expected_win_size -= 1
+    expected = metrics.structural_similarity(
+        scaled_values,
+        scaled_changed,
+        data_range=data_range,
+        win_size=expected_win_size,
+    )
+
+    actual = _ssim_similarity(values, changed)
+    assert actual == pytest.approx(expected)
+    assert actual < 1.0
 
 
 def test_ssim_adaptive_window_uses_only_chw_spatial_axes():
@@ -1552,12 +1574,13 @@ def test_batch_consistency_rejects_duplicate_discretisations():
 
 @pytest.mark.parametrize("numpy_value", [np.float16(0.1), np.float32(0.1), np.float64(0.1)])
 def test_k_values_reject_numpy_python_semantic_duplicates_before_key_overwrite(numpy_value):
+    python_value = float(numpy_value)
     with pytest.raises(ValueError, match="semantically duplicate"):
         compute_comprehensiveness(
             _LinearRegressor([1.0, 2.0]),
             np.ones(2),
             _explanation([1.0, 2.0]),
-            k_values=[0.1, numpy_value],
+            k_values=[python_value, numpy_value],
             baseline=0.0,
         )
 

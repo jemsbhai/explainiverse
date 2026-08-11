@@ -49,6 +49,18 @@ from explainiverse.evaluation._utils import (
 )
 
 ScalarMetric = Callable[[np.ndarray], float]
+_FAIRNESS_CONCLUSION_REASON = (
+    "diagnostic_requires_external_domain_outcome_measurement_and_decision_impact_review"
+)
+
+
+def _fairness_conclusion_metadata() -> Dict[str, object]:
+    """Return the shared fail-closed normative boundary for audit diagnostics."""
+
+    return {
+        "fairness_conclusion_defined": False,
+        "fairness_conclusion_reason": _FAIRNESS_CONCLUSION_REASON,
+    }
 
 
 def _attribution_l1_magnitude(attr_vector: np.ndarray) -> float:
@@ -267,6 +279,22 @@ def _cohens_d(a: np.ndarray, b: np.ndarray) -> Optional[float]:
     return result
 
 
+def _effect_size_state(
+    a: np.ndarray,
+    b: np.ndarray,
+    value: Optional[float],
+) -> Tuple[bool, Optional[str]]:
+    """Describe whether a returned Cohen's-d value is an ordinary finite estimate."""
+
+    if value is None:
+        return False, "insufficient_group_sample_size"
+    if np.isinf(value):
+        return False, "zero_pooled_variance_with_unequal_group_means_signed_infinity"
+    if np.all(a == a[0]) and np.all(b == b[0]) and a[0] == b[0]:
+        return False, "zero_pooled_variance_with_equal_group_means_zero_convention"
+    return True, None
+
+
 def _group_statistics(
     scores: np.ndarray,
     groups: Dict[Any, np.ndarray],
@@ -278,13 +306,28 @@ def _group_statistics(
     pairwise_gaps: Dict[Tuple[Any, Any], float] = {}
     pairwise_p_values: Dict[Tuple[Any, Any], Optional[float]] = {}
     pairwise_effect_sizes: Dict[Tuple[Any, Any], Optional[float]] = {}
+    pairwise_p_value_defined: Dict[Tuple[Any, Any], bool] = {}
+    pairwise_p_value_reasons: Dict[Tuple[Any, Any], Optional[str]] = {}
+    pairwise_effect_size_defined: Dict[Tuple[Any, Any], bool] = {}
+    pairwise_effect_size_reasons: Dict[Tuple[Any, Any], Optional[str]] = {}
     for left, right in combinations(groups, 2):
         pair = (left, right)
         pairwise_gaps[pair] = abs(
             _stable_difference_of_means(group_scores[left], group_scores[right])
         )
-        pairwise_p_values[pair] = _mann_whitney_u(group_scores[left], group_scores[right])
-        pairwise_effect_sizes[pair] = _cohens_d(group_scores[left], group_scores[right])
+        p_value = _mann_whitney_u(group_scores[left], group_scores[right])
+        effect_size = _cohens_d(group_scores[left], group_scores[right])
+        pairwise_p_values[pair] = p_value
+        pairwise_effect_sizes[pair] = effect_size
+        pairwise_p_value_defined[pair] = p_value is not None
+        pairwise_p_value_reasons[pair] = (
+            None if p_value is not None else "completely_tied_pooled_sample_zero_rank_variance"
+        )
+        effect_defined, effect_reason = _effect_size_state(
+            group_scores[left], group_scores[right], effect_size
+        )
+        pairwise_effect_size_defined[pair] = effect_defined
+        pairwise_effect_size_reasons[pair] = effect_reason
 
     effects = [abs(value) for value in pairwise_effect_sizes.values() if value is not None]
     available_p_values = [value for value in pairwise_p_values.values() if value is not None]
@@ -295,11 +338,27 @@ def _group_statistics(
         "pairwise_gaps": pairwise_gaps,
         "pairwise_p_values": pairwise_p_values,
         "pairwise_effect_sizes": pairwise_effect_sizes,
+        "pairwise_p_value_defined": pairwise_p_value_defined,
+        "pairwise_p_value_reasons": pairwise_p_value_reasons,
+        "pairwise_effect_size_defined": pairwise_effect_size_defined,
+        "pairwise_effect_size_reasons": pairwise_effect_size_reasons,
         # Compatibility summaries.  For >2 groups, p_value is explicitly an
         # uncorrected minimum and must not be treated as a family-wise p-value.
         "p_value": float(min(available_p_values)) if available_p_values else None,
         "p_value_unavailable_pairs": unavailable_p_value_pairs,
         "effect_size": float(max(effects)) if effects else None,
+        "p_value_defined": all(pairwise_p_value_defined.values()),
+        "p_value_reason": (
+            None
+            if all(pairwise_p_value_defined.values())
+            else "one_or_more_pairwise_p_values_are_boundary_states"
+        ),
+        "effect_size_defined": all(pairwise_effect_size_defined.values()),
+        "effect_size_reason": (
+            None
+            if all(pairwise_effect_size_defined.values())
+            else "one_or_more_pairwise_effect_sizes_are_boundary_states"
+        ),
         "p_value_adjustment": "none",
         "p_value_summary": (
             "two-sided Mann-Whitney U; None marks completely tied pooled samples"
@@ -309,6 +368,7 @@ def _group_statistics(
                 "None marks completely tied pooled samples"
             )
         ),
+        **_fairness_conclusion_metadata(),
     }
 
 
@@ -675,6 +735,7 @@ def compute_cross_group_lipschitz_diagnostic(
         "distance_threshold": selected_threshold,
         "distance_threshold_exact_decimal": threshold_decimal,
         "canonical_individual_fairness": False,
+        **_fairness_conclusion_metadata(),
         "interpretation": (
             "Cross-group attribution sensitivity in the supplied, scale-dependent "
             "input and attribution representations."
@@ -811,6 +872,7 @@ def compute_sensitive_attribution_change(
         "match_distances": match_distances,
         "canonical_counterfactual_fairness": False,
         "requires_structural_causal_model_for_counterfactual_claim": True,
+        **_fairness_conclusion_metadata(),
         "interpretation": "Attribution-change diagnostic; lower change is not proof of fairness.",
     }
 
@@ -871,12 +933,19 @@ def compute_fidelity_gap(
 
     pairwise_gaps: Dict[Tuple[Any, Any], float] = {}
     pairwise_p_values: Dict[Tuple[Any, Any], Optional[float]] = {}
+    pairwise_p_value_defined: Dict[Tuple[Any, Any], bool] = {}
+    pairwise_p_value_reasons: Dict[Tuple[Any, Any], Optional[str]] = {}
     for left, right in combinations(groups, 2):
         pair = (left, right)
         pairwise_gaps[pair] = _finite_gap(
             group_means[left], group_means[right], f"gap for groups {left!r} and {right!r}"
         )
-        pairwise_p_values[pair] = _mann_whitney_u(group_scores[left], group_scores[right])
+        p_value = _mann_whitney_u(group_scores[left], group_scores[right])
+        pairwise_p_values[pair] = p_value
+        pairwise_p_value_defined[pair] = p_value is not None
+        pairwise_p_value_reasons[pair] = (
+            None if p_value is not None else "completely_tied_pooled_sample_zero_rank_variance"
+        )
     mean_group_gap = _finite_mean(
         np.asarray(list(pairwise_gaps.values()), dtype=np.float64), "pairwise fidelity gap"
     )
@@ -892,11 +961,20 @@ def compute_fidelity_gap(
         "group_deficits_from_average": deficits,
         "pairwise_gaps": pairwise_gaps,
         "pairwise_p_values": pairwise_p_values,
+        "pairwise_p_value_defined": pairwise_p_value_defined,
+        "pairwise_p_value_reasons": pairwise_p_value_reasons,
         "p_value_unavailable_pairs": [
             pair for pair, value in pairwise_p_values.items() if value is None
         ],
+        "p_value_defined": all(pairwise_p_value_defined.values()),
+        "p_value_reason": (
+            None
+            if all(pairwise_p_value_defined.values())
+            else "one_or_more_pairwise_p_values_are_boundary_states"
+        ),
         "higher_is_better": bool(higher_is_better),
         "canonical_definition": "Balagopalan et al. (2022), Definitions 3.3 and 3.4",
+        **_fairness_conclusion_metadata(),
     }
 
 
@@ -950,9 +1028,14 @@ def compute_sensitive_attribution_gap(
         "group_sensitive_means": statistics["group_means"],
         "pairwise_gaps": statistics["pairwise_gaps"],
         "pairwise_p_values": statistics["pairwise_p_values"],
+        "pairwise_p_value_defined": statistics["pairwise_p_value_defined"],
+        "pairwise_p_value_reasons": statistics["pairwise_p_value_reasons"],
         "p_value": statistics["p_value"],
+        "p_value_defined": statistics["p_value_defined"],
+        "p_value_reason": statistics["p_value_reason"],
         "p_value_adjustment": statistics["p_value_adjustment"],
         "canonical_fairness_metric": False,
+        **_fairness_conclusion_metadata(),
         "interpretation": (
             "Between-group gap in signed attribution assigned to the selected feature; "
             "zero gap is not proof of model or explanation fairness."
@@ -1043,6 +1126,7 @@ def compute_prediction_conditioned_metric_disparity(
         "condition": "model_prediction",
         "canonical_equal_opportunity": False,
         "canonical_fairness_metric": False,
+        **_fairness_conclusion_metadata(),
         "interpretation": (
             "Prediction-conditioned scalar-property disparity; not Hardt equality "
             "of opportunity and not a standalone fairness verdict."

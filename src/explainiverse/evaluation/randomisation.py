@@ -45,6 +45,8 @@ References:
 
 import copy
 import re
+from decimal import Decimal, localcontext
+from numbers import Integral
 from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Tuple, TypedDict, Union
 
 import numpy as np
@@ -260,7 +262,9 @@ def _ssim_similarity(
     if minimum_spatial_extent < 3:
         raise ValueError(
             "SSIM requires every spatial dimension to contain at least 3 values; "
-            f"got spatial shape {tuple(a.shape[axis] for axis in spatial_axes)}."
+            f"got spatial shape {tuple(a.shape[axis] for axis in spatial_axes)}. "
+            "Use 'pearson' or 'cosine' for paired values, or aggregate the "
+            "maps upstream under a caller-declared spatial contract."
         )
     # Own the backend contract instead of relying on scikit-image's changing
     # default. Seven is its historical default; smaller maps use the largest
@@ -719,6 +723,82 @@ def _discrete_entropy(attributions: np.ndarray, n_bins: int = 100) -> float:
     occupied = histogram[histogram > 0].astype(np.float64)
     probabilities = occupied / occupied.sum()
     return float(-np.sum(probabilities * np.log(probabilities)))
+
+
+def _entropy_from_counts(counts) -> float:
+    """Return empirical Shannon entropy from integer bin counts without allocation.
+
+    This count-domain oracle covers empirical distributions whose sample size
+    cannot be represented by a realizable attribution array.  In particular,
+    it can retain a positive entropy below binary64 machine epsilon and thereby
+    distinguish that value from an exactly one-bin (zero-entropy) histogram.
+    """
+
+    if isinstance(counts, (str, bytes)):
+        raise TypeError("counts must be a non-empty sequence of integers")
+    try:
+        values = list(counts)
+    except TypeError as exc:
+        raise TypeError("counts must be a non-empty sequence of integers") from exc
+    if not values:
+        raise ValueError("counts must not be empty")
+    if any(
+        isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral) for value in values
+    ):
+        raise TypeError("counts must contain only integers")
+    integer_counts = [int(value) for value in values]
+    if any(value < 0 for value in integer_counts):
+        raise ValueError("counts must be non-negative")
+    occupied = [value for value in integer_counts if value > 0]
+    if not occupied:
+        raise ValueError("counts must contain positive total mass")
+    if len(occupied) == 1:
+        return 0.0
+
+    total = sum(occupied)
+    with localcontext() as context:
+        context.prec = max(100, len(str(total)) + 50)
+        decimal_total = Decimal(total)
+        entropy = -sum(
+            (
+                (Decimal(count) / decimal_total) * (Decimal(count) / decimal_total).ln()
+                for count in occupied
+            ),
+            start=Decimal(0),
+        )
+        result = float(entropy)
+    if not np.isfinite(result) or (result == 0.0 and entropy != 0):
+        raise FloatingPointError("histogram entropy is not representable")
+    return result
+
+
+def _efficient_mprt_relative_entropy_change(
+    entropy_original: float,
+    entropy_randomised: float,
+) -> float:
+    """Compute Efficient-MPRT's relative rise with an exact-zero denominator guard."""
+
+    if (
+        not np.isfinite(entropy_original)
+        or not np.isfinite(entropy_randomised)
+        or entropy_original < 0.0
+        or entropy_randomised < 0.0
+    ):
+        raise ValueError("Efficient MPRT entropies must be finite and non-negative")
+    if entropy_original == 0.0:
+        raise ValueError(
+            "Efficient MPRT relative rise is undefined because the "
+            "original explanation histogram entropy is exactly zero"
+        )
+    with localcontext() as context:
+        context.prec = 2500
+        original = Decimal.from_float(float(entropy_original))
+        randomised = Decimal.from_float(float(entropy_randomised))
+        exact = (randomised - original) / original
+        result = float(exact)
+    if not np.isfinite(result) or (result == 0.0 and exact != 0):
+        raise FloatingPointError("Efficient MPRT relative entropy rise is not representable")
+    return result
 
 
 def _add_noise_to_input(
@@ -1878,12 +1958,7 @@ def compute_efficient_mprt(
             raise ValueError("Original and randomised attributions must have the same shape")
         entropy_rand = _discrete_entropy(attr_rand, n_bins=n_bins)
 
-        if entropy_orig <= np.finfo(float).eps:
-            raise ValueError(
-                "Efficient MPRT relative rise is undefined because the "
-                "original explanation histogram entropy is zero"
-            )
-        score = (entropy_rand - entropy_orig) / entropy_orig
+        score = _efficient_mprt_relative_entropy_change(entropy_orig, entropy_rand)
 
         scores.append(float(score))
 
@@ -1954,12 +2029,7 @@ def compute_batch_efficient_mprt(
             raise ValueError("Original and randomised attributions must have the same shape")
         entropy_rand = _discrete_entropy(attr_rand, n_bins=n_bins)
 
-        if entropy_orig <= np.finfo(float).eps:
-            raise ValueError(
-                "Efficient MPRT relative rise is undefined because the "
-                "original explanation histogram entropy is zero"
-            )
-        score = (entropy_rand - entropy_orig) / entropy_orig
+        score = _efficient_mprt_relative_entropy_change(entropy_orig, entropy_rand)
 
         scores.append(float(score))
 

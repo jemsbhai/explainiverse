@@ -11,6 +11,8 @@ pnpm-debug.log*
 dist/
 build/
 out/
+playwright-report/
+test-results/
 coverage/
 .coverage
 .coverage.*

@@ -95,7 +95,10 @@ class TestGradCAMBasic:
         conv_layer = [layer for layer in layers if "conv" in layer][0]
 
         explainer = GradCAMExplainer(
-            model=adapter, target_layer=conv_layer, class_names=class_names
+            model=adapter,
+            target_layer=conv_layer,
+            class_names=class_names,
+            input_layout="hwc",
         )
 
         assert explainer.target_layer == conv_layer
@@ -242,7 +245,10 @@ class TestGradCAMInputFormats:
         conv_layer = [layer for layer in layers if "conv" in layer][-1]
 
         explainer = GradCAMExplainer(
-            model=adapter, target_layer=conv_layer, class_names=class_names
+            model=adapter,
+            target_layer=conv_layer,
+            class_names=class_names,
+            input_layout="hwc",
         )
 
         # HWC format (32, 32, 3)
@@ -268,7 +274,7 @@ class TestGradCAMInputFormats:
         adapter = PyTorchAdapter(SmallRGBNet(), task="classification")
         image_hwc = np.arange(4 * 4 * 3, dtype=np.float32).reshape(4, 4, 3)
 
-        with pytest.raises(ValueError, match="Ambiguous 3D image layout"):
+        with pytest.raises(RuntimeError, match="expected input.*to have 3 channels"):
             GradCAMExplainer(adapter, "conv").explain(image_hwc, target_class=0)
 
         explanation = GradCAMExplainer(adapter, "conv", input_layout="hwc").explain(

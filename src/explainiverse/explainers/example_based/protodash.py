@@ -451,9 +451,47 @@ class ProtoDashExplainer(BaseExplainer):
 
         scaled_weights = objective_weights / scale
         scaled_total = float(np.sum(scaled_weights))
-        if scale <= self.epsilon / scaled_total:
+        exact_total = sum(
+            (Fraction.from_float(float(value)) for value in objective_weights),
+            start=Fraction(0),
+        )
+        if exact_total <= Fraction.from_float(self.epsilon):
             return np.zeros_like(objective_weights), False
         return scaled_weights / scaled_total, True
+
+    def _weight_normalization_metadata(self, objective_weights: np.ndarray) -> Dict[str, object]:
+        """Describe the exact objective-mass comparison used for normalization."""
+
+        values = as_real_array(
+            objective_weights,
+            name="objective_weights",
+            dtype=float,
+            require_finite=True,
+        )
+        if np.any(values < 0):
+            raise ValueError("objective_weights must be non-negative")
+        exact_total = sum(
+            (Fraction.from_float(float(value)) for value in values),
+            start=Fraction(0),
+        )
+        threshold = Fraction.from_float(self.epsilon)
+        if exact_total == 0:
+            relation = "exactly_zero"
+            reason = "objective_weight_mass_is_exactly_zero"
+        elif exact_total < threshold:
+            relation = "below"
+            reason = "objective_weight_mass_is_below_normalization_threshold"
+        elif exact_total == threshold:
+            relation = "equal"
+            reason = "objective_weight_mass_equals_normalization_threshold"
+        else:
+            relation = "above"
+            reason = None
+        return {
+            "normalization_threshold": self.epsilon,
+            "objective_weight_mass_threshold_relation": relation,
+            "normalized_weights_undefined_reason": reason,
+        }
 
     def _normalized_display_weights(self, objective_weights: np.ndarray) -> np.ndarray:
         """Normalize positive mass; preserve zero mass instead of inventing weights."""
@@ -623,6 +661,7 @@ class ProtoDashExplainer(BaseExplainer):
             objective_weights = greedy_weights.copy()
         weights = self._normalized_display_weights(objective_weights)
         normalized_weights_defined = self._normalized_weights_defined(objective_weights)
+        normalization_metadata = self._weight_normalization_metadata(objective_weights)
 
         # Build explanation data
         explanation_data = {
@@ -632,9 +671,10 @@ class ProtoDashExplainer(BaseExplainer):
             "weight_semantics": (
                 "normalized_relative_objective_weights"
                 if normalized_weights_defined
-                else "undefined_zero_objective_weight_mass"
+                else "undefined_objective_weight_mass_at_or_below_threshold"
             ),
             "normalized_weights_defined": normalized_weights_defined,
+            **normalization_metadata,
             "objective_weight_semantics": "unnormalized_protodash_weights",
             "prototypes": X[prototype_indices].tolist(),
             "n_prototypes": len(prototype_indices),
@@ -665,9 +705,9 @@ class ProtoDashExplainer(BaseExplainer):
                 mmd = np.sqrt(max(mmd_sq, 0))
                 explanation_data["mmd_score"] = float(mmd)
             else:
-                explanation_data["mmd_undefined_reason"] = (
-                    "objective_weights_have_zero_normalizable_mass"
-                )
+                explanation_data["mmd_undefined_reason"] = normalization_metadata[
+                    "normalized_weights_undefined_reason"
+                ]
 
         if local_indices:
             selected = np.asarray(local_indices, dtype=int)
@@ -815,6 +855,7 @@ class ProtoDashExplainer(BaseExplainer):
             objective_weights = greedy_weights.copy()
         weights = self._normalized_display_weights(objective_weights)
         normalized_weights_defined = self._normalized_weights_defined(objective_weights)
+        normalization_metadata = self._weight_normalization_metadata(objective_weights)
 
         # Build explanation data
         explanation_data = {
@@ -824,9 +865,10 @@ class ProtoDashExplainer(BaseExplainer):
             "weight_semantics": (
                 "normalized_relative_objective_weights"
                 if normalized_weights_defined
-                else "undefined_zero_objective_weight_mass"
+                else "undefined_objective_weight_mass_at_or_below_threshold"
             ),
             "normalized_weights_defined": normalized_weights_defined,
+            **normalization_metadata,
             "objective_weight_semantics": "unnormalized_protodash_weights",
             "prototypes": X_reference[prototype_indices].tolist(),
             "n_prototypes": len(prototype_indices),

@@ -129,6 +129,9 @@ def test_result_discloses_fixed_sample_heuristic_without_guarantee():
     assert explanation.explainer_name == "ApproximateAnchors"
     assert result["search_method"] == "fixed_sample_beam_search"
     assert result["provides_high_probability_guarantee"] is False
+    assert result["claim_status"] == "quarantined"
+    assert result["promotion_requires_sequential_confidence_certificate"] is True
+    assert result["budget_exhaustion_is_certified"] is False
     assert result["precision_sample_size"] == 256
 
 

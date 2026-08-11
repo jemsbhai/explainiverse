@@ -8,6 +8,7 @@ from explainiverse.explainers.counterfactual.dice_wrapper import CounterfactualE
 
 class MixedProbabilityModel:
     class_names = ["negative", "positive"]
+    prediction_output_kind = "probabilities"
 
     def predict(self, X):
         X = np.asarray(X)
@@ -24,6 +25,8 @@ class OneColumnProbabilityModel:
 
 
 class ConstantProbabilityModel:
+    prediction_output_kind = "probabilities"
+
     def predict(self, X):
         return np.tile(np.array([[0.9, 0.1]]), (len(X), 1))
 
@@ -57,6 +60,9 @@ def test_mixed_domain_candidates_are_valid_categorical_and_fixed(mixed_explainer
 
     assert data["algorithm"] == "constrained_multistart_search"
     assert data["is_dice_implementation"] is False
+    assert data["claim_status"] == "quarantined"
+    assert data["promotion_requires_joint_proximity_diversity_optimization"] is True
+    assert data["official_dice_parity_established"] is False
     assert data["all_counterfactuals_valid"] is True
     assert data["num_generated"] >= 1
     assert data["fixed_features"] == ["fixed"]

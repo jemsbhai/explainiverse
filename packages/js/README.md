@@ -30,7 +30,10 @@ npm test
 npm run typecheck
 npm run build
 npm run build:demo
+npm run check:bundle
 npm run lint
+npx playwright install chromium firefox webkit
+npm run test:browser
 npm pack --dry-run
 ```
 
@@ -41,14 +44,18 @@ tests, logs, and empty placeholder modules are excluded from the tarball.
 ## Residual limitations
 
 - No compatibility or semantic-equivalence claim is made with Python beyond
-  the JS-defined JSON-safe subset of the snake-case `Explanation` fields that
-  is exercised by the shared fixture. Python's general `to_dict()` payload is
-  intentionally broader and is not accepted automatically. The JS wire is a
-  closed five-field schema; missing or unknown top-level fields are rejected. This subset
-  is recursively restricted to finite JSON values, unique feature names, arrays,
-  and plain string-keyed objects, and is tested through a shared Python/JS
-  fixture. Maps, sets, dates, typed arrays, BigInt, undefined values, symbols,
-  non-finite numbers, signed negative zero, integers outside JavaScript's safe-integer range,
+  the explicit `explainiverse.explanation.v1` wire consumed by
+  `Explanation.fromWireObject()` and emitted by `toWireObject()`. Python's
+  general `to_dict()` payload is intentionally broader; only its separately
+  named `to_wire_dict()`/`from_wire_dict()` endpoints share this contract. The
+  versioned wire is a closed six-field schema (`schema_version` plus the five
+  explanation fields); missing, unknown, and unsupported-version payloads are
+  rejected. The subset is recursively restricted to finite JSON values,
+  unique feature names, arrays, and plain string-keyed objects, and is tested
+  through shared acceptance and rejection fixtures. Maps, sets, dates, typed
+  arrays, BigInt, undefined values, symbols,
+  non-finite numbers, signed negative zero, and integer-valued numbers outside JavaScript's
+  safe-integer range,
   sparse or decorated arrays,
   accessors, custom prototypes, and cycles are rejected. Arbitrary JSON object
   keys (including `__proto__`) remain inert own data properties.
@@ -58,7 +65,13 @@ tests, logs, and empty placeholder modules are excluded from the tarball.
   not render heatmaps, rules, examples, uncertainty, or method diagnostics.
 - The local library build is CommonJS-only; no ESM or browser support matrix has
   been established.
-- Accessibility coverage is semantic linting and DOM tests, not validation with
-  real browsers and assistive technologies.
-- No bundle-size target, security review, or npm release process has been
+- The production demo is exercised in Chromium, Firefox, and WebKit with
+  functional, keyboard/reflow, off-origin-request, browser-error, and axe
+  WCAG A/AA gates. This certifies the built demo only, not direct browser import
+  of the CommonJS library. Assistive-technology support remains uncertified
+  until the independent NVDA/VoiceOver evidence in
+  `docs/ACCESSIBILITY_CERTIFICATION.md` exists and validates.
+- The built synthetic demo has a checked byte/gzip budget and a current-scope
+  security review in `docs/JAVASCRIPT_SECURITY_REVIEW.md`. No npm publication
+  threat model, identity/provenance controls, or release process has been
   established.

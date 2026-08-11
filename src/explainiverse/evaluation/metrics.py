@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from numbers import Integral, Real
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union, cast
 
@@ -35,6 +36,13 @@ from sklearn.base import clone, is_classifier, is_regressor
 from sklearn.metrics import accuracy_score
 
 from explainiverse.core.explanation import Explanation
+from explainiverse.core.scaled_detail import (
+    LEGACY_DETAIL_FORMAT,
+    SCALED_DECIMAL_DETAIL_FORMAT,
+    DetailRepresentationError,
+    encode_scaled_detail,
+    validate_detail_format,
+)
 from explainiverse.evaluation._utils import (
     _stable_difference_of_means,
     _stable_mean,
@@ -438,6 +446,7 @@ def compute_aopc(
     task: Optional[str] = None,
     ranking: str = "descending",
     return_details: bool = False,
+    detail_format: str = LEGACY_DETAIL_FORMAT,
 ) -> Union[float, Dict[str, Any]]:
     """Compute a generalized feature-wise MoRF AOPC contribution.
 
@@ -457,6 +466,9 @@ def compute_aopc(
     if not isinstance(return_details, (bool, np.bool_)):
         raise TypeError("return_details must be a boolean")
     return_details = bool(return_details)
+    detail_format = validate_detail_format(detail_format)
+    if not return_details and detail_format != LEGACY_DETAIL_FORMAT:
+        raise ValueError("detail_format requires return_details=True")
     instance = np.asarray(instance)
     if instance.ndim != 1 or instance.size == 0:
         raise ValueError("instance must be a non-empty one-dimensional array")
@@ -508,15 +520,24 @@ def compute_aopc(
     if not return_details:
         return aopc
 
-    try:
-        prediction_drops = [
-            _finite_difference(original_value, value, "AOPC drop") for value in prediction_values
-        ]
-    except FloatingPointError as exc:
-        raise FloatingPointError(
-            "return_details cannot represent an individual AOPC prediction_drop; "
-            "use return_details=False for the representable aggregate"
-        ) from exc
+    exact_prediction_drops = [
+        Fraction.from_float(original_value) - Fraction.from_float(float(value))
+        for value in prediction_values
+    ]
+    prediction_drops: Any
+    if detail_format == SCALED_DECIMAL_DETAIL_FORMAT:
+        prediction_drops = encode_scaled_detail(exact_prediction_drops)
+    else:
+        try:
+            prediction_drops = [
+                _finite_difference(original_value, value, "AOPC drop")
+                for value in prediction_values
+            ]
+        except FloatingPointError as exc:
+            raise DetailRepresentationError(
+                "return_details cannot represent an individual AOPC prediction_drop; "
+                "use detail_format='scaled_decimal_v1' or return_details=False"
+            ) from exc
 
     return {
         "aopc": aopc,

@@ -1,4 +1,5 @@
 {
+  "schema_version": "explainiverse.explanation.v1",
   "explainer_name": "wire-fixture",
   "target_class": "class-1",
   "explanation_data": {

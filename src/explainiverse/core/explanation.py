@@ -9,6 +9,71 @@ from collections.abc import Mapping, Sequence
 from numbers import Real
 from typing import Any, Optional
 
+EXPLANATION_WIRE_SCHEMA_VERSION = "explainiverse.explanation.v1"
+_WIRE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "explainer_name",
+        "target_class",
+        "explanation_data",
+        "feature_names",
+        "metadata",
+    }
+)
+_JS_MIN_SAFE_INTEGER = -(2**53 - 1)
+_JS_MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def _clone_wire_value(value: Any, path: str, active: set[int]) -> Any:
+    """Validate and detach the exact finite JSON subset shared with JavaScript."""
+
+    if value is None or type(value) in {str, bool}:
+        return value
+    if type(value) is int:
+        if not _JS_MIN_SAFE_INTEGER <= value <= _JS_MAX_SAFE_INTEGER:
+            raise ValueError(
+                f"{path} integer must be within JavaScript's safe-integer range "
+                "for exact transport"
+            )
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must contain only finite numbers")
+        if value == 0.0 and math.copysign(1.0, value) < 0.0:
+            raise ValueError(
+                f"{path} must not contain negative zero because JSON transport erases its sign"
+            )
+        if value.is_integer() and not _JS_MIN_SAFE_INTEGER <= value <= _JS_MAX_SAFE_INTEGER:
+            raise ValueError(
+                f"{path} integer must be within JavaScript's safe-integer range "
+                "for exact transport"
+            )
+        return value
+    if type(value) not in {list, dict}:
+        raise TypeError(
+            f"{path} must contain only JSON null/boolean/string/number values, "
+            "ordinary lists, and plain string-keyed dictionaries"
+        )
+
+    identity = id(value)
+    if identity in active:
+        raise TypeError(f"{path} must not contain cyclic references")
+    active.add(identity)
+    try:
+        if isinstance(value, list):
+            return [
+                _clone_wire_value(item, f"{path}[{index}]", active)
+                for index, item in enumerate(value)
+            ]
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{path} object keys must be strings")
+            result[key] = _clone_wire_value(item, f"{path}.{key}", active)
+        return result
+    finally:
+        active.remove(identity)
+
 
 class Explanation:
     """
@@ -205,6 +270,33 @@ class Explanation:
             }
         )
 
+    def to_wire_dict(self) -> dict[str, Any]:
+        """Return the versioned, finite-JSON Python/JavaScript wire payload.
+
+        Unlike :meth:`to_dict`, this opt-in endpoint rejects NumPy objects,
+        non-finite numbers, negative zero, unsafe integer-valued numbers,
+        non-string object keys, custom containers, and cyclic values. It never
+        silently coerces a broader Python payload into a lossy JSON representation.
+        """
+
+        if not isinstance(self.target_class, str) or not self.target_class.strip():
+            raise ValueError(
+                "Explanation wire v1 target_class must be a non-empty string; "
+                "legacy to_dict() retains broader Python target values"
+            )
+        payload = {
+            "schema_version": EXPLANATION_WIRE_SCHEMA_VERSION,
+            "explainer_name": self.explainer_name,
+            "target_class": self.target_class,
+            "explanation_data": self.explanation_data,
+            "feature_names": self.feature_names,
+            "metadata": self.metadata,
+        }
+        cloned = _clone_wire_value(payload, "payload", set())
+        if not isinstance(cloned, dict):  # pragma: no cover - fixed construction
+            raise RuntimeError("wire payload validation did not return an object")
+        return cloned
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Explanation":
         """
@@ -233,4 +325,43 @@ class Explanation:
             explanation_data=data["explanation_data"],
             feature_names=data.get("feature_names"),
             metadata=data.get("metadata", {}),
+        )
+
+    @classmethod
+    def from_wire_dict(cls, data: Any) -> "Explanation":
+        """Construct an Explanation from an untrusted versioned wire payload."""
+
+        cloned = _clone_wire_value(data, "payload", set())
+        if not isinstance(cloned, dict):
+            raise TypeError("wire payload must be a plain JSON object")
+        fields = set(cloned)
+        missing = _WIRE_FIELDS - fields
+        unknown = fields - _WIRE_FIELDS
+        if missing:
+            raise ValueError(
+                "wire payload is missing required field(s): " + ", ".join(sorted(missing))
+            )
+        if unknown:
+            raise ValueError(
+                "wire payload contains unknown field(s): " + ", ".join(sorted(unknown))
+            )
+        if cloned["schema_version"] != EXPLANATION_WIRE_SCHEMA_VERSION:
+            raise ValueError(
+                "unsupported Explanation wire schema_version; expected "
+                f"{EXPLANATION_WIRE_SCHEMA_VERSION!r}"
+            )
+        if not isinstance(cloned["target_class"], str) or not cloned["target_class"].strip():
+            raise ValueError("wire target_class must be a non-empty string")
+        if not isinstance(cloned["explanation_data"], dict):
+            raise TypeError("wire explanation_data must be a plain JSON object")
+        if cloned["feature_names"] is not None and not isinstance(cloned["feature_names"], list):
+            raise TypeError("wire feature_names must be an array or null")
+        if not isinstance(cloned["metadata"], dict):
+            raise TypeError("wire metadata must be a plain JSON object")
+        return cls(
+            explainer_name=cloned["explainer_name"],
+            target_class=cloned["target_class"],
+            explanation_data=cloned["explanation_data"],
+            feature_names=cloned["feature_names"],
+            metadata=cloned["metadata"],
         )

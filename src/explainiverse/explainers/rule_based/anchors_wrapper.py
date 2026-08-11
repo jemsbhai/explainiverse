@@ -489,6 +489,9 @@ class AnchorsExplainer(BaseExplainer):
                 "precision_sample_size": int(self.n_samples),
                 "search_method": "fixed_sample_beam_search",
                 "provides_high_probability_guarantee": False,
+                "claim_status": "quarantined",
+                "promotion_requires_sequential_confidence_certificate": True,
+                "budget_exhaustion_is_certified": False,
                 "anchor_features": [self.feature_names[i] for i in anchor_features],
                 "anchor_indices": anchor_features,
                 # These values denote rule membership only. The bounded beam

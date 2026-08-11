@@ -316,8 +316,16 @@ def scale_safe_product(*factors: np.ndarray) -> np.ndarray:
         exponent += factor_exponent
     mantissa, adjustment = np.frexp(mantissa)
     exponent += adjustment
+    # NumPy 1.x on Windows does not accept int64 exponents for ``ldexp``
+    # under its safe-casting rule, while NumPy 2.x does.  Values outside the
+    # int32 range are already far beyond binary64's representable exponent
+    # range, so clipping preserves the required zero/infinity boundary while
+    # keeping the declared NumPy floor executable.
+    exponent_for_ldexp = np.clip(exponent, np.iinfo(np.int32).min, np.iinfo(np.int32).max).astype(
+        np.int32
+    )
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        result = np.ldexp(mantissa, exponent)
+        result = np.ldexp(mantissa, exponent_for_ldexp)
     return np.where(zero, 0.0, result)
 
 

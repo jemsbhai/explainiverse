@@ -346,10 +346,28 @@ def normalize_classifier_outputs(
                 raise ValueError(
                     f"{context} requires numerical probabilities or mappable class labels"
                 ) from exc
+            if (
+                output_kind is None
+                and (require_probabilities or not allow_label_predictions)
+                and positive.size > 0
+                and np.all(np.isfinite(positive))
+                and np.all((positive == 0.0) | (positive == 1.0))
+            ):
+                raise ValueError(
+                    f"{context} cannot infer whether an undeclared one-dimensional {{0, 1}} "
+                    "output contains endpoint probabilities or hard class labels. Declare "
+                    "prediction_output_kind='probabilities' or 'class_labels'."
+                )
             normalized = np.column_stack((1.0 - positive, positive))
     elif raw.ndim == 2:
         if raw.shape[1] == 0:
             raise ValueError(f"{context} model.predict returned no output columns")
+        if require_probabilities and raw.shape[1] > 1 and output_kind is None:
+            raise ValueError(
+                f"{context} cannot infer whether an undeclared multiclass matrix contains "
+                "scores or probabilities. Declare prediction_output_kind='probabilities' "
+                "or configure PyTorchAdapter(classification_output_kind='probabilities')."
+            )
         if output_kind == "class_labels":
             raise ValueError(f"{context} hard class-label outputs must be one-dimensional")
         try:
@@ -360,6 +378,19 @@ def normalize_classifier_outputs(
             if output_kind == "scores":
                 raise ValueError(f"{context} class-score outputs must contain one column per class")
             positive = numerical[:, 0]
+            if (
+                output_kind is None
+                and (require_probabilities or not allow_label_predictions)
+                and positive.size > 0
+                and np.all(np.isfinite(positive))
+                and np.all((positive == 0.0) | (positive == 1.0))
+            ):
+                raise ValueError(
+                    f"{context} cannot infer whether an undeclared one-column {{0, 1}} "
+                    "output contains endpoint probabilities or hard class labels. Declare "
+                    "prediction_output_kind='probabilities' or return a one-dimensional "
+                    "prediction_output_kind='class_labels' output."
+                )
             normalized = np.column_stack((1.0 - positive, positive))
         else:
             normalized = numerical

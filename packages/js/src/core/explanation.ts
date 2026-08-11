@@ -10,6 +10,9 @@ export type ExplanationValue =
 /** String-keyed JSON/Python-wire object carried by an explanation payload. */
 export type ExplanationRecord = Record<string, ExplanationValue>;
 
+/** Stable identifier for the first opt-in cross-language wire schema. */
+export const EXPLANATION_WIRE_SCHEMA_VERSION = 'explainiverse.explanation.v1';
+
 /** Snake-case wire representation compatible with the Python container. */
 export interface ExplanationPayload {
   explainer_name: string;
@@ -17,6 +20,11 @@ export interface ExplanationPayload {
   explanation_data: ExplanationRecord;
   feature_names: string[] | null;
   metadata: ExplanationRecord;
+}
+
+/** Versioned snake-case payload used by explicit wire producer/consumer APIs. */
+export interface VersionedExplanationPayload extends ExplanationPayload {
+  schema_version: typeof EXPLANATION_WIRE_SCHEMA_VERSION;
 }
 
 function isRecord(value: unknown): value is ExplanationRecord {
@@ -261,6 +269,14 @@ export class Explanation {
     };
   }
 
+  /** Return the explicit versioned Python/JavaScript wire representation. */
+  public toWireObject(): VersionedExplanationPayload {
+    return {
+      schema_version: EXPLANATION_WIRE_SCHEMA_VERSION,
+      ...this.toObject(),
+    };
+  }
+
   /** Construct an Explanation from an untrusted snake-case payload. */
   public static fromObject(payload: unknown): Explanation {
     const clonedPayload = cloneWireValue(payload, 'payload', new WeakSet<object>());
@@ -295,5 +311,47 @@ export class Explanation {
       featureNames === null ? undefined : (featureNames as readonly string[]),
       clonedPayload.metadata as ExplanationRecord,
     );
+  }
+
+  /** Construct an Explanation from an untrusted versioned wire payload. */
+  public static fromWireObject(payload: unknown): Explanation {
+    const clonedPayload = cloneWireValue(payload, 'payload', new WeakSet<object>());
+    if (!isRecord(clonedPayload)) {
+      throw new TypeError('wire payload must be a non-null record');
+    }
+    const schemaFields = [
+      'schema_version',
+      'explainer_name',
+      'target_class',
+      'explanation_data',
+      'feature_names',
+      'metadata',
+    ] as const;
+    const schemaFieldSet = new Set<string>(schemaFields);
+    const unknownFields = Object.keys(clonedPayload).filter(
+      (field) => !schemaFieldSet.has(field),
+    );
+    if (unknownFields.length > 0) {
+      throw new TypeError(
+        `wire payload contains unknown field(s): ${unknownFields.join(', ')}`,
+      );
+    }
+    for (const field of schemaFields) {
+      if (!Object.hasOwn(clonedPayload, field)) {
+        throw new TypeError(`wire payload is missing required field: ${field}`);
+      }
+    }
+    if (clonedPayload.schema_version !== EXPLANATION_WIRE_SCHEMA_VERSION) {
+      throw new RangeError(
+        `unsupported Explanation schema_version; expected ${EXPLANATION_WIRE_SCHEMA_VERSION}`,
+      );
+    }
+    return Explanation.fromObject({
+      explainer_name: clonedPayload.explainer_name,
+      target_class: clonedPayload.target_class,
+      explanation_data: clonedPayload.explanation_data,
+      feature_names: clonedPayload.feature_names,
+      metadata: clonedPayload.metadata,
+    });
   }
 }
