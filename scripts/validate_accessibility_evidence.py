@@ -11,6 +11,33 @@ from pathlib import Path
 from typing import Sequence
 from urllib.parse import urlparse
 
+_CANONICAL_MAX_EVIDENCE_AGE_DAYS = 180
+_CANONICAL_REQUIRED_PROFILES = {
+    "macos-safari-voiceover": {
+        "platform": "A currently supported macOS release on Apple Silicon",
+        "browser": "Current stable Safari",
+        "assistive_technology": "Built-in VoiceOver",
+    },
+    "windows-edge-nvda": {
+        "platform": "Current Windows 11 on physical hardware",
+        "browser": "Current stable Microsoft Edge",
+        "assistive_technology": "Current stable NVDA",
+    },
+}
+_CANONICAL_REQUIRED_SCENARIOS = (
+    "disclosure-and-landmarks",
+    "keyboard-order-and-focus",
+    "task-and-class-state-change",
+    "signed-attribution-semantics",
+    "add-and-remove-feature",
+    "empty-state-announcement",
+    "zoom-and-320-css-px-reflow",
+)
+_CANONICAL_REQUIRED_ARTIFACT_KINDS = (
+    "interaction-transcript",
+    "screen-recording",
+)
+
 
 class AccessibilityEvidenceError(ValueError):
     """Raised when manual certification evidence is incomplete or ambiguous."""
@@ -63,6 +90,33 @@ def _string_list(policy: dict[str, object], field: str) -> list[str]:
     return strings
 
 
+def _validate_canonical_policy(policy: dict[str, object]) -> None:
+    if policy.get("max_evidence_age_days") != _CANONICAL_MAX_EVIDENCE_AGE_DAYS:
+        raise AccessibilityEvidenceError(
+            "policy max_evidence_age_days must remain the canonical 180-day boundary"
+        )
+
+    profiles = policy.get("required_profiles")
+    expected_profiles = [
+        {"id": profile_id, **requirements}
+        for profile_id, requirements in _CANONICAL_REQUIRED_PROFILES.items()
+    ]
+    if not isinstance(profiles, list) or profiles != expected_profiles:
+        raise AccessibilityEvidenceError(
+            "policy required_profiles must remain the canonical physical AT profiles"
+        )
+
+    expected_lists = {
+        "required_scenarios": list(_CANONICAL_REQUIRED_SCENARIOS),
+        "required_artifact_kinds": list(_CANONICAL_REQUIRED_ARTIFACT_KINDS),
+    }
+    for field, expected in expected_lists.items():
+        if policy.get(field) != expected:
+            raise AccessibilityEvidenceError(
+                f"policy {field} must remain the canonical accessibility boundary"
+            )
+
+
 def validate_evidence(
     policy_path: Path,
     evidence_path: Path,
@@ -77,6 +131,7 @@ def validate_evidence(
         raise AccessibilityEvidenceError("policy and evidence must use schema version 1")
     if policy.get("claim_status") != "blocked_pending_manual_evidence":
         raise AccessibilityEvidenceError("policy must remain blocked until reviewed evidence lands")
+    _validate_canonical_policy(policy)
 
     revision = _required_string(evidence.get("commit_sha"), field="commit_sha")
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:

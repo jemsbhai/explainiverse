@@ -447,6 +447,7 @@ def test_dependency_schedule_covers_each_declared_edge_and_next_major_probe():
     assert "scikit-image 1.x prerelease availability (blocking monitor)" in workflow
     assert "scikit-image 1.x prerelease source-compatibility probe" in workflow
     assert "select_dependency_prerelease.py" in workflow
+    assert "--current-major 0" in workflow
     assert '--metadata "$EVIDENCE_DIR/pypi-metadata.json"' in workflow
     assert "pypi-metadata.sha256" in workflow
     assert "pypi_last_serial" in workflow

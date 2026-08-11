@@ -153,10 +153,20 @@ def test_bundle_budget_and_untyped_distribution_guards_fail_closed():
 def test_manual_accessibility_gate_cannot_pass_without_both_at_profiles():
     policy = json.loads(_read(".github/accessibility-certification-policy.json"))
     assert policy["claim_status"] == "blocked_pending_manual_evidence"
+    assert policy["max_evidence_age_days"] == 180
     assert {profile["id"] for profile in policy["required_profiles"]} == {
         "macos-safari-voiceover",
         "windows-edge-nvda",
     }
+    assert policy["required_scenarios"] == [
+        "disclosure-and-landmarks",
+        "keyboard-order-and-focus",
+        "task-and-class-state-change",
+        "signed-attribution-semantics",
+        "add-and-remove-feature",
+        "empty-state-announcement",
+        "zoom-and-320-css-px-reflow",
+    ]
     assert set(policy["required_artifact_kinds"]) == {
         "interaction-transcript",
         "screen-recording",

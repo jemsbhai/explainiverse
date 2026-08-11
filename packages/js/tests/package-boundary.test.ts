@@ -26,6 +26,7 @@ describe("private npm publication boundary", () => {
 
   it.each([
     ["private", false],
+    ["description", "Publishable Explainiverse JavaScript package"],
     ["type", "module"],
     ["publishConfig", { access: "public" }],
     ["exports", { ".": "./dist/index.js" }],
@@ -33,6 +34,17 @@ describe("private npm publication boundary", () => {
     ["explainiverseCapability", { publicationReady: true }],
   ])("rejects a changed %s field", (field, value) => {
     expect(() => validatePackageManifest(changed(field, value))).toThrow();
+  });
+
+  it.each([
+    ["module", "./dist/index.mjs"],
+    ["browser", "./dist/index.browser.js"],
+    ["unpkg", "./dist/index.js"],
+    ["jsdelivr", "./dist/index.js"],
+  ])("rejects the publication-oriented %s field", (field, value) => {
+    expect(() => validatePackageManifest(changed(field, value))).toThrow(
+      new RegExp(`publication field: ${field}$`),
+    );
   });
 
   it("rejects publication and installation lifecycle hooks", () => {

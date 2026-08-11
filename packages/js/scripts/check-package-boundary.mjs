@@ -40,6 +40,7 @@ const FORBIDDEN_LIFECYCLE_SCRIPTS = [
   "postinstall",
   "postpack",
 ];
+const FORBIDDEN_PUBLICATION_FIELDS = ["module", "browser", "unpkg", "jsdelivr"];
 
 function canonical(value) {
   return JSON.stringify(value);
@@ -56,6 +57,8 @@ export function validatePackageManifest(packageJson) {
     name: "explainiverse-js-experimental",
     version: "0.0.0-experimental",
     private: true,
+    description:
+      "Private experimental TypeScript core contracts and attribution visualizer for Explainiverse",
     type: "commonjs",
     main: "./dist/index.js",
     types: "./dist/index.d.ts",
@@ -83,6 +86,13 @@ export function validatePackageManifest(packageJson) {
     throw new Error(
       "private experimental package must not define publishConfig",
     );
+  }
+  for (const field of FORBIDDEN_PUBLICATION_FIELDS) {
+    if (Object.hasOwn(packageJson, field)) {
+      throw new Error(
+        `private experimental package must not define publication field: ${field}`,
+      );
+    }
   }
   if (packageJson.scripts?.prepack !== "npm run build") {
     throw new Error("prepack must remain the reviewed build-only hook");

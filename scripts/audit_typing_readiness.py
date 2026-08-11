@@ -15,6 +15,14 @@ from typing import Sequence
 _CANONICAL_PACKAGE = "explainiverse"
 _CANONICAL_MARKER = "src/explainiverse/py.typed"
 _CANONICAL_CLASSIFIER = "Typing :: Typed"
+_CANONICAL_ACCEPTANCE = {
+    "mypy": "poetry run mypy --strict src/explainiverse",
+    "pyright": "pyright --verifytypes explainiverse --ignoreexternal",
+    "required_result": (
+        "Both commands exit zero, Pyright reports 100% type completeness, and an annotated "
+        "built wheel passes strict external consumer fixtures before this guard is replaced."
+    ),
+}
 
 
 class TypingReadinessError(ValueError):
@@ -87,6 +95,10 @@ def load_blocked_policy(path: Path) -> dict[str, object]:
             raise TypingReadinessError(
                 f"typing policy {field} must remain the canonical boundary {expected!r}"
             )
+    if policy.get("acceptance") != _CANONICAL_ACCEPTANCE:
+        raise TypingReadinessError(
+            "typing policy acceptance must remain the canonical strict consumer boundary"
+        )
     return policy
 
 
