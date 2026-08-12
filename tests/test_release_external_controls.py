@@ -728,6 +728,71 @@ def test_cuda_evidence_fails_closed_on_wrong_commit_rerun_or_incomplete_query(mu
         )
 
 
+@pytest.mark.parametrize("attempt", [2, 0, None, True, False, "1"])
+def test_cuda_evidence_requires_exactly_first_run_attempt(attempt):
+    policy, _ = _policy()
+    run = _cuda_run()
+    run["run_attempt"] = attempt
+
+    with pytest.raises(ValueError, match="run attempt must be the integer 1"):
+        controls.verify_cuda_evidence(
+            policy,
+            run,
+            _cuda_jobs(),
+            run_id="456",
+            repository=policy["repository"],
+            release_commit=SHA,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "match"),
+    [
+        ("run_attempt", 2, "run attempt must be the integer 1"),
+        ("run_attempt", True, "run attempt must be the integer 1"),
+        ("head_sha", None, "head SHA mismatch"),
+        ("head_sha", "b" * 40, "head SHA mismatch"),
+        ("id", 0, "id must be a positive integer"),
+        ("id", True, "id must be a positive integer"),
+        ("runner_id", 0, "runner id must be a positive integer"),
+        ("runner_id", True, "runner id must be a positive integer"),
+        ("runner_name", None, "runner name must be a non-empty string"),
+        ("runner_name", "", "runner name must be a non-empty string"),
+        ("runner_name", "   ", "runner name must be a non-empty string"),
+    ],
+)
+def test_cuda_evidence_requires_bound_job_and_runner_identity(field, replacement, match):
+    policy, _ = _policy()
+    jobs = _cuda_jobs()
+    jobs["jobs"][0][field] = replacement
+
+    with pytest.raises(ValueError, match=match):
+        controls.verify_cuda_evidence(
+            policy,
+            _cuda_run(),
+            jobs,
+            run_id="456",
+            repository=policy["repository"],
+            release_commit=SHA,
+        )
+
+
+def test_cuda_evidence_requires_a_distinct_runner_id_for_every_required_job():
+    policy, _ = _policy()
+    jobs = _cuda_jobs()
+    jobs["jobs"][1]["runner_id"] = jobs["jobs"][0]["runner_id"]
+
+    with pytest.raises(ValueError, match="runner id .* is reused"):
+        controls.verify_cuda_evidence(
+            policy,
+            _cuda_run(),
+            jobs,
+            run_id="456",
+            repository=policy["repository"],
+            release_commit=SHA,
+        )
+
+
 @pytest.mark.parametrize(
     "replacement",
     [

@@ -187,6 +187,12 @@ def _positive_integer(value: Any, name: str) -> int:
     return value
 
 
+def _first_attempt(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value != 1:
+        raise ValueError(f"{name} must be the integer 1")
+    return value
+
+
 def verify_recovery_governance_record(
     record: Mapping[str, Any],
     run: Mapping[str, Any],
@@ -209,7 +215,7 @@ def verify_recovery_governance_record(
 
     source_repository = _mapping(run.get("repository"), "source run repository").get("full_name")
     source_id = _positive_integer(run.get("id"), "source run id")
-    source_attempt = _positive_integer(run.get("run_attempt"), "source run attempt")
+    source_attempt = _first_attempt(run.get("run_attempt"), "source run attempt")
     source_actor = _mapping(run.get("actor"), "source run actor").get("login")
     source_triggering_actor = _mapping(
         run.get("triggering_actor"), "source run triggering actor"
@@ -283,6 +289,7 @@ def verify_source_run(
     for label, (actual, expected) in expected_fields.items():
         if actual != expected:
             raise ValueError(f"source run {label} mismatch: expected {expected!r}, got {actual!r}")
+    _first_attempt(run.get("run_attempt"), "source run attempt")
 
     if jobs_response.get("query_filter") != "all":
         raise ValueError("source jobs must be queried with filter=all")
@@ -305,6 +312,7 @@ def verify_source_run(
                 f"got {len(matches)}"
             )
         job = matches[0]
+        _first_attempt(job.get("run_attempt"), f"source job {job_name!r} attempt")
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             raise ValueError(
                 f"source job {job_name!r} did not complete successfully: "
@@ -319,6 +327,7 @@ def verify_source_run(
             f"got {len(release_matches)}"
         )
     release_job = release_matches[0]
+    _first_attempt(release_job.get("run_attempt"), f"source job {release_job_name!r} attempt")
     if release_job.get("status") != "completed" or release_job.get("conclusion") != "failure":
         raise ValueError(
             f"source job {release_job_name!r} must demonstrate a downstream failure: "

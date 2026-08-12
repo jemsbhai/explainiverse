@@ -863,6 +863,17 @@ def _complete_jobs_response(jobs_response: Mapping[str, Any], name: str) -> list
     ]
 
 
+def _require_first_attempt(value: Any, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value != 1:
+        raise ValueError(f"{name} must be the integer 1; got {value!r}")
+
+
+def _require_positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer; got {value!r}")
+    return value
+
+
 def _cuda_required_runner_labels(
     cuda_policy: Mapping[str, Any], required_jobs: Sequence[str]
 ) -> Mapping[str, str]:
@@ -928,6 +939,7 @@ def verify_cuda_evidence(
             raise ValueError(
                 f"CUDA evidence run {label} mismatch: expected {expected!r}, got {actual!r}"
             )
+    _require_first_attempt(run.get("run_attempt"), "CUDA evidence run attempt")
 
     jobs = _complete_jobs_response(jobs_response, "CUDA evidence")
     required_jobs = _canonical_names(
@@ -936,6 +948,7 @@ def verify_cuda_evidence(
     )
     required_runner_labels = _cuda_required_runner_labels(cuda_policy, required_jobs)
     accepted_jobs: list[Mapping[str, Any]] = []
+    accepted_runner_ids: dict[int, str] = {}
     for job_name in required_jobs:
         matches = [job for job in jobs if job.get("name") == job_name]
         if len(matches) != 1:
@@ -944,16 +957,37 @@ def verify_cuda_evidence(
                 f"got {len(matches)}"
             )
         job = matches[0]
+        _require_positive_integer(job.get("id"), f"CUDA evidence job {job_name!r} id")
+        _require_first_attempt(
+            job.get("run_attempt"), f"CUDA evidence job {job_name!r} run attempt"
+        )
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             raise ValueError(
                 f"CUDA evidence job {job_name!r} did not complete successfully: "
                 f"{job.get('status')!r}/{job.get('conclusion')!r}"
             )
         job_head_sha = job.get("head_sha")
-        if job_head_sha is not None and job_head_sha != release_commit:
+        if job_head_sha != release_commit:
             raise ValueError(
                 f"CUDA evidence job {job_name!r} head SHA mismatch: "
                 f"expected {release_commit!r}, got {job_head_sha!r}"
+            )
+        runner_id = _require_positive_integer(
+            job.get("runner_id"), f"CUDA evidence job {job_name!r} runner id"
+        )
+        previous_job = accepted_runner_ids.get(runner_id)
+        if previous_job is not None:
+            raise ValueError(
+                f"CUDA evidence runner id {runner_id!r} is reused by required jobs "
+                f"{previous_job!r} and {job_name!r}; each one-job JIT runner may execute "
+                "at most one required job"
+            )
+        accepted_runner_ids[runner_id] = job_name
+        runner_name = job.get("runner_name")
+        if not isinstance(runner_name, str) or not runner_name.strip():
+            raise ValueError(
+                f"CUDA evidence job {job_name!r} runner name must be a non-empty string; "
+                f"got {runner_name!r}"
             )
         labels = _canonical_names(
             _sequence(job.get("labels"), f"CUDA evidence job {job_name!r} labels"),

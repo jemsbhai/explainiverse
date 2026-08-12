@@ -8,7 +8,8 @@ claim.
 The B01-B11 audit began from clean commit
 `dd76815c79076c43d88568ae10f43be7bb546d9c`, was refreshed through predecessor head
 `9408f5c63c8accab2611658422b768990ead42d5`, and now includes the authorized 2026-08-11 PR merges,
-live B02 control mutations, hosted `push` evidence, and B04 provisioning attempt. It is tracked in
+live B02 control mutations, hosted `push` evidence, B04 provisioning attempts, the 2026-08-12
+private Kaggle diagnostic capacity probe, and release-verifier hardening. It is tracked in
 [`RELEASE_BLOCKER_CLOSURE_MATRIX.md`](RELEASE_BLOCKER_CLOSURE_MATRIX.md). That ledger supersedes
 older observation timestamps and counts below when deciding whether a stable release is
 supportable; the answer remains **no** until its applicable executable stable-gate rows are green.
@@ -36,7 +37,7 @@ supportable; the answer remains **no** until its applicable executable stable-ga
   `0347899501f8fe97197974197e3acccc45c088caa2a844ed70d48c743062441d`, is rejected with exactly
   three violations: the same two CUDA failures and collaborators `b-urge` plus `jemsbhai` instead
   of sole collaborator `jemsbhai`. It directly recorded zero pending invitations; no permission
-  was changed while capacity remains unavailable.
+  was changed before an owner-locked Actions runner window existed.
 - Exact-`main` `push` runs Python `31520989339`, dependency `31520989552`, JavaScript
   `31520989433`, and artifact reproducibility `31520989403` succeeded. Playwright artifact
   `9113076913` has digest
@@ -74,6 +75,32 @@ supportable; the answer remains **no** until its applicable executable stable-ga
   `5474ff04-daac-430a-9eed-b74c715e2903`; preemptible T4 2/1
   `4d81c462-10ea-427e-b45f-718e10dd6d6f`; preemptible L4 2/1
   `bf7d71d5-c999-4c5d-8963-5720c205caa8`. All reported state detail `Quota request denied`.
+- A private Kaggle capacity probe on 2026-08-12 found two distinct Tesla T4 devices. The retained
+  [raw probe](evidence/kaggle-gpu-capacity-probe-20260812.json) has SHA-256
+  `8e14b73c8c22a5a09e87b7e916a793264ab7a9566af614031fc23df4fab9e944` and records UUIDs
+  `GPU-665b7910-7d3c-2ea8-96fb-4df7e940028f` and
+  `GPU-e6fb927c-8f6f-a149-b798-cd5bcc8c2247`, driver `580.159.04`, platform
+  `Linux-6.12.90+-x86_64-with-glibc2.35`, Python `3.12.13`, Torch `2.10.0+cu128`, and CUDA runtime
+  `12.8`. The retained
+  [kernel metadata](evidence/kaggle-gpu-capacity-probe-20260812-metadata.json), SHA-256
+  `90007b376321264e1c42c3e91f0b5856882b8bd3223dd214c47bc4338ef8124d`, identifies private kernel
+  `muntasersyed/explainiverse-gpu-capacity-probe-20260812` (`id_no: 130496083`) and image
+  `gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461`.
+  A separate live kernel-status query observed version `1`. The post-probe live command
+  `uvx --from kaggle==2.2.2 kaggle quota` reported
+  `GPU 0.01 hours used / 29.99 hours remaining`; that quota observation is not embedded in either
+  JSON file. The kernel received no GitHub credential, did not fetch the repository, and was not
+  registered as a GitHub Actions runner; its only GitHub request was unauthenticated `/meta`.
+  This is a diagnostic capacity inventory only, not an accepted CUDA run or B04 closure.
+- The CUDA evidence verifier now requires the top-level run and all four required jobs to be exact
+  integer attempt `1`, binds every job to the non-null release SHA, rejects boolean/non-positive
+  job and runner IDs, requires a nonempty runner name, and requires a distinct runner ID for every
+  one-job JIT assignment. The staged-recovery verifier likewise requires exact integer attempt
+  `1` for the source run and each trusted build, attest, publish, and release job. The combined
+  command `poetry run pytest -q tests/test_release_external_controls.py tests/test_release_recovery.py tests/test_release_governance.py tests/test_p0_release_workflows.py tests/test_cuda_skip_policy.py`
+  passed `198` tests in `2.36s`; Black, isort, mypy on both verifier scripts, and
+  `git diff --check` were also clean. This validates fail-closed repository logic, not GPU
+  execution.
 - PyPI 0.15.0 and tag `v0.15.0` remain absent. The exact Trusted Publisher still lacks an
   authenticated owner capture. Local-only SSH tag signing was proved with Ed25519 fingerprint
   `SHA256:84G7/ewIxErnHPmIrtaW52+1qy+2MlQqzbmCOW6tGc0`, but GitHub registration remains blocked at
@@ -82,9 +109,10 @@ supportable; the answer remains **no** until its applicable executable stable-ga
   evidence remain explicitly unclaimed; `scikit-image<1.0` and B11's private/CommonJS/unpublished
   quarantine remain unchanged.
 
-The dependency cascade is B04 capacity → genuine PR #4 CUDA dispatch → PR #4 merge → final-main
-reruns → zero-violation B02 capture → authenticated B01 setup/publication → B08 release record and
-B03 downstream-only recovery. Green non-CUDA runs do not bypass that order.
+The dependency cascade is B04 owner-locked JIT Actions evidence → genuine PR #4 CUDA dispatch →
+PR #4 merge → final-main reruns → zero-violation B02 capture → authenticated B01
+setup/publication → B08 release record and B03 downstream-only recovery. Green non-CUDA runs do
+not bypass that order.
 
 ## Priority and release policy
 
@@ -123,7 +151,7 @@ detailed row remains the source of the acceptance criterion.
 | ENG-P0-01 | P0 | PyPI Trusted Publisher registration | **BLOCKED — authenticated external setup.** The workflow is OIDC-only, token-free, version-absence guarded, and policy-bound, but PyPI has no public settings read API and no authenticated owner capture exists. PyPI 0.15.0/tag `v0.15.0` remain absent. Local SSH signing preflight succeeded, but GitHub key registration still requires live sudo/2FA; no GitHub-verified tag or OIDC publication exists. See B01. |
 | ENG-P0-02 | P0 | Live GitHub branch/tag/environment controls | **BLOCKED — settings configured; CUDA acceptance missing.** Live strict protection now has all 23 exact contexts provider-bound to Actions app ID `15368`, and immutable Releases is enabled. Capture `4833e9f2…1b34e5` against current `main` `a9789d0…` has 21 successes and exactly two violations: CUDA minimum/latest failed. `repository_controls_accepted=false` remains correct until genuine hardware evidence succeeds on the final candidate. See B02. |
 | ENG-P0-03 | P0 | Non-atomic PyPI/GitHub release recovery | **BLOCKED — authorized drill.** Downstream-only recovery, all-attempt exactly-once inspection, immutable-tag execution binding, cross-service hash equality, retained evidence, and no-republish guards are implemented and tested. No real staged post-PyPI failure/recovery exists; legacy `0.14.0` lacks the required attested source run. See B03. |
-| ENG-P0-04 | P0 | Real CUDA and multi-GPU coverage | **BLOCKED — external quota/hardware.** Dedicated billed/isolation-prepared GCP project `explainiverse-release-ci-26` has zero VMs/runners and its default service account is disabled. Global GPU, standard T4, and preemptible T4/L4 increases, including the same minimum requests in an audited unused fallback, were denied; neither audited project can supply the required two-GPU lane. PR #4 prevents routing from PR/push in the reviewed workflow, while the stricter runner-window procedure requires sole-collaborator authority, an installed-App audit, and queue-before-runner JIT registration because branch workflows remain mutable. No hardware test or approval is represented. See B04 and the current snapshot. |
+| ENG-P0-04 | P0 | Real CUDA and multi-GPU coverage | **BLOCKED — accepted owner-locked Actions evidence.** Dedicated billed/isolation-prepared GCP project `explainiverse-release-ci-26` still has zero VMs/runners and all requested GPU quota paths were denied. The private Kaggle probe linked above proves diagnostic two-T4 capacity exists, but it had no GitHub credential, repository checkout, or Actions runner and ran none of the release test nodes. PR #4 prevents routing from PR/push in the reviewed workflow, while the stricter runner-window procedure requires sole-collaborator authority, an installed-App audit, queue-before-runner registration, and fresh one-job JIT runners. B04 remains open until the four exact attempt-1 Actions jobs supply accepted evidence. See B04 and the current snapshot. |
 | ENG-P0-05 | P0 | Dependency resolver/version matrix | **BLOCKED — final-candidate rerun; current-main push green.** Python `31520989339` and dependency `31520989552` succeeded on exact `main` `a9789d0…` across every selected platform and dependency edge. PR #4 security commit `9ad738a…` also has those contexts green, but cannot merge until B04 supplies genuine CUDA evidence; the eventual final-main SHA must be rerun. See B05. |
 | ENG-P0-06 | P0 | Quantus versus pandas-floor separation | **BLOCKED — final-candidate rerun; current-main push green.** The exact marker manifest, minimum-lane exclusion audit, explicit Quantus import, and zero-skip reference job are implemented. Python `push` run `31520989339` passed Quantus 9/9 on `a9789d0…`; the security commit awaiting B04 means this is not yet final-candidate evidence. See B05. |
 | ENG-P1-01 | P1 | Model-state ownership and extra RNG/state | **RETIRED — declared repository contract; residual boundary permanent.** Adversarial gates cover registered-state traversal, default/injected RNG, callbacks, protocol/fingerprint state, success/error restoration, and serialized adapter operations. Python/NumPy RNG, processes, distributed workers, external mutation, and nondeterministic kernels remain explicitly outside the claim. |
@@ -168,7 +196,8 @@ detailed row remains the source of the acceptance criterion.
 The predecessor repository snapshot and PR rehearsals below remain historical evidence. Current
 `main` `a9789d009f6ec5134bc53b9d2f6a8b59726e75c7` additionally produced the following `push`
 evidence. Expected skips are owned by the repository's allowlist. The dedicated CUDA workflow is
-guarded by an exact node manifest and zero-skip policy, but no hardware result is represented.
+guarded by an exact node manifest and zero-skip policy, but no accepted Actions hardware result is
+represented.
 
 - Python run `31520989339`, dependency run `31520989552`, JavaScript run `31520989433`, and
   artifact run `31520989403` all completed successfully on exact `main`. Together they supplied
@@ -243,13 +272,15 @@ After the reviewed PR chain landed, ten workflows are active and the release wor
 
 The reviewed PR chain is now landed with the ancestry recorded in the current snapshot. PR #4
 contains security commit `9ad738a2dc62777ae199b03a3348b24b45006da2` and remains open because its public-repository security
-boundary deliberately prevents PR/push execution on self-hosted GPU runners and genuine owner
-dispatch capacity is unavailable. Live Actions variables and registered runners remain zero.
+boundary deliberately prevents PR/push execution on self-hosted GPU runners and no owner-locked
+JIT Actions dispatch has run. Live Actions variables and registered runners remain zero.
 Dedicated GCP project `explainiverse-release-ci-26`/`305968033598` is billed and
 isolation-prepared but has zero VMs; all quota requests listed in the current snapshot were
-denied. This B04 external failure blocks PR #4, final-main reruns, accepted B02 capture, and all
-publication-dependent steps. No tag, publication, release, recovery drill, or manual/GPU evidence
-exists.
+denied. The private Kaggle probe proves two-T4 diagnostic capacity, but it had no credential,
+repository checkout, runner registration, or release test execution. The missing owner-locked
+JIT Actions evidence keeps B04 open and blocks PR #4, final-main reruns, accepted B02 capture, and
+all publication-dependent steps. No tag, publication, release, recovery drill, accepted Actions
+CUDA evidence, or physical accessibility evidence exists.
 
 PyPI `0.14.0` is legacy incident evidence, not a recovery proof: its wheel SHA-256 is
 `b1b98dfdfc0acbc8dc2113d8db87d40ae9cec2f958ed25b00bc6e30d43db41d4`, its sdist SHA-256 is
@@ -271,7 +302,7 @@ No actual governance record or recovery evidence exists.
 | B01 | ENG-P0-01 | PyPI project owner `jemsbhai` | Authentically register/archive the exact owner/repository/workflow/environment Trusted Publisher and GitHub-verifiable signing key; then use the already-authorized sole OIDC release only after upstream gates pass. | Capture the authenticated PyPI Publishing settings for `jemsbhai/explainiverse`, `publish-pypi.yml`, environment `pypi`; then require a token-free OIDC upload whose per-file Integrity records and cryptographic verification prove the exact DSSE subjects/digests and Trusted Publisher identity. Repository/environment secret inventories must remain empty. Local-only signing preflight is insufficient. |
 | B02 | ENG-P0-02 | GitHub repository administrator | Preserve immutable Releases and all 23 exact provider-bound contexts; obtain genuine CUDA success on final `main`, enforce sole-collaborator/zero-invitation human authority, retain an installed-App permission audit, then repeat the capture. | Run the documented admin capture, dispatch `release-preflight.yml` on exact `origin/main`, bind within 30 minutes with actor and triggering actor both equal to the authenticated capture principal, and verify the retained run attempt/triggering actor against the Actions API immediately before tag creation. Acceptance is `repository_controls_accepted=true`, immutable Releases enabled, sole collaborator/effective writer `jemsbhai`, zero invitations, no violations, exact policy/snapshot digests, every required provider-bound check successful, and a separate authenticated export showing no non-owner-equivalent App/automation authority. Strengthened capture `ab182478…693da` has exactly three violations: current collaborator `b-urge` and the two CUDA failures; it records zero invitations. |
 | B03 | ENG-P0-03 | Separately authorized release operator | Exercise a staged failure only on a future build-attest-OIDC source run; do not reuse `0.14.0`. | Dispatch with `stage_recovery_drill=true`, then run `recover-github-release.yml` from the immutable release tag and original run ID with `require_staged_drill=true`. Archive source-run/all-attempt job JSON, PyPI JSON, inventories, and hashes; require exact tag/SHA execution, the failed stage step, exactly one successful upload execution, and byte-identical original/PyPI/GitHub artifacts. |
-| B04 | ENG-P0-04 | Repository administrator, GCP quota authority, and GPU-infrastructure owner | Obtain approved two-GPU Linux capacity after the archived denials. Coordinate restoration, temporarily remove non-owner collaborators, require zero invitations, audit installed Apps/automation, and clear custom-label queues. Set variables and owner-dispatch each reviewed ref while no runner is online; verify only the exact expected jobs are queued, then register fresh one-job JIT runners. | Retain authority/queue evidence plus all four named min/latest one-/two-GPU jobs. Each must carry its topology label, match and execute the exact 15-node manifest with the exact declared visible-device count, zero skips, exact-commit identity, and exactly one successful attempt. Keep the authority lock through publication. On success or failure, prove variables, queues, runners, VMs, and disks are zero before re-inviting the exact prior permission and recording acceptance. No present VM/runner result satisfies this. |
+| B04 | ENG-P0-04 | Repository administrator, GPU-capacity account owner, and GPU-infrastructure owner | Convert the discovered two-GPU Linux capacity into an approved owner-locked Actions window. Coordinate restoration, temporarily remove non-owner collaborators, require zero invitations, audit installed Apps/automation, and clear custom-label queues. Set variables and owner-dispatch each reviewed ref while no runner is online; verify only the exact expected jobs are queued, then register fresh one-job JIT runners without exposing a reusable credential. | Retain authority/queue evidence plus all four named min/latest one-/two-GPU jobs. Each must carry its topology label, match and execute the exact 15-node manifest with the exact declared visible-device count, zero skips, exact-commit identity, and exactly one successful attempt on its own positive, distinct runner ID. Keep the authority lock through publication. On success or failure, prove variables, queues, runners, VMs, disks, and capacity-side credentials are zero before re-inviting the exact prior permission and recording acceptance. The private Kaggle inventory is diagnostic only and does not satisfy this. |
 | B05 | ENG-P0-05, ENG-P0-06 | CI/merge authority | After B04 permits PR #4 to merge, repeat the currently green Python/dependency `push` workflows on final `main`. | Require exact-final-candidate green Python 3.10–3.13, direct-floor, SHAP/XGBoost edge, Captum 0.8/current, complete non-Quantus minimum partition, and explicit-import Quantus reference partition with zero skips. |
 | B06 | ENG-P1-03 | Release-CI owner | Repeat byte reproducibility on final `main`, then bind clean-tag publish bytes to that exact accepted run. | Both jobs install the same hash-locked tool graph and record matching source, Python and pip versions, platform family/architecture, tool, lock, run, attempt, image, OS, and architecture fields with distinct matrix slots, job indexes, and build identities. The comparator must prove byte-identical wheel/sdist and retain both manifests; publication must prove its distribution byte-identical to both builds before upload. |
 | B07 | ENG-P1-08, CAP-P2-05, CAP-P2-08 | Captum/CI owner | Repeat the currently green exact Captum 0.8/current five-file surface on final `main` after PR #4 merges and after every graph-integrity change. | Explicitly import Captum, execute the command in `docs/CAPTUM_SUPPORT_MATRIX.md`, and require zero skips plus analytical/parity/fail-closed graph gates before changing any supported surface. |
@@ -287,7 +318,7 @@ No actual governance record or recovery evidence exists.
 | P0 | PyPI Trusted Publisher registration is external to the repository. The `pypi` GitHub environment is protected and the workflow has no token fallback. | Register owner `jemsbhai`, repository `explainiverse`, workflow `publish-pypi.yml`, environment `pypi` in PyPI; perform a non-production OIDC preflight where PyPI supports it. | PyPI project publishing settings list that exact publisher; the next separately authorized release reports Trusted Publishing and accepts no stored API token. |
 | P0 | GitHub branch protection, immutable-tag rules, required checks, and environment reviewers are external mutable settings rather than versioned repository state. | Before every stable release, query and archive the `main` protection, `v*` tag ruleset, `pypi` environment, and required-check contexts; fail the release checklist if they differ from the reviewed policy. | A machine-readable preflight records admin enforcement, strict required checks, resolved-conversation requirement, no force-push/delete, immutable `v*` tags, the `pypi` environment's tag-only `v*` deployment rule, disabled administrator bypass, and the expected reviewer immediately before tagging. |
 | P0 | PyPI publication and the later GitHub Release creation are not one atomic transaction. A fresh full rerun after PyPI succeeds must not attempt to republish. | Retain immutable build artifacts long enough to rerun only failed downstream jobs; document an operator recovery drill. Evaluate a draft/finalize release flow only if it verifies the exact PyPI artifact hashes before reuse and never relies on unchecked `skip-existing`. | A staged failure after PyPI publication is recovered in a drill using the original attested artifacts; GitHub Release hashes equal PyPI hashes and no upload job runs twice. |
-| P0 | CUDA is not locally hardware-verified. CPU and structural all-device RNG tests cannot prove real kernels or multi-GPU restoration. | Add required single-GPU and scheduled two-GPU jobs covering adapter prediction/gradients, every gradient family, randomisation success/failure, initialized-device RNG byte identity, dtype/device placement, and hook cleanup. | All CUDA tests pass on supported Torch minimum/latest; zero unexpected CUDA skips in the release workflow. Until then registry scopes remain CPU-verified. |
+| P0 | CUDA is not release-accepted on GitHub Actions. A private diagnostic inventory found two T4 devices, but it received no repository credential or code, registered no runner, and ran no release test. CPU and structural all-device RNG tests likewise cannot prove real kernels or multi-GPU restoration. | Run the required single-GPU and scheduled two-GPU jobs through owner-locked, fresh one-job JIT runners, covering adapter prediction/gradients, every gradient family, randomisation success/failure, initialized-device RNG byte identity, dtype/device placement, and hook cleanup. | All CUDA tests pass on supported Torch minimum/latest in four exact-commit, attempt-1 Actions jobs with zero unexpected CUDA skips and distinct runner IDs. Until then registry scopes remain CPU-verified. |
 | P0 | Minimum direct dependencies and current lock are tested, but one environment cannot cover every resolver combination. | Keep Python 3.10–3.13 latest jobs, the exact Python 3.10 direct-floor job, Captum 0.8/current probes, old/new SHAP output forms, and XGBoost floor/current cases. Add a scheduled constraints matrix before widening any bound. | Every declared lower bound has a substantive public-surface test and each upper-bound change lands with a green compatibility job. |
 | P0 | Quantus 0.6 cannot coexist with the exact pandas 1.5.0 floor. Minimum CI deselects only tests carrying the registered `quantus_reference` marker; the all-extras/reference jobs own parity. | Keep pure metric contract tests importable without Quantus and make every official Quantus comparison mandatory in the reference environment. | Reference job imports Quantus explicitly and all official comparisons run with zero skips; minimum direct-floor job runs all tests not marked `quantus_reference`. |
 | P1 | Same-model state contexts serialize participating calls and restore each module's training flag, the contents/storage layout of registered buffer objects that existed on entry, existing parameter `.grad` objects/values, and Torch's default CPU/CUDA RNG. They do not snapshot arbitrary Python attributes, parameter values or rebinding, buffer rebinding, caller-owned/custom `torch.Generator` objects, Python/NumPy RNG, external libraries, subprocesses, distributed workers, or nondeterministic kernels. | **Owner: model-state workstream.** Keep a pure-forward/state-ownership contract as the default. Add explicit generator injection and an opt-in state protocol or pre/post fingerprint for models that declare additional owned state; expand value/binding restoration only where ownership and copy cost are explicit. | Adversarial modules that mutate every named exclusion either restore it exactly after success and exception or fail before returning an explanation with the unsupported mutation identified. Process/distributed probes precede any expanded claim; no gate asserts universal model-call atomicity. |

@@ -6,6 +6,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -66,7 +67,12 @@ def _source_run():
         "query_filter": "all",
         "pagination_complete": True,
         "jobs": [
-            {"name": name, "status": "completed", "conclusion": "success"}
+            {
+                "name": name,
+                "run_attempt": 1,
+                "status": "completed",
+                "conclusion": "success",
+            }
             for name in (
                 "Verify, build once, and inventory",
                 "Attest the immutable distributions",
@@ -76,6 +82,7 @@ def _source_run():
         + [
             {
                 "name": "Create the immutable GitHub release",
+                "run_attempt": 1,
                 "status": "completed",
                 "conclusion": "failure",
                 "steps": [
@@ -161,7 +168,6 @@ def test_recovery_governance_record_is_bound_to_the_exact_source_run():
         ("run", ("repository", "full_name"), "other/repository", "source run repository"),
         ("run", ("head_branch",), "v0.15.1", "source run tag"),
         ("run", ("head_sha",), "b" * 40, "source run commit"),
-        ("run", ("run_attempt",), 2, "record source run attempt"),
         ("run", ("actor", "login"), "other", "record source actor"),
         (
             "run",
@@ -182,6 +188,14 @@ def test_recovery_governance_record_rejects_cross_run_or_identity_drift(
     value[path[-1]] = replacement
     with pytest.raises(ValueError, match=match):
         _verify_governance(record, run)
+
+
+@pytest.mark.parametrize("run_attempt", [2, 0, None, True, False])
+def test_recovery_governance_record_requires_exact_integer_first_attempt(run_attempt):
+    run, _ = _source_run()
+    run["run_attempt"] = run_attempt
+    with pytest.raises(ValueError, match="source run attempt must be the integer 1"):
+        _verify_governance(_governance_record(), run)
 
 
 def test_governance_record_cli_fails_closed_on_retained_record_substitution(tmp_path):
@@ -472,6 +486,47 @@ def test_source_run_rejects_hidden_rerun_attempts_and_incomplete_pagination():
     _, jobs = _source_run()
     jobs["pagination_complete"] = False
     with pytest.raises(ValueError, match="complete pagination"):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+
+@pytest.mark.parametrize("run_attempt", [2, 0, None, True, False])
+def test_source_run_requires_exact_integer_first_attempt(run_attempt):
+    run, jobs = _source_run()
+    run["run_attempt"] = run_attempt
+    with pytest.raises(ValueError, match="source run attempt must be the integer 1"):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+
+@pytest.mark.parametrize("run_attempt", [2, 0, None, True, False])
+@pytest.mark.parametrize(
+    "job_name",
+    [
+        "Verify, build once, and inventory",
+        "Attest the immutable distributions",
+        "Publish through PyPI Trusted Publishing",
+        "Create the immutable GitHub release",
+    ],
+)
+def test_source_run_requires_exact_integer_first_attempt_for_trusted_jobs(job_name, run_attempt):
+    run, jobs = _source_run()
+    job = next(value for value in jobs["jobs"] if value["name"] == job_name)
+    job["run_attempt"] = run_attempt
+    expected_error = f"source job {job_name!r} attempt must be the integer 1"
+    with pytest.raises(ValueError, match=re.escape(expected_error)):
         recovery.verify_source_run(
             run,
             jobs,

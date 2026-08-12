@@ -1,0 +1,51 @@
+{
+  "captured_at": "2026-08-12T03:10:57.820396+00:00",
+  "github_meta_http_status": 200,
+  "hostname": "480e97e36730",
+  "nvidia_smi_inventory": {
+    "argv": [
+      "nvidia-smi",
+      "--query-gpu=index,uuid,name,driver_version,memory.total",
+      "--format=csv,noheader,nounits"
+    ],
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "0, GPU-665b7910-7d3c-2ea8-96fb-4df7e940028f, Tesla T4, 580.159.04, 15360\n1, GPU-e6fb927c-8f6f-a149-b798-cd5bcc8c2247, Tesla T4, 580.159.04, 15360"
+  },
+  "nvidia_smi_list": {
+    "argv": [
+      "nvidia-smi",
+      "-L"
+    ],
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "GPU 0: Tesla T4 (UUID: GPU-665b7910-7d3c-2ea8-96fb-4df7e940028f)\nGPU 1: Tesla T4 (UUID: GPU-e6fb927c-8f6f-a149-b798-cd5bcc8c2247)"
+  },
+  "platform": "Linux-6.12.90+-x86_64-with-glibc2.35",
+  "python": "3.12.13 (main, Mar  4 2026, 09:23:07) [GCC 11.4.0]",
+  "torch": {
+    "cuda_available": true,
+    "cuda_device_count": 2,
+    "cuda_runtime": "12.8",
+    "devices": [
+      {
+        "capability": [
+          7,
+          5
+        ],
+        "index": 0,
+        "name": "Tesla T4"
+      },
+      {
+        "capability": [
+          7,
+          5
+        ],
+        "index": 1,
+        "name": "Tesla T4"
+      }
+    ],
+    "version": "2.10.0+cu128"
+  },
+  "uid": 0
+}
