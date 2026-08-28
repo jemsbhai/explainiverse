@@ -103,6 +103,18 @@ def test_javascript_ci_publish_and_deploy_gates_run_the_high_severity_audit():
         assert workflow.index(command) < workflow.index(downstream_gate)
 
 
+def test_locked_nanoid_is_outside_the_zero_size_denial_of_service_range():
+    lock = json.loads(_read("packages/js/package-lock.json"))
+    nanoid = lock["packages"]["node_modules/nanoid"]
+    version = tuple(int(part) for part in nanoid["version"].split("."))
+
+    assert version >= (3, 3, 18)
+    assert nanoid["dev"] is True
+    assert nanoid["resolved"] == (
+        f"https://registry.npmjs.org/nanoid/-/nanoid-{nanoid['version']}.tgz"
+    )
+
+
 def test_private_javascript_tarball_and_deployment_evidence_are_fail_closed():
     package = json.loads(_read("packages/js/package.json"))
     allowlist = json.loads(_read("packages/js/npm-pack-allowlist.json"))
