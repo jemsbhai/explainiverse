@@ -29,31 +29,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  recover:
-    name: Recover downstream release without republishing
+  verify:
+    name: Verify recovery inputs without repository write authority
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
       actions: read
       attestations: read
-      contents: write
+      contents: read
     env:
       BOOTSTRAP_PIP_VERSION: "26.2.1"
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
 
     steps:
       - name: Validate recovery inputs
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          REQUIRE_STAGED_DRILL: ${{ inputs.require_staged_drill }}
+          RECOVERY_REQUEST_TEMP: ${{ runner.temp }}/explainiverse-recovery-request-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: |
-          mkdir -p recovery
-          jq -n --arg tag "$RELEASE_TAG" --arg source_run_id "$SOURCE_RUN_ID" \
-            --arg recovery_run_id "$GITHUB_RUN_ID" \
-            --arg recovery_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg actor "$GITHUB_ACTOR" \
-            --arg triggering_actor "$GITHUB_TRIGGERING_ACTOR" \
-            '{tag:$tag,source_run_id:$source_run_id,recovery_run_id:$recovery_run_id,recovery_run_attempt:$recovery_run_attempt,actor:$actor,triggering_actor:$triggering_actor}' \
-            > recovery/request.json
+          if [[ "$GITHUB_REPOSITORY" != "jemsbhai/explainiverse" || \
+                "$GITHUB_REPOSITORY_OWNER" != "jemsbhai" ]]; then
+            echo "recovery workflow must run in jemsbhai/explainiverse" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+            echo "recovery workflow requires workflow_dispatch" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                "$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER" ]]; then
+            echo "recovery actor and triggering actor must both be the repository owner" >&2
+            exit 1
+          fi
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "tag must have the form vMAJOR.MINOR.PATCH" >&2
             exit 1
@@ -67,6 +78,22 @@ jobs:
             echo "source_run_id must be a positive integer" >&2
             exit 1
           fi
+          if [[ ! "$REQUIRE_STAGED_DRILL" =~ ^(true|false)$ ]]; then
+            echo "require_staged_drill must be an exact boolean" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" = v0.15.0 && "$REQUIRE_STAGED_DRILL" != true ]]; then
+            echo "v0.15.0 recovery requires exact staged-drill evidence" >&2
+            exit 1
+          fi
+          jq -n --arg tag "$RELEASE_TAG" --arg source_run_id "$SOURCE_RUN_ID" \
+            --arg recovery_run_id "$GITHUB_RUN_ID" \
+            --arg recovery_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg triggering_actor "$GITHUB_TRIGGERING_ACTOR" \
+            --argjson require_staged_drill "$REQUIRE_STAGED_DRILL" \
+            '{tag:$tag,source_run_id:$source_run_id,require_staged_drill:$require_staged_drill,recovery_run_id:$recovery_run_id,recovery_run_attempt:$recovery_run_attempt,actor:$actor,triggering_actor:$triggering_actor}' \
+            > "$RECOVERY_REQUEST_TEMP"
 
       - name: Check out the immutable release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -74,6 +101,48 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Preserve the validated pre-checkout recovery request
+        env:
+          RECOVERY_REQUEST_TEMP: ${{ runner.temp }}/explainiverse-recovery-request-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: |
+          test -f "$RECOVERY_REQUEST_TEMP"
+          mkdir -p recovery
+          install -m 0600 "$RECOVERY_REQUEST_TEMP" recovery/request.json
+
+      - name: Verify the signed immutable recovery source before candidate code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          checkout_sha=$(git rev-parse HEAD)
+          if [[ "$checkout_sha" != "$GITHUB_SHA" ]]; then
+            echo "checked-out recovery commit differs from GITHUB_SHA" >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "$RELEASE_TAG")" != tag ]]; then
+            echo "recovery ref must resolve to an annotated tag object" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$RELEASE_TAG^{commit}")" != "$checkout_sha" ]]; then
+            echo "annotated recovery tag must peel to the checked-out commit" >&2
+            exit 1
+          fi
+          tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
+          if [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.verification.verified')" != true ]]; then
+            echo "annotated recovery tag must have GitHub-verified signature evidence" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "recovery commit must be an ancestor of current origin/main" >&2
+            exit 1
+          fi
+          release_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml)
+          if [[ "$release_version" != "${RELEASE_TAG#v}" ]]; then
+            echo "recovery tag and pyproject version differ" >&2
+            exit 1
+          fi
 
       - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -85,7 +154,7 @@ jobs:
       - name: Bind the recovery execution to the immutable release tag
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-        run: python scripts/validate_release_attestation_context.py
+        run: env -u GH_TOKEN -u GITHUB_TOKEN python scripts/validate_release_attestation_context.py
 
       - name: Install the hash-locked recovery and provenance verifier
         run: |
@@ -104,7 +173,7 @@ jobs:
           test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
           tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.verification.verified')" = true
-          git fetch origin main --no-tags
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor HEAD origin/main
           python - <<'PY'
           import os
@@ -135,12 +204,13 @@ jobs:
           if [[ "$REQUIRE_STAGED_DRILL" = true ]]; then
             drill_args+=(--require-staged-drill)
           fi
-          python scripts/verify_release_recovery.py source-run \
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/verify_release_recovery.py source-run \
             --run-json recovery/source-run.json \
             --jobs-json recovery/source-jobs.json \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --commit "$(git rev-parse HEAD)" \
+            --normalized-output recovery/verified-source.json \
             "${drill_args[@]}"
 
       - name: Download only the original retained artifacts
@@ -160,7 +230,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
-          python scripts/verify_release_recovery.py governance-record \
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/verify_release_recovery.py governance-record \
             --record-json provenance/RELEASE_GOVERNANCE.json \
             --run-json recovery/source-run.json \
             --repository "$GITHUB_REPOSITORY" \
@@ -198,13 +268,13 @@ jobs:
           curl --fail --location --proto '=https' --tlsv1.2 \
             "https://pypi.org/pypi/explainiverse/$version/json" \
             --output recovery/pypi.json
-          python scripts/verify_release_recovery.py artifacts \
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/verify_release_recovery.py artifacts \
             --sums provenance/SHA256SUMS \
             --dist dist \
             --pypi-json recovery/pypi.json \
             --project explainiverse \
             --tag "$RELEASE_TAG"
-          python scripts/verify_pypi_provenance.py \
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/verify_pypi_provenance.py \
             --pypi-json recovery/pypi.json \
             --sums provenance/SHA256SUMS \
             --project explainiverse \
@@ -225,60 +295,711 @@ jobs:
               | tee "recovery/pypi-provenance/$filename.cryptographic-verification.txt"
           done
 
-      - name: Create or inspect a recovery draft
+      - name: Create the exact verified downstream release-asset bundle
+        run: |
+          mkdir -p recovery/release-assets
+          for asset in dist/* provenance/*; do
+            test -f "$asset"
+            test ! -L "$asset"
+            name=$(basename "$asset")
+            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+              echo "unsafe release asset name: $name" >&2
+              exit 1
+            fi
+            if [[ -e "recovery/release-assets/$name" || \
+                  -L "recovery/release-assets/$name" ]]; then
+              echo "duplicate release asset name: $name" >&2
+              exit 1
+            fi
+            install -m 0600 "$asset" "recovery/release-assets/$name"
+          done
+          (cd recovery/release-assets && sha256sum ./* | sort) \
+            > recovery/release-assets.sha256
+          (cd recovery/release-assets && \
+            sha256sum --check ../release-assets.sha256 && \
+            sha256sum --check SHA256SUMS)
+
+      - name: Archive complete or partial recovery evidence for fixed mutation
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-recovery-verified-inputs-${{ github.run_attempt }}
+          path: recovery/
+          if-no-files-found: error
+          retention-days: 90
+
+  recover:
+    name: Recover downstream release without republishing
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+
+    steps:
+      - name: Revalidate recovery authority and the exact verified artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          REQUIRE_STAGED_DRILL: ${{ inputs.require_staged_drill }}
+          ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact-digest }}
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "jemsbhai/explainiverse" || \
+                "$GITHUB_REPOSITORY_OWNER" != "jemsbhai" || \
+                "$GITHUB_EVENT_NAME" != "workflow_dispatch" || \
+                "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                "$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER" ]]; then
+            echo "fixed recovery mutation authority check failed" >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || \
+                "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" || \
+                ! "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ || \
+                ! "$REQUIRE_STAGED_DRILL" =~ ^(true|false)$ || \
+                ! "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ || \
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || \
+                ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ || \
+                ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "fixed recovery mutation input check failed" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" = v0.15.0 && "$REQUIRE_STAGED_DRILL" != true ]]; then
+            echo "v0.15.0 fixed recovery requires exact staged-drill evidence" >&2
+            exit 1
+          fi
+
+          artifact_name="release-recovery-verified-inputs-$GITHUB_RUN_ATTEMPT"
+          artifact_metadata="$RUNNER_TEMP/recovery-artifact-$ARTIFACT_ID.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+            > "$artifact_metadata"
+          jq -e --argjson id "$ARTIFACT_ID" --argjson run "$GITHUB_RUN_ID" \
+            --arg name "$artifact_name" --arg digest "sha256:$ARTIFACT_DIGEST" \
+            '.id == $id and .name == $name and .expired == false and \
+             .workflow_run.id == $run and .digest == $digest' \
+            "$artifact_metadata" > /dev/null
+
+          archive="$RUNNER_TEMP/recovery-verified-$ARTIFACT_ID.zip"
+          curl --fail-with-body --silent --show-error --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$archive" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip"
+          actual_digest=$(sha256sum "$archive")
+          actual_digest=${actual_digest%% *}
+          test "$actual_digest" = "$ARTIFACT_DIGEST"
+          entries=$(unzip -Z1 "$archive")
+          test -n "$entries"
+          test -z "$(sort <<< "$entries" | uniq -d)"
+          while IFS= read -r entry; do
+            if [[ ! "$entry" =~ ^[A-Za-z0-9][A-Za-z0-9._+/-]*$ || \
+                  "$entry" == *"//"* || "$entry" == *"/../"* || \
+                  "$entry" == */.. || "$entry" == *"/./"* || \
+                  "$entry" == */. ]]; then
+              echo "unsafe verified recovery archive entry: $entry" >&2
+              exit 1
+            fi
+          done <<< "$entries"
+          mkdir recovery
+          unzip -q "$archive" -d recovery
+          rm "$archive"
+          test -z "$(find recovery -mindepth 1 ! -type f ! -type d -print -quit)"
+          install -m 0600 "$artifact_metadata" recovery/verified-artifact-metadata.json
+
+          jq -e --arg tag "$RELEASE_TAG" --arg source "$SOURCE_RUN_ID" \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg owner "$GITHUB_REPOSITORY_OWNER" \
+            --argjson drill "$REQUIRE_STAGED_DRILL" \
+            '.tag == $tag and .source_run_id == $source and \
+             .require_staged_drill == $drill and \
+             .recovery_run_id == $run and .recovery_run_attempt == $attempt and \
+             .actor == $owner and .triggering_actor == $owner' \
+            recovery/request.json > /dev/null
+
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+            > recovery/mutation-tag-ref.json
+          jq -e '.object.type == "tag"' recovery/mutation-tag-ref.json > /dev/null
+          tag_object=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+            recovery/mutation-tag-ref.json)
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+            > recovery/mutation-tag-object.json
+          jq -e '.verification.verified == true and .object.type == "commit"' \
+            recovery/mutation-tag-object.json > /dev/null
+          release_commit=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+            recovery/mutation-tag-object.json)
+          test "$release_commit" = "$GITHUB_SHA"
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+            > recovery/live-source-run.json
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" \
+            --jq '.jobs[]' \
+            | jq -s '{query_filter:"all",pagination_complete:true,jobs:.}' \
+            > recovery/live-source-jobs.json
+          jq -S \
+            '{id,run_attempt,actor:.actor.login,triggering_actor:.triggering_actor.login,
+              repository:.repository.full_name,path,event,head_sha,head_branch,status,conclusion}' \
+            recovery/source-run.json > recovery/archived-source-run.canonical.json
+          jq -S \
+            '{id,run_attempt,actor:.actor.login,triggering_actor:.triggering_actor.login,
+              repository:.repository.full_name,path,event,head_sha,head_branch,status,conclusion}' \
+            recovery/live-source-run.json > recovery/live-source-run.canonical.json
+          cmp recovery/archived-source-run.canonical.json \
+            recovery/live-source-run.canonical.json
+          jq -S \
+            '{query_filter,pagination_complete,jobs:
+              ([.jobs[] | {id,run_id,name,head_sha,run_attempt,status,conclusion,
+                steps:[(.steps // [])[] | {name,number,status,conclusion}]}] | sort_by(.id))}' \
+            recovery/source-jobs.json > recovery/archived-source-jobs.canonical.json
+          jq -S \
+            '{query_filter,pagination_complete,jobs:
+              ([.jobs[] | {id,run_id,name,head_sha,run_attempt,status,conclusion,
+                steps:[(.steps // [])[] | {name,number,status,conclusion}]}] | sort_by(.id))}' \
+            recovery/live-source-jobs.json > recovery/live-source-jobs.canonical.json
+          cmp recovery/archived-source-jobs.canonical.json \
+            recovery/live-source-jobs.canonical.json
+
+          jq -e --argjson source "$SOURCE_RUN_ID" --arg tag "$RELEASE_TAG" \
+            --arg commit "$release_commit" --arg repository "$GITHUB_REPOSITORY" \
+            '.id == $source and .run_attempt == 1 and \
+             .repository.full_name == $repository and \
+             .path == ".github/workflows/publish-pypi.yml" and \
+             .event == "workflow_dispatch" and .head_branch == $tag and \
+             .head_sha == $commit and .status == "completed" and \
+             .conclusion == "failure"' recovery/live-source-run.json > /dev/null
+
+          successful_jobs=(
+            "Verify, build once, and inventory"
+            "Attest the immutable distributions"
+            "Publish through PyPI Trusted Publishing"
+          )
+          for job_name in "${successful_jobs[@]}"; do
+            test "$(jq --arg name "$job_name" \
+              '[.jobs[] | select(.name == $name)] | length' \
+              recovery/live-source-jobs.json)" -eq 1
+            jq -e --arg name "$job_name" --argjson source "$SOURCE_RUN_ID" \
+              --arg commit "$release_commit" \
+              '[.jobs[] | select(.name == $name)][0] |
+               .run_id == $source and .head_sha == $commit and .run_attempt == 1 and
+               .status == "completed" and .conclusion == "success"' \
+              recovery/live-source-jobs.json > /dev/null
+          done
+          release_job="Create the immutable GitHub release"
+          finalizer_job="Finalize the immutable GitHub release with fixed commands"
+          for job_name in "$release_job" "$finalizer_job"; do
+            test "$(jq --arg name "$job_name" \
+              '[.jobs[] | select(.name == $name)] | length' \
+              recovery/live-source-jobs.json)" -eq 1
+            jq -e --arg name "$job_name" --argjson source "$SOURCE_RUN_ID" \
+              --arg commit "$release_commit" \
+              '[.jobs[] | select(.name == $name)][0] |
+               .run_id == $source and .head_sha == $commit and .run_attempt == 1' \
+              recovery/live-source-jobs.json > /dev/null
+          done
+
+          stage="Stage an explicitly requested post-PyPI recovery drill"
+          test "$(jq --arg job "$release_job" --arg step "$stage" \
+            '[.jobs[] | select(.name == $job)][0].steps |
+             [.[] | select(.name == $step)] | length' \
+            recovery/live-source-jobs.json)" -eq 1
+          stage_conclusion=$(jq -er --arg job "$release_job" --arg step "$stage" \
+            '[.jobs[] | select(.name == $job)][0].steps |
+             [.[] | select(.name == $step and .status == "completed")][0].conclusion |
+             select(. == "failure" or . == "skipped")' \
+            recovery/live-source-jobs.json)
+
+          if [[ "$stage_conclusion" = failure ]]; then
+            jq -e --arg release "$release_job" --arg finalizer "$finalizer_job" \
+              '[.jobs[] | select(.name == $release)][0] |
+                 .status == "completed" and .conclusion == "failure"' \
+              recovery/live-source-jobs.json > /dev/null
+            jq -e --arg finalizer "$finalizer_job" \
+              '[.jobs[] | select(.name == $finalizer)][0] |
+                 .status == "completed" and .conclusion == "skipped"' \
+              recovery/live-source-jobs.json > /dev/null
+            stage_number=$(jq -er --arg job "$release_job" --arg step "$stage" \
+              '[.jobs[] | select(.name == $job)][0].steps |
+               [.[] | select(.name == $step)][0].number' \
+              recovery/live-source-jobs.json)
+            expected_later=$(printf '%s\n' \
+              "Check out the immutable release tag for final verification" \
+              "Verify signed immutable release source before candidate code" \
+              "Set up Python 3.12 for provenance verification" \
+              "Pin the provenance verifier installer" \
+              "Install the hash-locked provenance verifier" \
+              "Download and hard-verify the exact release artifacts" \
+              "Verify release assets against reviewed hashes and PyPI provenance" \
+              "Prepare the exact fixed-command GitHub Release plan" \
+              "Archive the fixed normal-release plan" \
+              "Complete job" | sort)
+            actual_later=$(jq -r --arg job "$release_job" --argjson number "$stage_number" \
+              '[.jobs[] | select(.name == $job)][0].steps[] |
+               select(.number > $number) | .name' \
+              recovery/live-source-jobs.json | sort)
+            test "$actual_later" = "$expected_later"
+            jq -e --arg job "$release_job" --argjson number "$stage_number" \
+              '[.jobs[] | select(.name == $job)][0].steps |
+               all(.[] | select(.number > $number);
+                 if .name == "Complete job" then .conclusion == "success"
+                  else .conclusion == "skipped" end)' \
+              recovery/live-source-jobs.json > /dev/null
+            live_source_kind=staged_drill
+          else
+            jq -e --arg release "$release_job" --arg finalizer "$finalizer_job" \
+              '([.jobs[] | select(.name == $release)][0] |
+                  .status == "completed" and .conclusion == "success") and
+               ([.jobs[] | select(.name == $finalizer)][0] |
+                  .status == "completed" and .conclusion == "failure" and
+                  any((.steps // [])[];
+                    .status == "completed" and .conclusion == "failure"))' \
+              recovery/live-source-jobs.json > /dev/null
+            live_source_kind=unplanned_downstream_failure
+          fi
+
+          source_kind=$(jq -er '.source_kind |
+            select(. == "staged_drill" or . == "unplanned_downstream_failure")' \
+            recovery/verified-source.json)
+          test "$source_kind" = "$live_source_kind"
+          if [[ "$REQUIRE_STAGED_DRILL" = true ]]; then
+            test "$live_source_kind" = staged_drill
+          fi
+          jq -n --arg kind "$live_source_kind" \
+            --slurpfile run recovery/live-source-run.json \
+            --slurpfile evidence recovery/live-source-jobs.json '
+              $run[0] as $r | $evidence[0] as $e |
+              {schema_version:1,source_kind:$kind,query_filter:"all",
+               pagination_complete:true,
+               run:{id:$r.id,repository:$r.repository.full_name,path:$r.path,
+                 event:$r.event,head_branch:$r.head_branch,head_sha:$r.head_sha,
+                 status:$r.status,conclusion:$r.conclusion,run_attempt:$r.run_attempt},
+               trusted_jobs:
+                 (([$e.jobs[] | select(
+                     .name == "Verify, build once, and inventory" or
+                     .name == "Attest the immutable distributions" or
+                     .name == "Publish through PyPI Trusted Publishing") |
+                    {id,run_id,name,head_sha,status,conclusion,run_attempt}] |
+                    sort_by(.name)) +
+                  [$e.jobs[] | select(.name == "Create the immutable GitHub release") |
+                    {id,run_id,name,head_sha,status,conclusion,run_attempt}] +
+                  [$e.jobs[] | select(
+                    .name == "Finalize the immutable GitHub release with fixed commands") |
+                    {id,run_id,name,head_sha,status,conclusion,run_attempt}])}' \
+            > recovery/live-verified-source.json
+          jq -S . recovery/verified-source.json \
+            > recovery/archived-verified-source.canonical.json
+          jq -S . recovery/live-verified-source.json \
+            > recovery/live-verified-source.canonical.json
+          cmp recovery/archived-verified-source.canonical.json \
+            recovery/live-verified-source.canonical.json
+
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[]' \
+            | jq -s '{pagination_complete:true,artifacts:.}' \
+            > recovery/live-source-artifacts.json
+
+          download_source_artifact() {
+            local label=$1
+            local expected_name=$2
+            local destination=$3
+            local metadata="recovery/live-source-$label-artifact.json"
+            test "$(jq --arg name "$expected_name" \
+              '[.artifacts[] | select(.name == $name)] | length' \
+              recovery/live-source-artifacts.json)" -eq 1
+            jq -e --arg name "$expected_name" --argjson run "$SOURCE_RUN_ID" \
+              --arg head "$release_commit" \
+              '[.artifacts[] | select(.name == $name)][0] |
+               .id > 0 and .name == $name and .expired == false and .size_in_bytes > 0 and
+               .workflow_run.id == $run and .workflow_run.head_sha == $head and
+               (.digest | test("^sha256:[0-9a-f]{64}$"))' \
+              recovery/live-source-artifacts.json > /dev/null
+            jq --arg name "$expected_name" \
+              '[.artifacts[] | select(.name == $name)][0]' \
+              recovery/live-source-artifacts.json > "$metadata"
+
+            local artifact_id artifact_digest archive actual_digest entries
+            artifact_id=$(jq -er '.id' "$metadata")
+            artifact_digest=$(jq -er '.digest | sub("^sha256:"; "")' "$metadata")
+            archive="$RUNNER_TEMP/source-$label-$artifact_id.zip"
+            curl --fail-with-body --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$archive" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+            actual_digest=$(sha256sum "$archive")
+            actual_digest=${actual_digest%% *}
+            test "$actual_digest" = "$artifact_digest"
+            entries=$(unzip -Z1 "$archive")
+            test -n "$entries"
+            if grep -Ev '^[A-Za-z0-9][A-Za-z0-9._+-]*$' <<< "$entries" | grep -q .; then
+              echo "$label source artifact contains an unsafe entry" >&2
+              return 1
+            fi
+            test -z "$(sort <<< "$entries" | uniq -d)"
+            mkdir "$destination"
+            unzip -q "$archive" -d "$destination"
+            rm "$archive"
+            test -z "$(find "$destination" -mindepth 1 ! -type f -print -quit)"
+          }
+
+          download_source_artifact distributions release-distributions \
+            recovery/source-distributions
+          download_source_artifact provenance release-provenance \
+            recovery/source-provenance
+
+          version=${RELEASE_TAG#v}
+          expected_distributions=$(printf '%s\n' \
+            "explainiverse-$version-py3-none-any.whl" \
+            "explainiverse-$version.tar.gz" | sort)
+          actual_distributions=$(find recovery/source-distributions \
+            -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$actual_distributions" = "$expected_distributions"
+          expected_provenance=$(printf '%s\n' \
+            RELEASE_GOVERNANCE.json \
+            RELEASE_GOVERNANCE.md \
+            SHA256SUMS \
+            accepted-reproducibility-distributions.json \
+            accepted-reproducibility-environment-comparison.json \
+            accepted-reproducibility-environment-one.json \
+            accepted-reproducibility-environment-two.json \
+            admin-capture.json \
+            admin-capture.json.sha256 \
+            bound-reproducibility-distributions.json \
+            bound-reproducibility-environment.json \
+            cuda-evidence.sha256 \
+            cuda-jobs.json \
+            cuda-run.json \
+            explainiverse-build.cdx.json \
+            external-controls.json \
+            external-controls.json.sha256 \
+            preflight-source-run.json \
+            publish-vs-reproducibility-one.json \
+            publish-vs-reproducibility-two.json \
+            release-environment.json \
+            reproducibility-expected-run.json \
+            reproducibility-source-run.json | sort)
+          actual_provenance=$(find recovery/source-provenance \
+            -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$actual_provenance" = "$expected_provenance"
+
+          mkdir recovery/source-release-assets
+          for asset in recovery/source-distributions/* recovery/source-provenance/*; do
+            test -f "$asset"
+            test ! -L "$asset"
+            name=$(basename "$asset")
+            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+              echo "unsafe source release asset name: $name" >&2
+              exit 1
+            fi
+            if [[ -e "recovery/source-release-assets/$name" || \
+                  -L "recovery/source-release-assets/$name" ]]; then
+              echo "duplicate source release asset name: $name" >&2
+              exit 1
+            fi
+            install -m 0600 "$asset" "recovery/source-release-assets/$name"
+          done
+          (cd recovery/source-release-assets && sha256sum ./* | sort) \
+            > recovery/source-release-assets.sha256
+          cmp recovery/source-release-assets.sha256 recovery/release-assets.sha256
+          (cd recovery/source-release-assets && \
+            sha256sum --check ../source-release-assets.sha256 && \
+            sha256sum --check SHA256SUMS)
+
+          jq -e --arg source "$SOURCE_RUN_ID" --arg tag "$RELEASE_TAG" \
+            --arg commit "$release_commit" --arg repository "$GITHUB_REPOSITORY" \
+            --arg owner "$GITHUB_REPOSITORY_OWNER" \
+            '.schema_version == 1 and .release.repository == $repository and \
+             .release.tag == $tag and .release.commit == $commit and \
+             (.evidence.release_workflow_run_id | tostring) == $source and \
+              .evidence.release_workflow_run_url == \
+                ("https://github.com/" + $repository + "/actions/runs/" + $source) and \
+              .governance.release_dispatch_actor == $owner and \
+              .governance.release_triggering_actor == $owner and \
+              .governance.capture_principal == $owner and \
+              (.governance.release_run_attempt | tostring) == "1"' \
+            recovery/source-release-assets/RELEASE_GOVERNANCE.json > /dev/null
+
+          gh api "repos/$GITHUB_REPOSITORY/compare/$release_commit...main" \
+            > recovery/mutation-main-ancestry.json
+          jq -e --arg commit "$release_commit" \
+            '.base_commit.sha == $commit and .merge_base_commit.sha == $commit and \
+             (.status == "ahead" or .status == "identical")' \
+            recovery/mutation-main-ancestry.json > /dev/null
+
+      - name: Recheck the fixed approved asset bundle and current PyPI bytes
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
+          test -f recovery/source-release-assets.sha256
+          test ! -L recovery/source-release-assets.sha256
+          if grep -Ev '^[0-9a-f]{64}  \./[A-Za-z0-9][A-Za-z0-9._+-]*$' \
+              recovery/source-release-assets.sha256 | grep -q .; then
+            echo "release asset manifest is malformed" >&2
+            exit 1
+          fi
+          expected=$(sed -E 's/^[0-9a-f]{64}  //' \
+            recovery/source-release-assets.sha256 | sort)
+          actual=$(find recovery/source-release-assets -mindepth 1 -maxdepth 1 -type f \
+            -printf './%f\n' | sort)
+          test "$actual" = "$expected"
+          test -z "$(find recovery/source-release-assets -mindepth 1 -maxdepth 1 \
+            ! -type f -print -quit)"
+          (cd recovery/source-release-assets && \
+            sha256sum --check ../source-release-assets.sha256 && \
+            sha256sum --check SHA256SUMS)
+          test -f recovery/source-release-assets/RELEASE_GOVERNANCE.md
+
+          version=${RELEASE_TAG#v}
+          expected_distributions=$(printf '%s\n' \
+            "explainiverse-$version-py3-none-any.whl" \
+            "explainiverse-$version.tar.gz" | sort)
+          if grep -Ev '^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._+-]*$' \
+              recovery/source-release-assets/SHA256SUMS | grep -q .; then
+            echo "distribution hash manifest is malformed" >&2
+            exit 1
+          fi
+          distribution_names=$(sed -E 's/^[0-9a-f]{64}  //' \
+            recovery/source-release-assets/SHA256SUMS | sort)
+          test "$distribution_names" = "$expected_distributions"
+          while read -r _ filename; do
+            gh attestation verify "recovery/source-release-assets/$filename" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/publish-pypi.yml@refs/tags/$RELEASE_TAG"
+          done < recovery/source-release-assets/SHA256SUMS
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            "https://pypi.org/pypi/explainiverse/$version/json" \
+            --output recovery/pre-mutation-pypi.json
+          test "$(jq -r '.info.name | ascii_downcase | gsub("-"; "_")' \
+            recovery/pre-mutation-pypi.json)" = explainiverse
+          test "$(jq -r '.info.version' recovery/pre-mutation-pypi.json)" = "$version"
+          expected_pypi=$(sort recovery/source-release-assets/SHA256SUMS)
+          actual_pypi=$(jq -r '.urls[] | "\(.digests.sha256)  \(.filename)"' \
+            recovery/pre-mutation-pypi.json | sort)
+          test "$actual_pypi" = "$expected_pypi"
+
+      - name: Create or inspect a recovery draft using fixed commands only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          disclosure=$(< recovery/source-release-assets/RELEASE_GOVERNANCE.md)
+          test -n "$disclosure"
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --json body,isDraft,isPrerelease,url > recovery/github-release.json
           else
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              > recovery/pre-create-tag-ref.json
+            tag_object=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+              recovery/pre-create-tag-ref.json)
+            test "$(jq -r '.object.type' recovery/pre-create-tag-ref.json)" = tag
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+              > recovery/pre-create-tag-object.json
+            jq -e --arg commit "$GITHUB_SHA" \
+              '.verification.verified == true and .object.type == "commit" and \
+               .object.sha == $commit' recovery/pre-create-tag-object.json > /dev/null
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+              > recovery/pre-create-source-run.json
+            jq -e --argjson source "$SOURCE_RUN_ID" --arg tag "$RELEASE_TAG" \
+              --arg commit "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
+              '.id == $source and .run_attempt == 1 and \
+               .repository.full_name == $repository and \
+               .path == ".github/workflows/publish-pypi.yml" and \
+               .event == "workflow_dispatch" and .head_branch == $tag and \
+               .head_sha == $commit and .status == "completed" and \
+               .conclusion == "failure"' \
+              recovery/pre-create-source-run.json > /dev/null
+            version=${RELEASE_TAG#v}
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              "https://pypi.org/pypi/explainiverse/$version/json" \
+              --output recovery/pre-create-pypi.json
+            expected_pypi=$(sort recovery/source-release-assets/SHA256SUMS)
+            actual_pypi=$(jq -r '.urls[] | "\(.digests.sha256)  \(.filename)"' \
+              recovery/pre-create-pypi.json | sort)
+            test "$actual_pypi" = "$expected_pypi"
+            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              > recovery/pre-create-immutable-releases.json
+            jq -e '.enabled == true' \
+              recovery/pre-create-immutable-releases.json > /dev/null
+            gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" \
+              > recovery/pre-create-main-ancestry.json
+            jq -e --arg commit "$GITHUB_SHA" \
+              '.base_commit.sha == $commit and .merge_base_commit.sha == $commit and \
+               (.status == "ahead" or .status == "identical")' \
+              recovery/pre-create-main-ancestry.json > /dev/null
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "GitHub Release appeared during the recovery create audit" >&2
+              exit 1
+            fi
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
               --verify-tag --draft --generate-notes \
-              --notes-file provenance/RELEASE_GOVERNANCE.md \
+              --notes-file recovery/source-release-assets/RELEASE_GOVERNANCE.md \
               --title "Explainiverse $RELEASE_TAG"
             gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --json body,isDraft,isPrerelease,url > recovery/github-release.json
           fi
           test "$(jq -r '.isPrerelease' recovery/github-release.json)" = false
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          release = json.loads(Path("recovery/github-release.json").read_text(encoding="utf-8"))
-          disclosure = Path("provenance/RELEASE_GOVERNANCE.md").read_text(encoding="utf-8").strip()
-          if disclosure not in release.get("body", ""):
-              raise SystemExit("recovery draft omitted the original governance disclosure")
-          PY
+          body=$(jq -er '.body | select(type == "string")' recovery/github-release.json)
+          if [[ -z "$disclosure" || "$body" != *"$disclosure"* ]]; then
+            echo "recovery draft omitted the original governance disclosure" >&2
+            exit 1
+          fi
 
       - name: Reuse matching assets and upload only missing downstream assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
-          is_draft=$(python -c "import json; print(str(json.load(open('recovery/github-release.json', encoding='utf-8'))['isDraft']).lower())")
-          mkdir -p recovery/existing-assets
-          asset_count=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
-          if [[ "$asset_count" -gt 0 ]]; then
-            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-              --dir recovery/existing-assets
-          fi
-          for asset in dist/* provenance/*; do
-            name=$(basename "$asset")
-            existing="recovery/existing-assets/$name"
-            if [[ -f "$existing" ]]; then
-              test "$(sha256sum "$asset" | cut -d' ' -f1)" = "$(sha256sum "$existing" | cut -d' ' -f1)"
-            else
-              if [[ "$is_draft" != true ]]; then
-                echo "published GitHub Release is missing original asset $name" >&2
-                exit 1
+          download_release_asset() {
+            local artifact_id=$1
+            local destination=$2
+            if [[ ! "$artifact_id" =~ ^[1-9][0-9]*$ ]]; then
+              echo "GitHub Release asset identity is malformed" >&2
+              return 1
+            fi
+            curl --fail-with-body --silent --show-error --location \
+              --header "Accept: application/octet-stream" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$destination" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$artifact_id"
+          }
+
+          audit_release_asset_subset() {
+            local release_json=$1
+            jq -e '.draft == true and .prerelease == false and \
+              ([.assets[].name] | length) == ([.assets[].name] | unique | length) and \
+              all(.assets[]; .id > 0 and .state == "uploaded" and \
+                (.name | test("^[A-Za-z0-9][A-Za-z0-9._+-]*$")) and \
+                (.digest | test("^sha256:[0-9a-f]{64}$")))' \
+              "$release_json" > /dev/null
+            local disclosure body
+            disclosure=$(< recovery/source-release-assets/RELEASE_GOVERNANCE.md)
+            body=$(jq -er '.body | select(type == "string")' "$release_json")
+            if [[ -z "$disclosure" || "$body" != *"$disclosure"* ]]; then
+              echo "recovery draft disclosure changed before asset mutation" >&2
+              return 1
+            fi
+            while IFS=$'\t' read -r live_name live_digest; do
+              local expected_hash
+              expected_hash=$(awk -v path="./$live_name" '$2 == path {print $1}' \
+                recovery/source-release-assets.sha256)
+              if [[ ! "$expected_hash" =~ ^[0-9a-f]{64}$ || \
+                    "$live_digest" != "sha256:$expected_hash" ]]; then
+                echo "existing draft asset is outside the approved source bundle: $live_name" >&2
+                return 1
               fi
+            done < <(jq -r '.assets[] | [.name,.digest] | @tsv' "$release_json")
+          }
+
+          for asset in recovery/source-release-assets/*; do
+            name=$(basename "$asset")
+            release_json="recovery/pre-upload-$name-release.json"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              -H "X-GitHub-Api-Version: 2026-03-10" > "$release_json"
+            audit_release_asset_subset "$release_json"
+            matches=$(jq --arg name "$name" \
+              '[.assets[] | select(.name == $name)] | length' "$release_json")
+            if [[ "$matches" -eq 1 ]]; then
+              existing="$RUNNER_TEMP/existing-release-asset-$name"
+              existing_id=$(jq -er --arg name "$name" \
+                '[.assets[] | select(.name == $name)][0].id' "$release_json")
+              download_release_asset "$existing_id" "$existing"
+              test "$(sha256sum "$asset" | cut -d' ' -f1)" = \
+                "$(sha256sum "$existing" | cut -d' ' -f1)"
+              rm "$existing"
+            elif [[ "$matches" -eq 0 ]]; then
+              gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+                > "recovery/pre-upload-$name-tag-ref.json"
+              tag_object=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+                "recovery/pre-upload-$name-tag-ref.json")
+              test "$(jq -r '.object.type' \
+                "recovery/pre-upload-$name-tag-ref.json")" = tag
+              gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+                > "recovery/pre-upload-$name-tag-object.json"
+              jq -e --arg commit "$GITHUB_SHA" \
+                '.verification.verified == true and .object.type == "commit" and \
+                 .object.sha == $commit' \
+                "recovery/pre-upload-$name-tag-object.json" > /dev/null
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+                > "recovery/pre-upload-$name-source-run.json"
+              jq -e --argjson source "$SOURCE_RUN_ID" --arg tag "$RELEASE_TAG" \
+                --arg commit "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
+                '.id == $source and .run_attempt == 1 and \
+                 .repository.full_name == $repository and \
+                 .path == ".github/workflows/publish-pypi.yml" and \
+                 .event == "workflow_dispatch" and .head_branch == $tag and \
+                 .head_sha == $commit and .status == "completed" and \
+                 .conclusion == "failure"' \
+                "recovery/pre-upload-$name-source-run.json" > /dev/null
+              version=${RELEASE_TAG#v}
+              curl --fail --location --proto '=https' --tlsv1.2 \
+                --retry 12 --retry-delay 5 --retry-all-errors \
+                "https://pypi.org/pypi/explainiverse/$version/json" \
+                --output "recovery/pre-upload-$name-pypi.json"
+              expected_pypi=$(sort recovery/source-release-assets/SHA256SUMS)
+              actual_pypi=$(jq -r '.urls[] | "\(.digests.sha256)  \(.filename)"' \
+                "recovery/pre-upload-$name-pypi.json" | sort)
+              test "$actual_pypi" = "$expected_pypi"
+              gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" \
+                > "recovery/pre-upload-$name-main-ancestry.json"
+              jq -e --arg commit "$GITHUB_SHA" \
+                '.base_commit.sha == $commit and .merge_base_commit.sha == $commit and \
+                 (.status == "ahead" or .status == "identical")' \
+                "recovery/pre-upload-$name-main-ancestry.json" > /dev/null
+              gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                > "recovery/pre-upload-$name-immutable-releases.json"
+              jq -e '.enabled == true' \
+                "recovery/pre-upload-$name-immutable-releases.json" > /dev/null
+
+              immediate_release_json="recovery/immediate-pre-upload-$name-release.json"
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                > "$immediate_release_json"
+              audit_release_asset_subset "$immediate_release_json"
+              test "$(jq --arg name "$name" \
+                '[.assets[] | select(.name == $name)] | length' \
+                "$immediate_release_json")" -eq 0
+
               gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                > "recovery/post-upload-$name-release.json"
+              audit_release_asset_subset "recovery/post-upload-$name-release.json"
+              test "$(jq --arg name "$name" \
+                '[.assets[] | select(.name == $name)] | length' \
+                "recovery/post-upload-$name-release.json")" -eq 1
+              uploaded_id=$(jq -er --arg name "$name" \
+                '[.assets[] | select(.name == $name)][0].id' \
+                "recovery/post-upload-$name-release.json")
+              uploaded="$RUNNER_TEMP/uploaded-release-asset-$name"
+              download_release_asset "$uploaded_id" "$uploaded"
+              test "$(sha256sum "$asset" | cut -d' ' -f1)" = \
+                "$(sha256sum "$uploaded" | cut -d' ' -f1)"
+              rm "$uploaded"
+            else
+              echo "GitHub Release has duplicate assets named $name" >&2
+              exit 1
             fi
           done
 
-      - name: Verify GitHub distribution hashes equal PyPI before finalizing
+      - name: Verify every draft asset before finalizing
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -286,31 +1007,181 @@ jobs:
           mkdir -p recovery/verified-release-assets
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir recovery/verified-release-assets
-          python scripts/verify_release_recovery.py artifacts \
-            --sums provenance/SHA256SUMS \
-            --dist dist \
-            --pypi-json recovery/pypi.json \
-            --project explainiverse \
-            --tag "$RELEASE_TAG" \
-            --github-assets recovery/verified-release-assets \
-            --provenance provenance
+          expected=$(sed -E 's/^[0-9a-f]{64}  //' \
+            recovery/source-release-assets.sha256 | sort)
+          actual=$(find recovery/verified-release-assets -mindepth 1 -maxdepth 1 \
+            -type f -printf './%f\n' | sort)
+          test "$actual" = "$expected"
+          (cd recovery/verified-release-assets && \
+            sha256sum --check ../source-release-assets.sha256)
 
       - name: Finalize the verified draft without any PyPI upload
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
-          is_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            > recovery/pre-finalize-release.json
+          is_draft=$(jq -r '.draft' recovery/pre-finalize-release.json)
           if [[ "$is_draft" = true ]]; then
+            jq -e '.draft == true and .prerelease == false' \
+              recovery/pre-finalize-release.json > /dev/null
+            disclosure=$(< recovery/source-release-assets/RELEASE_GOVERNANCE.md)
+            body=$(jq -er '.body | select(type == "string")' \
+              recovery/pre-finalize-release.json)
+            if [[ -z "$disclosure" || "$body" != *"$disclosure"* ]]; then
+              echo "recovery draft disclosure changed before finalization" >&2
+              exit 1
+            fi
+            expected_names=$(sed -E 's/^[0-9a-f]{64}  \.\///' \
+              recovery/source-release-assets.sha256 | sort)
+            live_names=$(jq -r '.assets[].name' \
+              recovery/pre-finalize-release.json | sort)
+            test "$live_names" = "$expected_names"
+            mkdir recovery/pre-finalize-release-assets
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --dir recovery/pre-finalize-release-assets
+            actual_names=$(find recovery/pre-finalize-release-assets \
+              -mindepth 1 -maxdepth 1 -type f -printf './%f\n' | sort)
+            expected_paths=$(sed -E 's/^[0-9a-f]{64}  //' \
+              recovery/source-release-assets.sha256 | sort)
+            test "$actual_names" = "$expected_paths"
+            (cd recovery/pre-finalize-release-assets && \
+              sha256sum --check ../source-release-assets.sha256)
+
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              > recovery/pre-finalize-tag-ref.json
+            tag_object=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+              recovery/pre-finalize-tag-ref.json)
+            test "$(jq -r '.object.type' recovery/pre-finalize-tag-ref.json)" = tag
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+              > recovery/pre-finalize-tag-object.json
+            jq -e --arg commit "$GITHUB_SHA" \
+              '.verification.verified == true and .object.type == "commit" and \
+               .object.sha == $commit' recovery/pre-finalize-tag-object.json > /dev/null
+            gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" \
+              > recovery/pre-finalize-main-ancestry.json
+            jq -e --arg commit "$GITHUB_SHA" \
+              '.base_commit.sha == $commit and .merge_base_commit.sha == $commit and \
+               (.status == "ahead" or .status == "identical")' \
+              recovery/pre-finalize-main-ancestry.json > /dev/null
+
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+              > recovery/pre-finalize-source-run.json
+            jq -S \
+              '{id,run_attempt,actor:.actor.login,triggering_actor:.triggering_actor.login,
+                repository:.repository.full_name,path,event,head_sha,head_branch,status,conclusion}' \
+              recovery/pre-finalize-source-run.json \
+              > recovery/pre-finalize-source-run.canonical.json
+            cmp recovery/live-source-run.canonical.json \
+              recovery/pre-finalize-source-run.canonical.json
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" \
+              --jq '.jobs[]' \
+              | jq -s '{query_filter:"all",pagination_complete:true,jobs:.}' \
+              > recovery/pre-finalize-source-jobs.json
+            jq -S \
+              '{query_filter,pagination_complete,jobs:
+                ([.jobs[] | {id,run_id,name,head_sha,run_attempt,status,conclusion,
+                  steps:[(.steps // [])[] | {name,number,status,conclusion}]}] | sort_by(.id))}' \
+              recovery/pre-finalize-source-jobs.json \
+              > recovery/pre-finalize-source-jobs.canonical.json
+            cmp recovery/live-source-jobs.canonical.json \
+              recovery/pre-finalize-source-jobs.canonical.json
+
+            version=${RELEASE_TAG#v}
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              "https://pypi.org/pypi/explainiverse/$version/json" \
+              --output recovery/pre-finalize-pypi.json
+            expected_pypi=$(sort recovery/source-release-assets/SHA256SUMS)
+            actual_pypi=$(jq -r '.urls[] | "\(.digests.sha256)  \(.filename)"' \
+              recovery/pre-finalize-pypi.json | sort)
+            test "$actual_pypi" = "$expected_pypi"
+
             gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               > recovery/pre-finalize-immutable-releases.json
             jq -e '.enabled == true' recovery/pre-finalize-immutable-releases.json > /dev/null
+            jq -S \
+              '{id,tag_name,draft,prerelease,body,
+                assets:([.assets[] | {id,name,size,state,digest}] | sort_by(.name))}' \
+              recovery/pre-finalize-release.json \
+              > recovery/pre-finalize-release.canonical.json
+
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              > recovery/immediate-pre-finalize-tag-ref.json
+            immediate_tag_object=$(jq -er \
+              '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+              recovery/immediate-pre-finalize-tag-ref.json)
+            test "$(jq -r '.object.type' \
+              recovery/immediate-pre-finalize-tag-ref.json)" = tag
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$immediate_tag_object" \
+              > recovery/immediate-pre-finalize-tag-object.json
+            jq -e --arg commit "$GITHUB_SHA" \
+              '.verification.verified == true and .object.type == "commit" and \
+               .object.sha == $commit' \
+              recovery/immediate-pre-finalize-tag-object.json > /dev/null
+            gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" \
+              > recovery/immediate-pre-finalize-main-ancestry.json
+            jq -e --arg commit "$GITHUB_SHA" \
+              '.base_commit.sha == $commit and .merge_base_commit.sha == $commit and \
+               (.status == "ahead" or .status == "identical")' \
+              recovery/immediate-pre-finalize-main-ancestry.json > /dev/null
+
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+              > recovery/immediate-pre-finalize-source-run.json
+            jq -S \
+              '{id,run_attempt,actor:.actor.login,triggering_actor:.triggering_actor.login,
+                repository:.repository.full_name,path,event,head_sha,head_branch,status,conclusion}' \
+              recovery/immediate-pre-finalize-source-run.json \
+              > recovery/immediate-pre-finalize-source-run.canonical.json
+            cmp recovery/live-source-run.canonical.json \
+              recovery/immediate-pre-finalize-source-run.canonical.json
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" \
+              --jq '.jobs[]' \
+              | jq -s '{query_filter:"all",pagination_complete:true,jobs:.}' \
+              > recovery/immediate-pre-finalize-source-jobs.json
+            jq -S \
+              '{query_filter,pagination_complete,jobs:
+                ([.jobs[] | {id,run_id,name,head_sha,run_attempt,status,conclusion,
+                  steps:[(.steps // [])[] | {name,number,status,conclusion}]}] | sort_by(.id))}' \
+              recovery/immediate-pre-finalize-source-jobs.json \
+              > recovery/immediate-pre-finalize-source-jobs.canonical.json
+            cmp recovery/live-source-jobs.canonical.json \
+              recovery/immediate-pre-finalize-source-jobs.canonical.json
+
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              "https://pypi.org/pypi/explainiverse/$version/json" \
+              --output recovery/immediate-pre-finalize-pypi.json
+            immediate_pypi=$(jq -r \
+              '.urls[] | "\(.digests.sha256)  \(.filename)"' \
+              recovery/immediate-pre-finalize-pypi.json | sort)
+            test "$immediate_pypi" = "$expected_pypi"
+            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              > recovery/immediate-pre-finalize-immutable-releases.json
+            jq -e '.enabled == true' \
+              recovery/immediate-pre-finalize-immutable-releases.json > /dev/null
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              > recovery/immediate-pre-finalize-release.json
+            jq -S \
+              '{id,tag_name,draft,prerelease,body,
+                assets:([.assets[] | {id,name,size,state,digest}] | sort_by(.name))}' \
+              recovery/immediate-pre-finalize-release.json \
+              > recovery/immediate-pre-finalize-release.canonical.json
+            cmp recovery/pre-finalize-release.canonical.json \
+              recovery/immediate-pre-finalize-release.canonical.json
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --draft=false --title "Explainiverse $RELEASE_TAG"
           fi
 
-      - name: Record and reverify the final GitHub Release inventory
+      - name: Record and reverify the final immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -318,15 +1189,14 @@ jobs:
           mkdir -p recovery/final-release-assets
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir recovery/final-release-assets
-          python scripts/verify_release_recovery.py artifacts \
-            --sums provenance/SHA256SUMS \
-            --dist dist \
-            --pypi-json recovery/pypi.json \
-            --project explainiverse \
-            --tag "$RELEASE_TAG" \
-            --github-assets recovery/final-release-assets \
-            --provenance provenance
-          (cd recovery/final-release-assets && sha256sum * | sort) \
+          expected=$(sed -E 's/^[0-9a-f]{64}  //' \
+            recovery/source-release-assets.sha256 | sort)
+          actual=$(find recovery/final-release-assets -mindepth 1 -maxdepth 1 \
+            -type f -printf './%f\n' | sort)
+          test "$actual" = "$expected"
+          (cd recovery/final-release-assets && \
+            sha256sum --check ../source-release-assets.sha256)
+          (cd recovery/final-release-assets && sha256sum ./* | sort) \
             > recovery/final-github-assets.sha256
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --json assets,isDraft,isPrerelease,name,publishedAt,tagName,targetCommitish,url \
@@ -338,15 +1208,19 @@ jobs:
           jq -e '.isDraft == false and .isPrerelease == false' \
             recovery/final-github-release.json > /dev/null
           jq -e '.immutable == true' recovery/final-github-release-api.json > /dev/null
-          python scripts/verify_release_recovery.py release-body \
-            --release-json recovery/final-github-release-api.json \
-            --disclosure provenance/RELEASE_GOVERNANCE.md
+          disclosure=$(< recovery/source-release-assets/RELEASE_GOVERNANCE.md)
+          body=$(jq -er '.body | select(type == "string")' \
+            recovery/final-github-release-api.json)
+          if [[ -z "$disclosure" || "$body" != *"$disclosure"* ]]; then
+            echo "final GitHub Release omitted the original governance disclosure" >&2
+            exit 1
+          fi
 
-      - name: Archive complete or partial recovery evidence
+      - name: Archive complete or partial fixed-command recovery evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-recovery-evidence
+          name: release-recovery-evidence-${{ github.run_attempt }}
           path: recovery/**
           if-no-files-found: error
           retention-days: 90

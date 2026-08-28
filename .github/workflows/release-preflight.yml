@@ -32,15 +32,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  snapshot:
-    name: Verify and attest external release controls
+  verify:
+    name: Verify external release controls without OIDC authority
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: read
-      attestations: write
       contents: read
-      id-token: write
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
 
     steps:
       - name: Validate a pre-tag dispatch from the exact main commit
@@ -129,8 +130,101 @@ jobs:
             --cuda-jobs-json release-preflight/cuda-jobs.json \
             --cuda-run-id "$CUDA_RUN_ID"
 
+      - name: Archive the control snapshot even when policy verification fails
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-preflight
+          path: release-preflight/*
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    name: Attest the accepted fixed pre-tag snapshot
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download and verify only the exact low-authority artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact-digest }}
+        run: |
+          if [[ ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "artifact id must be a positive integer" >&2
+            exit 1
+          fi
+          if [[ ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "artifact digest must be 64 lowercase hexadecimal characters" >&2
+            exit 1
+          fi
+
+          artifact_metadata="$RUNNER_TEMP/release-control-preflight-$ARTIFACT_ID.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+            > "$artifact_metadata"
+          jq -e --argjson id "$ARTIFACT_ID" --argjson run "$GITHUB_RUN_ID" \
+            --arg head "$GITHUB_SHA" --arg name release-control-preflight \
+            --arg digest "sha256:$ARTIFACT_DIGEST" \
+            '.id == $id and .name == $name and .expired == false and \
+             .workflow_run.id == $run and .workflow_run.head_sha == $head and \
+             .digest == $digest' "$artifact_metadata" > /dev/null
+
+          artifact_archive="$RUNNER_TEMP/release-control-preflight-$ARTIFACT_ID.zip"
+          curl --fail-with-body --silent --show-error --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$artifact_archive" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip"
+          actual_artifact_digest=$(sha256sum "$artifact_archive")
+          actual_artifact_digest=${actual_artifact_digest%% *}
+          test "$actual_artifact_digest" = "$ARTIFACT_DIGEST"
+
+          expected=$(printf '%s\n' \
+            admin-capture.json \
+            admin-capture.json.sha256 \
+            cuda-evidence.sha256 \
+            cuda-jobs.json \
+            cuda-run.json \
+            external-controls.json \
+            external-controls.json.sha256 | sort)
+          archive_entries=$(unzip -Z1 "$artifact_archive" | sort)
+          test "$archive_entries" = "$expected"
+          mkdir release-preflight
+          unzip -q "$artifact_archive" -d release-preflight
+          rm "$artifact_archive"
+
+          actual=$(find release-preflight -mindepth 1 -maxdepth 1 -type f \
+            -printf '%f\n' | sort)
+          test "$actual" = "$expected"
+          test -z "$(find release-preflight -mindepth 1 -maxdepth 1 \
+            ! -type f -print -quit)"
+
+          grep -Ex '[0-9a-f]{64}  admin-capture\.json' \
+            release-preflight/admin-capture.json.sha256
+          test "$(wc -l < release-preflight/admin-capture.json.sha256)" -eq 1
+          grep -Ex '[0-9a-f]{64}  cuda-run\.json' \
+            release-preflight/cuda-evidence.sha256
+          grep -Ex '[0-9a-f]{64}  cuda-jobs\.json' \
+            release-preflight/cuda-evidence.sha256
+          test "$(wc -l < release-preflight/cuda-evidence.sha256)" -eq 2
+          grep -Ex '[0-9a-f]{64}  external-controls\.json' \
+            release-preflight/external-controls.json.sha256
+          test "$(wc -l < release-preflight/external-controls.json.sha256)" -eq 1
+          (cd release-preflight && \
+            sha256sum --check admin-capture.json.sha256 && \
+            sha256sum --check cuda-evidence.sha256 && \
+            sha256sum --check external-controls.json.sha256)
+
       - name: Attest the accepted pre-tag control snapshot
-        if: steps.bind.outcome == 'success'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
@@ -141,12 +235,3 @@ jobs:
             release-preflight/cuda-evidence.sha256
             release-preflight/external-controls.json
             release-preflight/external-controls.json.sha256
-
-      - name: Archive the control snapshot even when policy verification fails
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-control-preflight
-          path: release-preflight/*
-          if-no-files-found: error
-          retention-days: 90

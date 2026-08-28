@@ -23,6 +23,99 @@ SPEC.loader.exec_module(recovery)
 SHA = "a" * 40
 SOURCE_RUN_ID = "1234"
 FILENAMES = ("explainiverse-0.15.0-py3-none-any.whl", "explainiverse-0.15.0.tar.gz")
+TRUSTED_JOB_NAMES = (
+    "Verify, build once, and inventory",
+    "Attest the immutable distributions",
+    "Publish through PyPI Trusted Publishing",
+    "Create the immutable GitHub release",
+    "Finalize the immutable GitHub release with fixed commands",
+)
+
+
+def _recovery_workflow():
+    return (ROOT / ".github" / "workflows" / "recover-github-release.yml").read_text(
+        encoding="utf-8"
+    )
+
+
+def _recovery_step(workflow, name):
+    return workflow.split(f"      - name: {name}", 1)[1].split("\n      - name:", 1)[0]
+
+
+def _assert_recovery_front_door_contract(workflow):
+    exact_main_fetch = "git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'"
+    assert workflow.count(exact_main_fetch) == 2
+    validate_name = "Validate recovery inputs"
+    request_record = '> "$RECOVERY_REQUEST_TEMP"'
+    checkout_name = "Check out the immutable release tag"
+    preserve_request_name = "Preserve the validated pre-checkout recovery request"
+    source_gate_name = "Verify the signed immutable recovery source before candidate code"
+    setup_name = "Set up Python 3.12"
+    candidate_guard_name = "Bind the recovery execution to the immutable release tag"
+    install_name = "Install the hash-locked recovery and provenance verifier"
+    later_recheck_name = "Verify signed tag, main ancestry, and package version"
+
+    validate = _recovery_step(workflow, validate_name)
+    assert '"$GITHUB_REPOSITORY" != "jemsbhai/explainiverse"' in validate
+    assert '"$GITHUB_REPOSITORY_OWNER" != "jemsbhai"' in validate
+    assert '"$GITHUB_EVENT_NAME" != "workflow_dispatch"' in validate
+    assert '"$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER"' in validate
+    assert '"$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER"' in validate
+    assert '"$GITHUB_REF" != "$expected_ref"' in validate
+    assert '"$RELEASE_TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$' in validate
+    assert '"$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$' in validate
+    request_index = validate.index(request_record)
+    for guard in (
+        '"$GITHUB_REPOSITORY" != "jemsbhai/explainiverse"',
+        '"$GITHUB_REPOSITORY_OWNER" != "jemsbhai"',
+        '"$GITHUB_EVENT_NAME" != "workflow_dispatch"',
+        '"$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER"',
+        '"$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER"',
+        '"$RELEASE_TAG" =~',
+        '"$GITHUB_REF" != "$expected_ref"',
+        '"$SOURCE_RUN_ID" =~',
+    ):
+        assert validate.index(guard) < request_index
+    assert '--arg recovery_run_attempt "$GITHUB_RUN_ATTEMPT"' in validate
+    assert '"$GITHUB_RUN_ATTEMPT" != "1"' not in validate
+    assert "recovery/request.json" not in validate
+
+    checkout = workflow.index(f"      - name: {checkout_name}")
+    preserve_request = workflow.index(f"      - name: {preserve_request_name}")
+    source_gate = workflow.index(f"      - name: {source_gate_name}")
+    setup = workflow.index(f"      - name: {setup_name}")
+    candidate_guard = workflow.index(f"      - name: {candidate_guard_name}")
+    install = workflow.index(f"      - name: {install_name}")
+    later_recheck = workflow.index(f"      - name: {later_recheck_name}")
+    assert (
+        checkout
+        < preserve_request
+        < source_gate
+        < setup
+        < candidate_guard
+        < install
+        < later_recheck
+    )
+    preserve = _recovery_step(workflow, preserve_request_name)
+    assert 'test -f "$RECOVERY_REQUEST_TEMP"' in preserve
+    assert 'install -m 0600 "$RECOVERY_REQUEST_TEMP" recovery/request.json' in preserve
+    assert "${{ runner.temp }}/explainiverse-recovery-request-" in workflow
+
+    gate = _recovery_step(workflow, source_gate_name)
+    assert "checkout_sha=$(git rev-parse HEAD)" in gate
+    assert '[[ "$checkout_sha" != "$GITHUB_SHA" ]]' in gate
+    assert '[[ "$(git cat-file -t "$RELEASE_TAG")" != tag ]]' in gate
+    assert 'git rev-parse "$RELEASE_TAG^{commit}"' in gate
+    assert 'git rev-parse "$RELEASE_TAG^{tag}"' in gate
+    assert 'gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object"' in gate
+    assert "--jq '.verification.verified'" in gate
+    assert ')" != true ]]' in gate
+    assert exact_main_fetch in gate
+    assert "if ! git merge-base --is-ancestor HEAD origin/main" in gate
+    assert "release_version=$(sed -n" in gate
+    assert '[[ "$release_version" != "${RELEASE_TAG#v}" ]]' in gate
+    assert "python " not in gate
+    assert "python3 " not in gate
 
 
 def _artifacts(tmp_path):
@@ -68,20 +161,22 @@ def _source_run():
         "pagination_complete": True,
         "jobs": [
             {
+                "id": 9000 + index,
+                "run_id": int(SOURCE_RUN_ID),
                 "name": name,
+                "head_sha": SHA,
                 "run_attempt": 1,
                 "status": "completed",
                 "conclusion": "success",
             }
-            for name in (
-                "Verify, build once, and inventory",
-                "Attest the immutable distributions",
-                "Publish through PyPI Trusted Publishing",
-            )
+            for index, name in enumerate(TRUSTED_JOB_NAMES[:3], 1)
         ]
         + [
             {
-                "name": "Create the immutable GitHub release",
+                "id": 9004,
+                "run_id": int(SOURCE_RUN_ID),
+                "name": TRUSTED_JOB_NAMES[-2],
+                "head_sha": SHA,
                 "run_attempt": 1,
                 "status": "completed",
                 "conclusion": "failure",
@@ -98,10 +193,45 @@ def _source_run():
                     ],
                     {"name": "Complete job", "status": "completed", "conclusion": "success"},
                 ],
-            }
+            },
+            {
+                "id": 9005,
+                "run_id": int(SOURCE_RUN_ID),
+                "name": TRUSTED_JOB_NAMES[-1],
+                "head_sha": SHA,
+                "run_attempt": 1,
+                "status": "completed",
+                "conclusion": "skipped",
+                "steps": [],
+            },
         ],
     }
     return run, jobs
+
+
+def _source_job(jobs, name):
+    return next(job for job in jobs["jobs"] if job["name"] == name)
+
+
+def _make_unplanned_finalizer_failure(jobs):
+    release_job = _source_job(jobs, recovery._RELEASE_PREP_JOB)
+    release_job["conclusion"] = "success"
+    for step in release_job["steps"]:
+        if step["name"] == "Stage an explicitly requested post-PyPI recovery drill":
+            step["conclusion"] = "skipped"
+        elif step["name"] != "Set up job":
+            step["conclusion"] = "success"
+    finalizer = _source_job(jobs, recovery._RELEASE_FINALIZE_JOB)
+    finalizer["conclusion"] = "failure"
+    finalizer["steps"] = [
+        {"name": "Set up job", "status": "completed", "conclusion": "success"},
+        {
+            "name": "Revalidate authority and the exact normal-release plan",
+            "status": "completed",
+            "conclusion": "failure",
+        },
+        {"name": "Complete job", "status": "completed", "conclusion": "success"},
+    ]
 
 
 def _governance_record():
@@ -113,6 +243,7 @@ def _governance_record():
             "commit": SHA,
         },
         "governance": {
+            "capture_principal": "jemsbhai",
             "release_dispatch_actor": "jemsbhai",
             "release_triggering_actor": "jemsbhai",
             "release_run_attempt": "1",
@@ -158,6 +289,7 @@ def test_recovery_governance_record_is_bound_to_the_exact_source_run():
         ),
         ("record", ("governance", "release_run_attempt"), "2", "source run attempt"),
         ("record", ("governance", "release_dispatch_actor"), "other", "source actor"),
+        ("record", ("governance", "capture_principal"), "other", "capture principal"),
         (
             "record",
             ("governance", "release_triggering_actor"),
@@ -391,6 +523,94 @@ def test_failed_overall_source_run_is_accepted_only_after_publish_succeeded():
         )
 
 
+def test_source_run_normalizes_every_bound_trusted_job_identity():
+    run, jobs = _source_run()
+    evidence = recovery.verify_source_run_evidence(
+        run,
+        jobs,
+        repository="jemsbhai/explainiverse",
+        workflow_path=".github/workflows/publish-pypi.yml",
+        release_tag="v0.15.0",
+        release_commit=SHA,
+    )
+
+    assert evidence == {
+        "schema_version": 1,
+        "source_kind": "staged_drill",
+        "query_filter": "all",
+        "pagination_complete": True,
+        "run": {
+            "id": int(SOURCE_RUN_ID),
+            "repository": "jemsbhai/explainiverse",
+            "path": ".github/workflows/publish-pypi.yml",
+            "event": "workflow_dispatch",
+            "head_branch": "v0.15.0",
+            "head_sha": SHA,
+            "status": "completed",
+            "conclusion": "failure",
+            "run_attempt": 1,
+        },
+        "trusted_jobs": [
+            {
+                field: job[field]
+                for field in (
+                    "id",
+                    "run_id",
+                    "name",
+                    "head_sha",
+                    "status",
+                    "conclusion",
+                    "run_attempt",
+                )
+            }
+            for job in (
+                sorted(jobs["jobs"][:3], key=lambda value: value["name"])
+                + [
+                    _source_job(jobs, recovery._RELEASE_PREP_JOB),
+                    _source_job(jobs, recovery._RELEASE_FINALIZE_JOB),
+                ]
+            )
+        ],
+    }
+
+
+def test_source_run_cli_writes_normalized_bound_evidence(tmp_path):
+    run, jobs = _source_run()
+    run_path = tmp_path / "source-run.json"
+    jobs_path = tmp_path / "source-jobs.json"
+    output_path = tmp_path / "verified-source.json"
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+    jobs_path.write_text(json.dumps(jobs), encoding="utf-8")
+
+    result = recovery.main(
+        [
+            "source-run",
+            "--run-json",
+            str(run_path),
+            "--jobs-json",
+            str(jobs_path),
+            "--repository",
+            "jemsbhai/explainiverse",
+            "--tag",
+            "v0.15.0",
+            "--commit",
+            SHA,
+            "--require-staged-drill",
+            "--normalized-output",
+            str(output_path),
+        ]
+    )
+
+    assert result == 0
+    evidence = json.loads(output_path.read_text(encoding="utf-8"))
+    assert evidence["source_kind"] == "staged_drill"
+    assert evidence["run"]["id"] == int(SOURCE_RUN_ID)
+    assert {job["name"] for job in evidence["trusted_jobs"]} == set(TRUSTED_JOB_NAMES)
+    assert all(job["run_id"] == int(SOURCE_RUN_ID) for job in evidence["trusted_jobs"])
+    assert all(job["head_sha"] == SHA for job in evidence["trusted_jobs"])
+    assert all(job["run_attempt"] == 1 for job in evidence["trusted_jobs"])
+
+
 def test_source_run_must_prove_failed_overall_and_downstream_release_job():
     run, jobs = _source_run()
     run["conclusion"] = "success"
@@ -405,8 +625,8 @@ def test_source_run_must_prove_failed_overall_and_downstream_release_job():
         )
 
     run, jobs = _source_run()
-    jobs["jobs"][-1]["conclusion"] = "success"
-    with pytest.raises(ValueError, match="demonstrate a downstream failure"):
+    _source_job(jobs, recovery._RELEASE_PREP_JOB)["conclusion"] = "success"
+    with pytest.raises(ValueError, match="must fail for a staged drill"):
         recovery.verify_source_run(
             run,
             jobs,
@@ -419,9 +639,7 @@ def test_source_run_must_prove_failed_overall_and_downstream_release_job():
 
 def test_source_run_distinguishes_staged_drill_from_unplanned_failure():
     run, jobs = _source_run()
-    release_steps = jobs["jobs"][-1]["steps"]
-    release_steps[1]["conclusion"] = "skipped"
-    release_steps[2]["conclusion"] = "failure"
+    _make_unplanned_finalizer_failure(jobs)
     assert (
         recovery.verify_source_run(
             run,
@@ -438,15 +656,20 @@ def test_source_run_distinguishes_staged_drill_from_unplanned_failure():
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "later-ran", "no-failure"])
 def test_source_run_rejects_ambiguous_downstream_failure_evidence(mutation):
     run, jobs = _source_run()
-    release_job = jobs["jobs"][-1]
+    release_job = _source_job(jobs, recovery._RELEASE_PREP_JOB)
+    finalizer_job = _source_job(jobs, recovery._RELEASE_FINALIZE_JOB)
     if mutation == "missing":
-        jobs["jobs"].pop()
+        jobs["jobs"].remove(finalizer_job)
     elif mutation == "duplicate":
-        jobs["jobs"].append(copy.deepcopy(release_job))
+        jobs["jobs"].append(copy.deepcopy(finalizer_job))
     elif mutation == "later-ran":
         release_job["steps"][2]["conclusion"] = "success"
     else:
-        release_job["steps"][1]["conclusion"] = "skipped"
+        _make_unplanned_finalizer_failure(jobs)
+        finalizer_job = _source_job(jobs, recovery._RELEASE_FINALIZE_JOB)
+        finalizer_job["steps"] = [
+            {"name": "Set up job", "status": "completed", "conclusion": "success"}
+        ]
     with pytest.raises(ValueError):
         recovery.verify_source_run(
             run,
@@ -537,6 +760,69 @@ def test_source_run_requires_exact_integer_first_attempt_for_trusted_jobs(job_na
         )
 
 
+@pytest.mark.parametrize("job_name", TRUSTED_JOB_NAMES)
+@pytest.mark.parametrize(
+    ("field", "replacement", "match"),
+    [
+        ("id", 0, "id must be a positive integer"),
+        ("id", True, "id must be a positive integer"),
+        ("id", None, "id must be a positive integer"),
+        ("run_id", 0, "run id must be a positive integer"),
+        ("run_id", True, "run id must be a positive integer"),
+        ("run_id", 9999, "run id mismatch"),
+        ("head_sha", None, "head SHA mismatch"),
+        ("head_sha", "b" * 40, "head SHA mismatch"),
+    ],
+)
+def test_source_run_requires_bound_identity_for_every_trusted_job(
+    job_name, field, replacement, match
+):
+    run, jobs = _source_run()
+    job = next(value for value in jobs["jobs"] if value["name"] == job_name)
+    job[field] = replacement
+
+    with pytest.raises(ValueError, match=match):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+
+@pytest.mark.parametrize("source_id", [0, True, False, None])
+def test_source_run_id_must_be_a_positive_integer(source_id):
+    run, jobs = _source_run()
+    run["id"] = source_id
+
+    with pytest.raises(ValueError, match="source run id must be a positive integer"):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+
+def test_source_run_requires_unique_trusted_job_ids():
+    run, jobs = _source_run()
+    jobs["jobs"][1]["id"] = jobs["jobs"][0]["id"]
+
+    with pytest.raises(ValueError, match="source job id .* is reused by trusted jobs"):
+        recovery.verify_source_run(
+            run,
+            jobs,
+            repository="jemsbhai/explainiverse",
+            workflow_path=".github/workflows/publish-pypi.yml",
+            release_tag="v0.15.0",
+            release_commit=SHA,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "replacement", "match"),
     [
@@ -563,34 +849,145 @@ def test_source_run_is_bound_to_exact_tag_workflow_and_commit(field, replacement
 
 
 def test_recovery_workflow_has_no_pypi_upload_or_skip_existing_escape_hatch():
-    workflow = (ROOT / ".github" / "workflows" / "recover-github-release.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = _recovery_workflow()
     lowered = workflow.lower()
+    _assert_recovery_front_door_contract(workflow)
     assert "gh-action-pypi-publish" not in lowered
     assert "skip-existing" not in lowered
     assert "verify_release_recovery.py source-run" in workflow
     assert "jobs?filter=all&per_page=100" in workflow
     assert "gh api --paginate" in workflow
+    assert "--normalized-output recovery/verified-source.json" in workflow
     assert "gh attestation verify" in workflow
     assert "verify_release_recovery.py artifacts" in workflow
     assert "final-github-assets.sha256" in workflow
-    assert "Archive complete or partial recovery evidence" in workflow
+    assert "Archive complete or partial recovery evidence for fixed mutation" in workflow
+    assert "Archive complete or partial fixed-command recovery evidence" in workflow
     assert "if: always()" in workflow
     final_api = workflow.index("> recovery/final-github-release-api.json")
     immutable = workflow.index(
         "'.immutable == true' recovery/final-github-release-api.json", final_api
     )
-    final_disclosure = workflow.index("verify_release_recovery.py release-body", immutable)
+    final_disclosure = workflow.index(
+        "final GitHub Release omitted the original governance disclosure", immutable
+    )
     assert final_api < immutable < final_disclosure
-    assert "--release-json recovery/final-github-release-api.json" in workflow
-    assert "--disclosure provenance/RELEASE_GOVERNANCE.md" in workflow
+
+    verify_job = workflow.split("  verify:", 1)[1].split("\n  recover:", 1)[0]
+    recover_job = workflow.split("  recover:", 1)[1]
+    assert "contents: write" not in verify_job
+    assert "contents: write" in recover_job
+    assert "needs: verify" in recover_job
+    assert "actions/checkout@" not in recover_job
+    assert "actions/setup-python@" not in recover_job
+    assert "python scripts/" not in recover_job
+    assert "verify_release_recovery.py" not in recover_job
+    assert "verify_pypi_provenance.py" not in recover_job
+    assert 'test "$actual_digest" = "$ARTIFACT_DIGEST"' in recover_job
+    assert "mutation-tag-object.json" in recover_job
+    assert "mutation-main-ancestry.json" in recover_job
+    assert "release-assets.sha256" in recover_job
+
+
+def test_recovery_front_door_rejects_authority_source_and_ordering_drift():
+    workflow = _recovery_workflow()
+    source_gate_name = "Verify the signed immutable recovery source before candidate code"
+    source_gate_marker = f"      - name: {source_gate_name}"
+    setup_marker = "      - name: Set up Python 3.12"
+    source_gate_block = (
+        source_gate_marker + workflow.split(source_gate_marker, 1)[1].split(setup_marker, 1)[0]
+    )
+    reordered = workflow.replace(source_gate_block, "", 1).replace(
+        "      - name: Bind the recovery execution to the immutable release tag",
+        source_gate_block
+        + "      - name: Bind the recovery execution to the immutable release tag",
+        1,
+    )
+    mutations = (
+        workflow.replace(
+            '"$GITHUB_REPOSITORY" != "jemsbhai/explainiverse"',
+            '"$GITHUB_REPOSITORY" != "$GITHUB_REPOSITORY"',
+            1,
+        ),
+        workflow.replace(
+            '"$GITHUB_REPOSITORY_OWNER" != "jemsbhai"',
+            '"$GITHUB_REPOSITORY_OWNER" != "$GITHUB_REPOSITORY_OWNER"',
+            1,
+        ),
+        workflow.replace(
+            '"$GITHUB_EVENT_NAME" != "workflow_dispatch"',
+            '"$GITHUB_EVENT_NAME" != "$GITHUB_EVENT_NAME"',
+            1,
+        ),
+        workflow.replace(
+            '"$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER"',
+            '"$GITHUB_ACTOR" != "$GITHUB_ACTOR"',
+            1,
+        ),
+        workflow.replace(
+            '"$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER"',
+            '"$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_TRIGGERING_ACTOR"',
+            1,
+        ),
+        workflow.replace('"$GITHUB_REF" != "$expected_ref"', '"$GITHUB_REF" != "$GITHUB_REF"', 1),
+        workflow.replace(
+            '"$RELEASE_TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$',
+            '"$RELEASE_TAG" =~ .*',
+            1,
+        ),
+        workflow.replace('"$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$', '"$SOURCE_RUN_ID" =~ .*', 1),
+        workflow.replace(
+            '[[ "$checkout_sha" != "$GITHUB_SHA" ]]',
+            '[[ "$checkout_sha" != "$checkout_sha" ]]',
+            1,
+        ),
+        workflow.replace(
+            '[[ "$(git cat-file -t "$RELEASE_TAG")" != tag ]]',
+            '[[ "$(git cat-file -t "$RELEASE_TAG")" != commit ]]',
+            1,
+        ),
+        workflow.replace(
+            'git rev-parse "$RELEASE_TAG^{commit}"',
+            'git rev-parse "$RELEASE_TAG"',
+            1,
+        ),
+        workflow.replace(
+            "--jq '.verification.verified'",
+            "--jq '.verification.reason'",
+            1,
+        ),
+        workflow.replace(
+            "git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'",
+            "git fetch --no-tags origin main",
+            1,
+        ),
+        workflow.replace(
+            "git merge-base --is-ancestor HEAD origin/main",
+            "git merge-base HEAD origin/main",
+            1,
+        ),
+        workflow.replace(
+            '[[ "$release_version" != "${RELEASE_TAG#v}" ]]',
+            '[[ "$release_version" != "$release_version" ]]',
+            1,
+        ),
+        workflow.replace(
+            '        run: |\n          if [[ "$GITHUB_REPOSITORY"',
+            "        run: |\n          : > recovery/request.json\n"
+            '          if [[ "$GITHUB_REPOSITORY"',
+            1,
+        ),
+        reordered,
+    )
+
+    for index, mutated in enumerate(mutations):
+        assert mutated != workflow, index
+        with pytest.raises((AssertionError, IndexError, ValueError)):
+            _assert_recovery_front_door_contract(mutated)
 
 
 def test_recovery_checks_immutable_release_setting_immediately_before_finalizing():
-    workflow = (ROOT / ".github" / "workflows" / "recover-github-release.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = _recovery_workflow()
     finalize_step = workflow.split(
         "      - name: Finalize the verified draft without any PyPI upload", 1
     )[1].split("      - name: Record and reverify the final GitHub Release inventory", 1)[0]
@@ -605,9 +1002,7 @@ def test_recovery_checks_immutable_release_setting_immediately_before_finalizing
 
 
 def test_recovery_binds_governance_record_before_any_draft_mutation():
-    workflow = (ROOT / ".github" / "workflows" / "recover-github-release.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = _recovery_workflow()
     binding = workflow.index("verify_release_recovery.py governance-record")
     draft_mutation = workflow.index("      - name: Create or inspect a recovery draft")
     assert binding < draft_mutation
@@ -624,7 +1019,9 @@ def test_recovery_binds_governance_record_before_any_draft_mutation():
 
 def test_staged_drill_step_contract_matches_every_real_downstream_workflow_step():
     workflow = (ROOT / ".github" / "workflows" / "publish-pypi.yml").read_text(encoding="utf-8")
-    release_job = workflow.split("  github-release:", 1)[1]
+    release_job = workflow.split("  github-release:", 1)[1].split(
+        "\n  github-release-finalize:", 1
+    )[0]
     step_names = [
         line.split("- name: ", 1)[1]
         for line in release_job.splitlines()

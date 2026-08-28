@@ -99,7 +99,10 @@ jobs:
       - name: Exercise the selected substantive public surface
         env:
           TEST_TARGETS: ${{ matrix.tests }}
-        run: python -m pytest --strict-config --strict-markers -m "not quantus_reference" $TEST_TARGETS
+        run: |
+          read -r -a test_targets <<< "$TEST_TARGETS"
+          python -m pytest --strict-config --strict-markers \
+            -m "not quantus_reference" "${test_targets[@]}"
 
   scikit-image-next-major-discovery:
     name: scikit-image 1.x prerelease availability (blocking monitor)

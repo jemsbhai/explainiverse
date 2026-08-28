@@ -212,11 +212,36 @@ def _validate_hosted_build_identity(
 
 
 def compare_release_environments(
-    first: Mapping[str, Any], second: Mapping[str, Any]
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+    *,
+    expected_run_id: str,
+    expected_run_attempt: str,
 ) -> dict[str, Any]:
-    """Require stable build inputs to match and logical build identities to differ."""
+    """Bind both builds to this workflow attempt and compare stable inputs."""
+    for label, value in (
+        ("expected run ID", expected_run_id),
+        ("expected run attempt", expected_run_attempt),
+    ):
+        if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
+            raise ValueError(f"{label} must be a positive decimal string")
+
     first_identity, first_runner = _validate_hosted_build_identity(first, "first", "one")
     second_identity, second_runner = _validate_hosted_build_identity(second, "second", "two")
+
+    for label, payload in (("first", first), ("second", second)):
+        observed_run_id = _required_runner_field(payload, label, "GITHUB_RUN_ID")
+        if observed_run_id != expected_run_id:
+            raise ValueError(
+                f"{label} runner GITHUB_RUN_ID does not match the current workflow run: "
+                f"{observed_run_id!r} != {expected_run_id!r}"
+            )
+        observed_run_attempt = _required_runner_field(payload, label, "GITHUB_RUN_ATTEMPT")
+        if observed_run_attempt != expected_run_attempt:
+            raise ValueError(
+                f"{label} runner GITHUB_RUN_ATTEMPT does not match the current workflow attempt: "
+                f"{observed_run_attempt!r} != {expected_run_attempt!r}"
+            )
 
     matching_identity: dict[str, Any] = {}
     for path in _STABLE_ENVIRONMENT_PATHS:
@@ -247,6 +272,10 @@ def compare_release_environments(
         "schema_version": 1,
         "comparison": "stable-environment-identity",
         "compatible": True,
+        "source_workflow": {
+            "run_id": expected_run_id,
+            "run_attempt": expected_run_attempt,
+        },
         "distinct_build_identities": {
             "first": first_identity,
             "second": second_identity,
@@ -287,6 +316,8 @@ def main() -> None:
     mode.add_argument("--compare", nargs=2, type=Path, metavar=("FIRST", "SECOND"))
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--build-identity")
+    parser.add_argument("--expected-run-id")
+    parser.add_argument("--expected-run-attempt")
     args = parser.parse_args()
 
     first_payload: Mapping[str, Any] | None = None
@@ -295,11 +326,22 @@ def main() -> None:
         if args.compare is not None:
             if args.build_identity is not None:
                 raise ValueError("--build-identity is valid only with --requirements")
+            if args.expected_run_id is None or args.expected_run_attempt is None:
+                raise ValueError("--compare requires --expected-run-id and --expected-run-attempt")
             first, second = args.compare
             first_payload = _load_manifest(first)
             second_payload = _load_manifest(second)
-            payload = compare_release_environments(first_payload, second_payload)
+            payload = compare_release_environments(
+                first_payload,
+                second_payload,
+                expected_run_id=args.expected_run_id,
+                expected_run_attempt=args.expected_run_attempt,
+            )
         else:
+            if args.expected_run_id is not None or args.expected_run_attempt is not None:
+                raise ValueError(
+                    "--expected-run-id and --expected-run-attempt are valid only with --compare"
+                )
             payload = release_environment(args.requirements, build_identity=args.build_identity)
     except (
         ValueError,

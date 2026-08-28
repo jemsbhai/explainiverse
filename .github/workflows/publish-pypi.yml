@@ -15,6 +15,14 @@ on:
         description: "Exact CUDA evidence run attested by release-preflight"
         required: true
         type: string
+      single_minimum_runner_nonce:
+        description: "16-hex binding for the minimum release CUDA custom runner"
+        required: true
+        type: string
+      single_latest_runner_nonce:
+        description: "16-hex binding for the latest release CUDA custom runner"
+        required: true
+        type: string
       stage_recovery_drill:
         description: "Intentionally stop after PyPI so the recovery-only workflow can be drilled"
         required: false
@@ -35,6 +43,7 @@ concurrency:
 jobs:
   preflight:
     name: Verify the attested pre-tag external-control snapshot
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -43,6 +52,69 @@ jobs:
       contents: read
 
     steps:
+      - name: Require an exact first-attempt owner tag publication
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          STAGE_RECOVERY_DRILL: ${{ inputs.stage_recovery_drill }}
+          SINGLE_MINIMUM_RUNNER_NONCE: ${{ inputs.single_minimum_runner_nonce }}
+          SINGLE_LATEST_RUNNER_NONCE: ${{ inputs.single_latest_runner_nonce }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          repository = os.environ.get("GITHUB_REPOSITORY")
+          repository_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+          actor = os.environ.get("GITHUB_ACTOR")
+          triggering_actor = os.environ.get("GITHUB_TRIGGERING_ACTOR")
+          event_name = os.environ.get("GITHUB_EVENT_NAME")
+          ref = os.environ.get("GITHUB_REF")
+          run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT")
+          release_tag = os.environ.get("RELEASE_TAG")
+          stage_recovery_drill = os.environ.get("STAGE_RECOVERY_DRILL")
+          runner_nonces = (
+              os.environ.get("SINGLE_MINIMUM_RUNNER_NONCE"),
+              os.environ.get("SINGLE_LATEST_RUNNER_NONCE"),
+          )
+
+          trusted_repository = (
+              repository == "jemsbhai/explainiverse"
+              and repository_owner == "jemsbhai"
+          )
+          trusted_trigger = (
+              actor == repository_owner
+              and triggering_actor == repository_owner
+          )
+          valid_tag = (
+              isinstance(release_tag, str)
+              and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", release_tag) is not None
+          )
+          exact_tag_ref = valid_tag and ref == f"refs/tags/{release_tag}"
+          exact_nonces = all(
+              isinstance(value, str)
+              and re.fullmatch(r"[a-f0-9]{16}", value) is not None
+              for value in runner_nonces
+          )
+          distinct_nonces = len(set(runner_nonces)) == len(runner_nonces)
+          if not (
+              trusted_repository
+              and trusted_trigger
+              and event_name == "workflow_dispatch"
+              and run_attempt == "1"
+              and exact_tag_ref
+              and exact_nonces
+              and distinct_nonces
+          ):
+              raise SystemExit(
+                  "publication preflight requires an owner-triggered first attempt "
+                  "dispatched from the exact stable tag"
+              )
+          if release_tag == "v0.15.0" and stage_recovery_drill != "true":
+              raise SystemExit(
+                  "publication preflight requires stage_recovery_drill=true for v0.15.0"
+              )
+          PY
+
       - name: Validate preflight run input
         env:
           PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
@@ -57,21 +129,46 @@ jobs:
             exit 1
           fi
 
-      - name: Require exact reviewed single-GPU runner routing
-        env:
-          CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
-        run: |
-          if [[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]; then
-            echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
-            exit 1
-          fi
-
       - name: Check out the immutable release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify the signed immutable release source before external work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          checkout_sha=$(git rev-parse HEAD)
+          if [[ "$checkout_sha" != "$GITHUB_SHA" ]]; then
+            echo "checked-out release commit differs from GITHUB_SHA" >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "$RELEASE_TAG")" != tag ]]; then
+            echo "release ref must resolve to an annotated tag object" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$RELEASE_TAG^{commit}")" != "$checkout_sha" ]]; then
+            echo "annotated release tag must peel to the checked-out commit" >&2
+            exit 1
+          fi
+          tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
+          if [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.verification.verified')" != true ]]; then
+            echo "annotated release tag must have GitHub-verified signature evidence" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "release commit must be an ancestor of current origin/main" >&2
+            exit 1
+          fi
+          release_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml)
+          if [[ "$release_version" != "${RELEASE_TAG#v}" ]]; then
+            echo "release tag and pyproject version differ" >&2
+            exit 1
+          fi
 
       - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -84,6 +181,8 @@ jobs:
           PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
           CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
           RELEASE_TAG: ${{ inputs.tag }}
+          SINGLE_MINIMUM_RUNNER_NONCE: ${{ inputs.single_minimum_runner_nonce }}
+          SINGLE_LATEST_RUNNER_NONCE: ${{ inputs.single_latest_runner_nonce }}
         run: |
           mkdir -p release-preflight
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID" \
@@ -102,7 +201,7 @@ jobs:
           gh attestation verify release-preflight/artifact/external-controls.json \
             --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-preflight.yml@refs/heads/main"
-          python scripts/release_external_controls.py verify \
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/release_external_controls.py verify \
             --policy .github/release-control-policy.json \
             --snapshot release-preflight/artifact/external-controls.json \
             --run-json release-preflight/source-run.json \
@@ -113,6 +212,31 @@ jobs:
             --cuda-run-json release-preflight/live-cuda-run.json \
             --cuda-jobs-json release-preflight/live-cuda-jobs.json \
             --cuda-run-id "$CUDA_RUN_ID"
+          env -u GH_TOKEN -u GITHUB_TOKEN python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          jobs = json.loads(
+              Path("release-preflight/live-cuda-jobs.json").read_text(encoding="utf-8")
+          )["jobs"]
+          evidence_nonces = set()
+          pattern = re.compile(r"^explainiverse-cuda-(?:single|two)-jit-([a-f0-9]{16})$")
+          for job in jobs:
+              if job.get("name", "").startswith("CUDA "):
+                  match = pattern.fullmatch(str(job.get("runner_name", "")))
+                  if match is None:
+                      raise SystemExit("accepted CUDA job has no exact nonce-bound runner name")
+                  evidence_nonces.add(match.group(1))
+          release_nonces = {
+              os.environ["SINGLE_MINIMUM_RUNNER_NONCE"],
+              os.environ["SINGLE_LATEST_RUNNER_NONCE"],
+          }
+          overlap = evidence_nonces & release_nonces
+          if overlap:
+              raise SystemExit(f"release runner nonces reuse CUDA evidence nonces: {sorted(overlap)!r}")
+          PY
 
       - name: Fail before build if PyPI already contains the release version
         env:
@@ -125,7 +249,8 @@ jobs:
   cuda-release:
     name: Release CUDA single-GPU (Torch ${{ matrix.torch-edge }}, zero skips)
     needs: preflight
-    runs-on: explainiverse-cuda-single
+    if: ${{ github.run_attempt == 1 }}
+    runs-on: ${{ format('explainiverse-cuda-single-jit-{0}', matrix.runner_nonce) }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -136,9 +261,11 @@ jobs:
           - torch-edge: minimum
             python-version: "3.10"
             constraints: .github/constraints/captum-min.txt
+            runner_nonce: ${{ inputs.single_minimum_runner_nonce }}
           - torch-edge: latest
             python-version: "3.12"
             constraints: none
+            runner_nonce: ${{ inputs.single_latest_runner_nonce }}
     env:
       EXPLAINIVERSE_REQUIRED_CUDA_DEVICES: "1"
       EXPLAINIVERSE_ENFORCE_CUDA_MANIFEST: "1"
@@ -187,6 +314,7 @@ jobs:
   build:
     name: Verify, build once, and inventory
     needs: [preflight, cuda-release]
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -195,6 +323,11 @@ jobs:
       contents: read
     env:
       BOOTSTRAP_PIP_VERSION: "26.2.1"
+    outputs:
+      distributions_artifact_id: ${{ steps.upload_distributions.outputs.artifact-id }}
+      distributions_artifact_digest: ${{ steps.upload_distributions.outputs.artifact-digest }}
+      provenance_artifact_id: ${{ steps.upload_provenance.outputs.artifact-id }}
+      provenance_artifact_digest: ${{ steps.upload_provenance.outputs.artifact-digest }}
 
     steps:
       - name: Validate requested tag syntax
@@ -227,12 +360,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          python scripts/validate_release_attestation_context.py
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/validate_release_attestation_context.py
           test "$(git cat-file -t "$RELEASE_TAG")" = tag
           test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
           tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.verification.verified')" = true
-          git fetch origin main --no-tags
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor HEAD origin/main
           python - <<'PY'
           import os
@@ -314,12 +447,12 @@ jobs:
           test -z "$(git -C release-source status --porcelain --untracked-files=all)"
           (
             cd release-source
-            python scripts/validate_release_attestation_context.py
+            env -u GH_TOKEN -u GITHUB_TOKEN python scripts/validate_release_attestation_context.py
             test "$(git cat-file -t "$RELEASE_TAG")" = tag
             test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
             tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
             test "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq '.verification.verified')" = true
-            git fetch origin main --no-tags
+            git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
             git merge-base --is-ancestor HEAD origin/main
           )
 
@@ -348,7 +481,7 @@ jobs:
           cp release-governance/* provenance/
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID" \
             > provenance/preflight-source-run.json
-          python release-source/scripts/create_release_governance_record.py \
+          env -u GH_TOKEN -u GITHUB_TOKEN python release-source/scripts/create_release_governance_record.py \
             --policy release-source/.github/release-control-policy.json \
             --snapshot provenance/external-controls.json \
             --output-json provenance/RELEASE_GOVERNANCE.json \
@@ -364,7 +497,7 @@ jobs:
             --release-triggering-actor "$GITHUB_TRIGGERING_ACTOR"
           (
             cd release-source
-            python scripts/record_release_environment.py \
+            env -u GH_TOKEN -u GITHUB_TOKEN python scripts/record_release_environment.py \
               --requirements .github/requirements/release-tools.txt \
               --output "$GITHUB_WORKSPACE/provenance/release-environment.json"
           )
@@ -450,18 +583,24 @@ jobs:
                   + json.dumps(differences, sort_keys=True)
               )
           PY
+          reproducibility_run_attempt=$(
+            jq -er '.run_attempt | select(type == "number" and . >= 1) | tostring' \
+              provenance/reproducibility-source-run.json
+          )
           gh run download "$reproducibility_run_id" --repo "$GITHUB_REPOSITORY" \
             --name reproducibility-one --dir reproducibility-proof/one
           gh run download "$reproducibility_run_id" --repo "$GITHUB_REPOSITORY" \
             --name reproducibility-two --dir reproducibility-proof/two
           gh run download "$reproducibility_run_id" --repo "$GITHUB_REPOSITORY" \
             --name reproducibility-report --dir reproducibility-proof/report
-          python release-source/scripts/record_release_environment.py \
+          env -u GH_TOKEN -u GITHUB_TOKEN python release-source/scripts/record_release_environment.py \
             --compare \
               reproducibility-proof/one/provenance/release-environment.json \
               reproducibility-proof/two/provenance/release-environment.json \
+            --expected-run-id "$reproducibility_run_id" \
+            --expected-run-attempt "$reproducibility_run_attempt" \
             --output provenance/bound-reproducibility-environment.json
-          python release-source/scripts/compare_distribution_artifacts.py \
+          env -u GH_TOKEN -u GITHUB_TOKEN python release-source/scripts/compare_distribution_artifacts.py \
             reproducibility-proof/one/dist reproducibility-proof/two/dist \
             --report provenance/bound-reproducibility-distributions.json
           test "$(find reproducibility-proof/report -mindepth 1 | wc -l)" -eq 4
@@ -493,28 +632,29 @@ jobs:
       - name: Build once from the clean release checkout and match both proof builds
         run: |
           test -z "$(git -C release-source status --porcelain --untracked-files=all)"
-          export SOURCE_DATE_EPOCH="$(git -C release-source log -1 --format=%ct)"
+          SOURCE_DATE_EPOCH="$(git -C release-source log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
           export PYTHONHASHSEED=0
           (cd release-source && poetry build --output "$GITHUB_WORKSPACE/dist")
-          python -m twine check dist/*
+          python -m twine check ./dist/*
           for artifact in dist/*.whl dist/*.tar.gz; do
-            python release-source/scripts/audit_typing_readiness.py \
+            env -u GH_TOKEN -u GITHUB_TOKEN python release-source/scripts/audit_typing_readiness.py \
               --policy release-source/.github/typing-readiness-policy.json \
               --project-file release-source/pyproject.toml \
               --repository-root release-source \
               --distribution "$artifact"
           done
-          python release-source/scripts/compare_distribution_artifacts.py \
+          env -u GH_TOKEN -u GITHUB_TOKEN python release-source/scripts/compare_distribution_artifacts.py \
             dist reproducibility-proof/one/dist \
             --report provenance/publish-vs-reproducibility-one.json
-          python release-source/scripts/compare_distribution_artifacts.py \
+          env -u GH_TOKEN -u GITHUB_TOKEN python release-source/scripts/compare_distribution_artifacts.py \
             dist reproducibility-proof/two/dist \
             --report provenance/publish-vs-reproducibility-two.json
 
       - name: Generate hashes and reproducible build-environment SBOM
         run: |
           mkdir -p provenance
-          (cd dist && sha256sum *.whl *.tar.gz) > provenance/SHA256SUMS
+          (cd dist && sha256sum -- *.whl *.tar.gz) > provenance/SHA256SUMS
           (cd dist && sha256sum --check ../provenance/SHA256SUMS)
           poetry_python=$(poetry env info --executable)
           cyclonedx-py environment "$poetry_python" \
@@ -525,6 +665,7 @@ jobs:
             --output-file provenance/explainiverse-build.cdx.json
 
       - name: Upload immutable distributions
+        id: upload_distributions
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-distributions
@@ -535,6 +676,7 @@ jobs:
           retention-days: 30
 
       - name: Upload hashes and SBOM
+        id: upload_provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-provenance
@@ -545,28 +687,119 @@ jobs:
   attest:
     name: Attest the immutable distributions
     needs: build
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read
       contents: read
       id-token: write
       attestations: write
 
     steps:
-      - name: Download distributions for attestation only
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-distributions
-          path: dist
+      - name: Download and hard-verify the exact build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          DISTRIBUTIONS_ARTIFACT_ID: ${{ needs.build.outputs.distributions_artifact_id }}
+          DISTRIBUTIONS_ARTIFACT_DIGEST: ${{ needs.build.outputs.distributions_artifact_digest }}
+          PROVENANCE_ARTIFACT_ID: ${{ needs.build.outputs.provenance_artifact_id }}
+          PROVENANCE_ARTIFACT_DIGEST: ${{ needs.build.outputs.provenance_artifact_digest }}
+        run: |
+          download_exact_artifact() {
+            local label=$1
+            local artifact_id=$2
+            local artifact_digest=$3
+            local expected_name=$4
+            local destination=$5
+            if [[ ! "$artifact_id" =~ ^[1-9][0-9]*$ || \
+                  ! "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "$label artifact identity is malformed" >&2
+              return 1
+            fi
+            local metadata="$RUNNER_TEMP/$label-metadata.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" \
+              > "$metadata"
+            jq -e --argjson id "$artifact_id" --argjson run "$GITHUB_RUN_ID" \
+              --arg head "$GITHUB_SHA" --arg name "$expected_name" \
+              --arg digest "sha256:$artifact_digest" \
+              '.id == $id and .name == $name and .expired == false and \
+               .workflow_run.id == $run and .workflow_run.head_sha == $head and \
+               .digest == $digest' "$metadata" > /dev/null
+            local archive="$RUNNER_TEMP/$label-$artifact_id.zip"
+            curl --fail-with-body --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$archive" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+            local actual_digest
+            actual_digest=$(sha256sum "$archive")
+            actual_digest=${actual_digest%% *}
+            test "$actual_digest" = "$artifact_digest"
+            local entries
+            entries=$(unzip -Z1 "$archive")
+            test -n "$entries"
+            if grep -Ev '^[A-Za-z0-9][A-Za-z0-9._+-]*$' <<< "$entries" | grep -q .; then
+              echo "$label artifact contains an unsafe entry" >&2
+              return 1
+            fi
+            test -z "$(sort <<< "$entries" | uniq -d)"
+            mkdir "$destination"
+            unzip -q "$archive" -d "$destination"
+            rm "$archive"
+          }
 
-      - name: Download reviewed hashes
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-provenance
-          path: provenance
+          download_exact_artifact provenance "$PROVENANCE_ARTIFACT_ID" \
+            "$PROVENANCE_ARTIFACT_DIGEST" release-provenance provenance
+          download_exact_artifact distributions "$DISTRIBUTIONS_ARTIFACT_ID" \
+            "$DISTRIBUTIONS_ARTIFACT_DIGEST" release-distributions dist
 
-      - name: Verify distributions before attestation
-        run: (cd dist && sha256sum --check ../provenance/SHA256SUMS)
+          expected_provenance=$(printf '%s\n' \
+            RELEASE_GOVERNANCE.json \
+            RELEASE_GOVERNANCE.md \
+            SHA256SUMS \
+            accepted-reproducibility-distributions.json \
+            accepted-reproducibility-environment-comparison.json \
+            accepted-reproducibility-environment-one.json \
+            accepted-reproducibility-environment-two.json \
+            admin-capture.json \
+            admin-capture.json.sha256 \
+            bound-reproducibility-distributions.json \
+            bound-reproducibility-environment.json \
+            cuda-evidence.sha256 \
+            cuda-jobs.json \
+            cuda-run.json \
+            explainiverse-build.cdx.json \
+            external-controls.json \
+            external-controls.json.sha256 \
+            preflight-source-run.json \
+            publish-vs-reproducibility-one.json \
+            publish-vs-reproducibility-two.json \
+            release-environment.json \
+            reproducibility-expected-run.json \
+            reproducibility-source-run.json | sort)
+          actual_provenance=$(find provenance -mindepth 1 -maxdepth 1 \
+            -type f -printf '%f\n' | sort)
+          test "$actual_provenance" = "$expected_provenance"
+          test -z "$(find provenance -mindepth 1 -maxdepth 1 \
+            ! -type f -print -quit)"
+
+          version=${RELEASE_TAG#v}
+          expected=$(printf '%s\n' \
+            "explainiverse-$version-py3-none-any.whl" \
+            "explainiverse-$version.tar.gz" | sort)
+          if grep -Ev '^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._+-]*$' \
+              provenance/SHA256SUMS | grep -q .; then
+            echo "distribution hash manifest is malformed" >&2
+            exit 1
+          fi
+          manifest_names=$(sed -E 's/^[0-9a-f]{64}  //' provenance/SHA256SUMS | sort)
+          actual=$(find dist -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$manifest_names" = "$expected"
+          test "$actual" = "$expected"
+          test -z "$(find dist -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+          (cd dist && sha256sum --check ../provenance/SHA256SUMS)
 
       - name: Attest distribution provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
@@ -577,50 +810,141 @@ jobs:
 
   publish:
     name: Publish through PyPI Trusted Publishing
-    needs: attest
+    needs: [build, attest]
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/project/explainiverse/
     permissions:
+      actions: read
+      attestations: read
       contents: read
       id-token: write
 
     steps:
-      - name: Check out the immutable release tag for the final absence guard
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag }}
-          persist-credentials: false
+      - name: Download, hard-verify, and authenticate the exact distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          DISTRIBUTIONS_ARTIFACT_ID: ${{ needs.build.outputs.distributions_artifact_id }}
+          DISTRIBUTIONS_ARTIFACT_DIGEST: ${{ needs.build.outputs.distributions_artifact_digest }}
+          PROVENANCE_ARTIFACT_ID: ${{ needs.build.outputs.provenance_artifact_id }}
+          PROVENANCE_ARTIFACT_DIGEST: ${{ needs.build.outputs.provenance_artifact_digest }}
+        run: |
+          download_exact_artifact() {
+            local label=$1
+            local artifact_id=$2
+            local artifact_digest=$3
+            local expected_name=$4
+            local destination=$5
+            if [[ ! "$artifact_id" =~ ^[1-9][0-9]*$ || \
+                  ! "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "$label artifact identity is malformed" >&2
+              return 1
+            fi
+            local metadata="$RUNNER_TEMP/$label-metadata.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" \
+              > "$metadata"
+            jq -e --argjson id "$artifact_id" --argjson run "$GITHUB_RUN_ID" \
+              --arg head "$GITHUB_SHA" --arg name "$expected_name" \
+              --arg digest "sha256:$artifact_digest" \
+              '.id == $id and .name == $name and .expired == false and \
+               .workflow_run.id == $run and .workflow_run.head_sha == $head and \
+               .digest == $digest' "$metadata" > /dev/null
+            local archive="$RUNNER_TEMP/$label-$artifact_id.zip"
+            curl --fail-with-body --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$archive" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+            local actual_digest
+            actual_digest=$(sha256sum "$archive")
+            actual_digest=${actual_digest%% *}
+            test "$actual_digest" = "$artifact_digest"
+            local entries
+            entries=$(unzip -Z1 "$archive")
+            test -n "$entries"
+            if grep -Ev '^[A-Za-z0-9][A-Za-z0-9._+-]*$' <<< "$entries" | grep -q .; then
+              echo "$label artifact contains an unsafe entry" >&2
+              return 1
+            fi
+            test -z "$(sort <<< "$entries" | uniq -d)"
+            mkdir "$destination"
+            unzip -q "$archive" -d "$destination"
+            rm "$archive"
+          }
 
-      - name: Set up Python 3.12 for the final absence guard
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
+          download_exact_artifact provenance "$PROVENANCE_ARTIFACT_ID" \
+            "$PROVENANCE_ARTIFACT_DIGEST" release-provenance provenance
+          download_exact_artifact distributions "$DISTRIBUTIONS_ARTIFACT_ID" \
+            "$DISTRIBUTIONS_ARTIFACT_DIGEST" release-distributions dist
 
-      - name: Download the exact attested distributions
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-distributions
-          path: dist
+          expected_provenance=$(printf '%s\n' \
+            RELEASE_GOVERNANCE.json \
+            RELEASE_GOVERNANCE.md \
+            SHA256SUMS \
+            accepted-reproducibility-distributions.json \
+            accepted-reproducibility-environment-comparison.json \
+            accepted-reproducibility-environment-one.json \
+            accepted-reproducibility-environment-two.json \
+            admin-capture.json \
+            admin-capture.json.sha256 \
+            bound-reproducibility-distributions.json \
+            bound-reproducibility-environment.json \
+            cuda-evidence.sha256 \
+            cuda-jobs.json \
+            cuda-run.json \
+            explainiverse-build.cdx.json \
+            external-controls.json \
+            external-controls.json.sha256 \
+            preflight-source-run.json \
+            publish-vs-reproducibility-one.json \
+            publish-vs-reproducibility-two.json \
+            release-environment.json \
+            reproducibility-expected-run.json \
+            reproducibility-source-run.json | sort)
+          actual_provenance=$(find provenance -mindepth 1 -maxdepth 1 \
+            -type f -printf '%f\n' | sort)
+          test "$actual_provenance" = "$expected_provenance"
+          test -z "$(find provenance -mindepth 1 -maxdepth 1 \
+            ! -type f -print -quit)"
 
-      - name: Download reviewed hashes
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-provenance
-          path: provenance
-
-      - name: Verify distributions before publication
-        run: (cd dist && sha256sum --check ../provenance/SHA256SUMS)
+          version=${RELEASE_TAG#v}
+          expected=$(printf '%s\n' \
+            "explainiverse-$version-py3-none-any.whl" \
+            "explainiverse-$version.tar.gz" | sort)
+          if grep -Ev '^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._+-]*$' \
+              provenance/SHA256SUMS | grep -q .; then
+            echo "distribution hash manifest is malformed" >&2
+            exit 1
+          fi
+          manifest_names=$(sed -E 's/^[0-9a-f]{64}  //' provenance/SHA256SUMS | sort)
+          actual=$(find dist -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$manifest_names" = "$expected"
+          test "$actual" = "$expected"
+          test -z "$(find dist -mindepth 1 -maxdepth 1 ! -type f -print -quit)"
+          (cd dist && sha256sum --check ../provenance/SHA256SUMS)
+          for artifact in dist/*; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/publish-pypi.yml@refs/tags/$RELEASE_TAG"
+          done
 
       - name: Recheck PyPI immediately before requesting an OIDC publish token
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-        run: >-
-          python scripts/check_pypi_version_absent.py
-          --project explainiverse
-          --tag "$RELEASE_TAG"
+        run: |
+          version=${RELEASE_TAG#v}
+          status=$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/explainiverse/$version/json")
+          if [[ "$status" != 404 ]]; then
+            echo "PyPI absence guard requires exact HTTP 404; got $status" >&2
+            exit 1
+          fi
 
       - name: Publish without a long-lived API token
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
@@ -631,13 +955,19 @@ jobs:
 
   github-release:
     name: Create the immutable GitHub release
-    needs: publish
+    needs: [build, publish]
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
-      contents: write
+      actions: read
+      attestations: read
+      contents: read
     env:
       BOOTSTRAP_PIP_VERSION: "26.2.1"
+    outputs:
+      plan_artifact_id: ${{ steps.upload_plan.outputs.artifact-id }}
+      plan_artifact_digest: ${{ steps.upload_plan.outputs.artifact-digest }}
 
     steps:
       - name: Stage an explicitly requested post-PyPI recovery drill
@@ -650,7 +980,32 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify signed immutable release source before candidate code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "jemsbhai/explainiverse" || \
+                "$GITHUB_REPOSITORY_OWNER" != "jemsbhai" || \
+                "$GITHUB_EVENT_NAME" != "workflow_dispatch" || \
+                "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                "$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" || \
+                "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo "normal GitHub Release source authority check failed" >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          tag_object=$(git rev-parse "$RELEASE_TAG^{tag}")
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+            --jq '.verification.verified')" = true
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor HEAD origin/main
 
       - name: Set up Python 3.12 for provenance verification
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -669,123 +1024,569 @@ jobs:
           --only-binary=:all:
           --requirement .github/requirements/release-tools.txt
 
-      - name: Download attested distributions
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-distributions
-          path: dist
+      - name: Download and hard-verify the exact release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          DISTRIBUTIONS_ARTIFACT_ID: ${{ needs.build.outputs.distributions_artifact_id }}
+          DISTRIBUTIONS_ARTIFACT_DIGEST: ${{ needs.build.outputs.distributions_artifact_digest }}
+          PROVENANCE_ARTIFACT_ID: ${{ needs.build.outputs.provenance_artifact_id }}
+          PROVENANCE_ARTIFACT_DIGEST: ${{ needs.build.outputs.provenance_artifact_digest }}
+        run: |
+          download_exact_artifact() {
+            local label=$1
+            local artifact_id=$2
+            local artifact_digest=$3
+            local destination=$4
+            if [[ ! "$artifact_id" =~ ^[1-9][0-9]*$ || \
+                  ! "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "$label artifact identity is malformed" >&2
+              return 1
+            fi
+            local archive="$RUNNER_TEMP/$label-$artifact_id.zip"
+            curl --fail-with-body --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$archive" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+            local actual_digest
+            actual_digest=$(sha256sum "$archive")
+            actual_digest=${actual_digest%% *}
+            test "$actual_digest" = "$artifact_digest"
+            local entries
+            entries=$(unzip -Z1 "$archive")
+            test -n "$entries"
+            if grep -Ev '^[A-Za-z0-9][A-Za-z0-9._+-]*$' <<< "$entries" | grep -q .; then
+              echo "$label artifact contains an unsafe entry" >&2
+              return 1
+            fi
+            test -z "$(sort <<< "$entries" | uniq -d)"
+            mkdir "$destination"
+            unzip -q "$archive" -d "$destination"
+            rm "$archive"
+          }
+          download_exact_artifact provenance "$PROVENANCE_ARTIFACT_ID" \
+            "$PROVENANCE_ARTIFACT_DIGEST" provenance
+          download_exact_artifact distributions "$DISTRIBUTIONS_ARTIFACT_ID" \
+            "$DISTRIBUTIONS_ARTIFACT_DIGEST" dist
 
-      - name: Download hashes and SBOM
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-provenance
-          path: provenance
-
-      - name: Verify release assets against reviewed hashes
-        run: (cd dist && sha256sum --check ../provenance/SHA256SUMS)
-
-      - name: Create and verify a draft from the already-published signed tag
+      - name: Verify release assets against reviewed hashes and PyPI provenance
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          mkdir -p release-verification/draft-assets
-          gh release create "$RELEASE_TAG" dist/* provenance/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --draft \
-            --generate-notes \
-            --notes-file provenance/RELEASE_GOVERNANCE.md \
-            --title "Explainiverse $RELEASE_TAG"
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --json body,isDraft > github-release-draft.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          release = json.loads(Path("github-release-draft.json").read_text(encoding="utf-8"))
-          disclosure = Path("provenance/RELEASE_GOVERNANCE.md").read_text(encoding="utf-8").strip()
-          if release.get("isDraft") is not True or disclosure not in release.get("body", ""):
-              raise SystemExit("draft GitHub Release omitted the governance disclosure")
-          PY
+          (cd dist && sha256sum --check ../provenance/SHA256SUMS)
           version=${RELEASE_TAG#v}
           curl --fail --location --proto '=https' --tlsv1.2 \
             --retry 12 --retry-delay 5 --retry-all-errors \
             "https://pypi.org/pypi/explainiverse/$version/json" \
-            --output release-verification/pypi.json
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --dir release-verification/draft-assets
-          python scripts/verify_release_recovery.py artifacts \
+            --output pypi.json
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/verify_release_recovery.py artifacts \
             --sums provenance/SHA256SUMS \
             --dist dist \
-            --pypi-json release-verification/pypi.json \
+            --pypi-json pypi.json \
             --project explainiverse \
-            --tag "$RELEASE_TAG" \
-            --github-assets release-verification/draft-assets \
-            --provenance provenance
-          python scripts/verify_pypi_provenance.py \
-            --pypi-json release-verification/pypi.json \
+            --tag "$RELEASE_TAG"
+          env -u GH_TOKEN -u GITHUB_TOKEN python scripts/verify_pypi_provenance.py \
+            --pypi-json pypi.json \
             --sums provenance/SHA256SUMS \
             --project explainiverse \
             --tag "$RELEASE_TAG" \
             --repository "$GITHUB_REPOSITORY" \
             --workflow publish-pypi.yml \
             --environment pypi \
-            --output-dir release-verification/pypi-provenance
+            --output-dir pypi-provenance
           python -c "import importlib.metadata; print(importlib.metadata.version('pypi-attestations'))" \
-            > release-verification/pypi-provenance/pypi-attestations-version.txt
-          test "$(cat release-verification/pypi-provenance/pypi-attestations-version.txt)" = 0.0.30
+            > pypi-provenance/pypi-attestations-version.txt
+          test "$(cat pypi-provenance/pypi-attestations-version.txt)" = 0.0.30
           for artifact in dist/*; do
             filename=$(basename "$artifact")
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/publish-pypi.yml@refs/tags/$RELEASE_TAG"
             pypi-attestations verify pypi \
               --repository "https://github.com/$GITHUB_REPOSITORY" \
-              --provenance-file "release-verification/pypi-provenance/$filename.provenance.json" \
+              --provenance-file "pypi-provenance/$filename.provenance.json" \
               "$artifact" 2>&1 \
-              | tee "release-verification/pypi-provenance/$filename.cryptographic-verification.txt"
+              | tee "pypi-provenance/$filename.cryptographic-verification.txt"
           done
-          (cd release-verification/draft-assets && sha256sum * | sort) \
-            > release-verification/draft-assets.sha256
-          cp github-release-draft.json release-verification/
+
+      - name: Prepare the exact fixed-command GitHub Release plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p normal-release-plan/release-assets normal-release-plan/evidence
+          for asset in dist/* provenance/*; do
+            test -f "$asset"
+            test ! -L "$asset"
+            name=$(basename "$asset")
+            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+              echo "unsafe normal release asset name: $name" >&2
+              exit 1
+            fi
+            if [[ -e "normal-release-plan/release-assets/$name" || \
+                  -L "normal-release-plan/release-assets/$name" ]]; then
+              echo "duplicate normal release asset name: $name" >&2
+              exit 1
+            fi
+            install -m 0600 "$asset" "normal-release-plan/release-assets/$name"
+          done
+          (cd normal-release-plan/release-assets && sha256sum ./* | sort) \
+            > normal-release-plan/release-assets.sha256
+          (cd normal-release-plan/release-assets && \
+            sha256sum --check ../release-assets.sha256 && \
+            sha256sum --check SHA256SUMS)
+          install -m 0600 pypi.json normal-release-plan/evidence/pypi.json
+          cp -R pypi-provenance normal-release-plan/evidence/
           gh api --method GET "repos/$GITHUB_REPOSITORY/immutable-releases" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
-            > release-verification/immutable-releases.json
-          jq -e '.enabled == true' release-verification/immutable-releases.json > /dev/null
+            > normal-release-plan/evidence/immutable-releases.json
+          jq -e '.enabled == true' \
+            normal-release-plan/evidence/immutable-releases.json > /dev/null
+
+      - name: Archive the fixed normal-release plan
+        id: upload_plan
+        if: always() && inputs.stage_recovery_drill == false
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: normal-release-plan-${{ inputs.tag }}
+          path: normal-release-plan/
+          if-no-files-found: error
+          retention-days: 90
+
+  github-release-finalize:
+    name: Finalize the immutable GitHub release with fixed commands
+    needs: [build, github-release]
+    if: ${{ github.run_attempt == 1 && inputs.stage_recovery_drill == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+
+    steps:
+      - name: Revalidate authority and the exact normal-release plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          PLAN_ARTIFACT_ID: ${{ needs.github-release.outputs.plan_artifact_id }}
+          PLAN_ARTIFACT_DIGEST: ${{ needs.github-release.outputs.plan_artifact_digest }}
+          DISTRIBUTIONS_ARTIFACT_ID: ${{ needs.build.outputs.distributions_artifact_id }}
+          DISTRIBUTIONS_ARTIFACT_DIGEST: ${{ needs.build.outputs.distributions_artifact_digest }}
+          PROVENANCE_ARTIFACT_ID: ${{ needs.build.outputs.provenance_artifact_id }}
+          PROVENANCE_ARTIFACT_DIGEST: ${{ needs.build.outputs.provenance_artifact_digest }}
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "jemsbhai/explainiverse" || \
+                "$GITHUB_REPOSITORY_OWNER" != "jemsbhai" || \
+                "$GITHUB_EVENT_NAME" != "workflow_dispatch" || \
+                "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                "$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" || \
+                "$GITHUB_RUN_ATTEMPT" != 1 || \
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || \
+                ! "$PLAN_ARTIFACT_ID" =~ ^[1-9][0-9]*$ || \
+                ! "$PLAN_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ || \
+                ! "$DISTRIBUTIONS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ || \
+                ! "$DISTRIBUTIONS_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ || \
+                ! "$PROVENANCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ || \
+                ! "$PROVENANCE_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "fixed GitHub Release authority check failed" >&2
+            exit 1
+          fi
+
+          download_bound_artifact() {
+            local label=$1
+            local artifact_id=$2
+            local artifact_digest=$3
+            local expected_name=$4
+            local destination=$5
+            local allow_directories=$6
+            local metadata="$RUNNER_TEMP/$label-metadata.json"
+            local archive="$RUNNER_TEMP/$label-$artifact_id.zip"
+
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" \
+              > "$metadata"
+            jq -e --argjson id "$artifact_id" --argjson run "$GITHUB_RUN_ID" \
+              --arg head "$GITHUB_SHA" --arg name "$expected_name" \
+              --arg digest "sha256:$artifact_digest" \
+              '.id == $id and .name == $name and .expired == false and \
+               .workflow_run.id == $run and .workflow_run.head_sha == $head and \
+               .digest == $digest' "$metadata" > /dev/null
+            curl --fail-with-body --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$archive" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+            local actual_digest
+            actual_digest=$(sha256sum "$archive")
+            actual_digest=${actual_digest%% *}
+            test "$actual_digest" = "$artifact_digest"
+            local entries
+            entries=$(unzip -Z1 "$archive")
+            test -n "$entries"
+            test -z "$(sort <<< "$entries" | uniq -d)"
+            while IFS= read -r entry; do
+              if [[ "$allow_directories" == true ]]; then
+                if [[ ! "$entry" =~ ^[A-Za-z0-9][A-Za-z0-9._+/-]*$ || \
+                      "$entry" == *"//"* || "$entry" == *"/../"* || \
+                      "$entry" == */.. || "$entry" == *"/./"* || \
+                      "$entry" == */. ]]; then
+                  echo "unsafe $label artifact entry: $entry" >&2
+                  return 1
+                fi
+              elif [[ ! "$entry" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+                echo "$label artifact entry is not an exact flat filename: $entry" >&2
+                return 1
+              fi
+            done <<< "$entries"
+            mkdir "$destination"
+            unzip -q "$archive" -d "$destination"
+            rm "$archive"
+          }
+
+          download_bound_artifact plan "$PLAN_ARTIFACT_ID" \
+            "$PLAN_ARTIFACT_DIGEST" "normal-release-plan-$RELEASE_TAG" \
+            normal-release-plan true
+          download_bound_artifact distributions "$DISTRIBUTIONS_ARTIFACT_ID" \
+            "$DISTRIBUTIONS_ARTIFACT_DIGEST" release-distributions \
+            finalize-source-dist false
+          download_bound_artifact provenance "$PROVENANCE_ARTIFACT_ID" \
+            "$PROVENANCE_ARTIFACT_DIGEST" release-provenance \
+            finalize-source-provenance false
+
+          version=${RELEASE_TAG#v}
+          expected_distributions=$(printf '%s\n' \
+            "explainiverse-$version-py3-none-any.whl" \
+            "explainiverse-$version.tar.gz" | sort)
+          actual_distributions=$(find finalize-source-dist -mindepth 1 \
+            -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$actual_distributions" = "$expected_distributions"
+          test -z "$(find finalize-source-dist -mindepth 1 -maxdepth 1 \
+            ! -type f -print -quit)"
+
+          expected_provenance=$(printf '%s\n' \
+            RELEASE_GOVERNANCE.json \
+            RELEASE_GOVERNANCE.md \
+            SHA256SUMS \
+            accepted-reproducibility-distributions.json \
+            accepted-reproducibility-environment-comparison.json \
+            accepted-reproducibility-environment-one.json \
+            accepted-reproducibility-environment-two.json \
+            admin-capture.json \
+            admin-capture.json.sha256 \
+            bound-reproducibility-distributions.json \
+            bound-reproducibility-environment.json \
+            cuda-evidence.sha256 \
+            cuda-jobs.json \
+            cuda-run.json \
+            explainiverse-build.cdx.json \
+            external-controls.json \
+            external-controls.json.sha256 \
+            preflight-source-run.json \
+            publish-vs-reproducibility-one.json \
+            publish-vs-reproducibility-two.json \
+            release-environment.json \
+            reproducibility-expected-run.json \
+            reproducibility-source-run.json | sort)
+          actual_provenance=$(find finalize-source-provenance -mindepth 1 \
+            -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$actual_provenance" = "$expected_provenance"
+          test -z "$(find finalize-source-provenance -mindepth 1 -maxdepth 1 \
+            ! -type f -print -quit)"
+
+          test -z "$(find normal-release-plan -mindepth 1 \
+            ! -type f ! -type d -print -quit)"
+          mkdir -p finalize-source/release-assets
+          for asset in finalize-source-dist/* finalize-source-provenance/*; do
+            test -f "$asset"
+            test ! -L "$asset"
+            name=$(basename "$asset")
+            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ || \
+                  -e "finalize-source/release-assets/$name" || \
+                  -L "finalize-source/release-assets/$name" ]]; then
+              echo "unsafe or duplicate source release asset: $name" >&2
+              exit 1
+            fi
+            install -m 0600 "$asset" "finalize-source/release-assets/$name"
+          done
+          (cd finalize-source/release-assets && sha256sum ./* | sort) \
+            > finalize-source/release-assets.sha256
+          cmp --silent normal-release-plan/release-assets.sha256 \
+            finalize-source/release-assets.sha256
+          (cd finalize-source/release-assets && \
+            sha256sum --check ../release-assets.sha256 && \
+            sha256sum --check SHA256SUMS)
+          install -m 0600 normal-release-plan/release-assets.sha256 \
+            normal-release-plan/evidence/verified-plan-release-assets.sha256
+          install -m 0600 finalize-source/release-assets.sha256 \
+            normal-release-plan/evidence/verified-source-release-assets.sha256
+
+          install -m 0600 "$RUNNER_TEMP/plan-metadata.json" \
+            normal-release-plan/evidence/verified-plan-artifact-metadata.json
+          install -m 0600 "$RUNNER_TEMP/distributions-metadata.json" \
+            normal-release-plan/evidence/verified-distributions-artifact-metadata.json
+          install -m 0600 "$RUNNER_TEMP/provenance-metadata.json" \
+            normal-release-plan/evidence/verified-provenance-artifact-metadata.json
+
+      - name: Reverify immutable source, assets, attestations, and PyPI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+            > normal-release-plan/evidence/finalize-tag-ref.json
+          jq -e '.object.type == "tag"' \
+            normal-release-plan/evidence/finalize-tag-ref.json > /dev/null
+          tag_object=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+            normal-release-plan/evidence/finalize-tag-ref.json)
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+            > normal-release-plan/evidence/finalize-tag-object.json
+          jq -e '.verification.verified == true and .object.type == "commit"' \
+            normal-release-plan/evidence/finalize-tag-object.json > /dev/null
+          release_commit=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+            normal-release-plan/evidence/finalize-tag-object.json)
+          test "$release_commit" = "$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/compare/$release_commit...main" \
+            > normal-release-plan/evidence/finalize-main-ancestry.json
+          jq -e --arg commit "$release_commit" \
+            '.base_commit.sha == $commit and .merge_base_commit.sha == $commit and \
+             (.status == "ahead" or .status == "identical")' \
+            normal-release-plan/evidence/finalize-main-ancestry.json > /dev/null
+          jq -e --arg tag "$RELEASE_TAG" --arg commit "$release_commit" \
+            --arg repository "$GITHUB_REPOSITORY" --arg owner "$GITHUB_REPOSITORY_OWNER" \
+            --arg run "$GITHUB_RUN_ID" \
+            '.schema_version == 1 and .release.repository == $repository and \
+             .release.tag == $tag and .release.commit == $commit and \
+              (.evidence.release_workflow_run_id | tostring) == $run and \
+              .governance.release_dispatch_actor == $owner and \
+              .governance.release_triggering_actor == $owner and \
+              .governance.capture_principal == $owner and \
+              (.governance.release_run_attempt | tostring) == "1"' \
+            finalize-source/release-assets/RELEASE_GOVERNANCE.json > /dev/null
+
+          test -f finalize-source/release-assets.sha256
+          if grep -Ev '^[0-9a-f]{64}  \./[A-Za-z0-9][A-Za-z0-9._+-]*$' \
+              finalize-source/release-assets.sha256 | grep -q .; then
+            echo "source release asset manifest is malformed" >&2
+            exit 1
+          fi
+          expected=$(sed -E 's/^[0-9a-f]{64}  //' \
+            finalize-source/release-assets.sha256 | sort)
+          actual=$(find finalize-source/release-assets -mindepth 1 -maxdepth 1 \
+            -type f -printf './%f\n' | sort)
+          test "$actual" = "$expected"
+          (cd finalize-source/release-assets && \
+            sha256sum --check ../release-assets.sha256 && \
+            sha256sum --check SHA256SUMS)
+
+          version=${RELEASE_TAG#v}
+          expected_distributions=$(printf '%s\n' \
+            "explainiverse-$version-py3-none-any.whl" \
+            "explainiverse-$version.tar.gz" | sort)
+          distribution_names=$(sed -E 's/^[0-9a-f]{64}  //' \
+            finalize-source/release-assets/SHA256SUMS | sort)
+          test "$distribution_names" = "$expected_distributions"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            "https://pypi.org/pypi/explainiverse/$version/json" \
+            --output normal-release-plan/evidence/pre-finalize-pypi.json
+          test "$(jq -r '.info.name | ascii_downcase | gsub("-"; "_")' \
+            normal-release-plan/evidence/pre-finalize-pypi.json)" = explainiverse
+          test "$(jq -r '.info.version' \
+            normal-release-plan/evidence/pre-finalize-pypi.json)" = "$version"
+          actual_pypi=$(jq -r '.urls[] | "\(.digests.sha256)  \(.filename)"' \
+            normal-release-plan/evidence/pre-finalize-pypi.json | sort)
+          test "$actual_pypi" = "$(sort finalize-source/release-assets/SHA256SUMS)"
+          while read -r _ filename; do
+            gh attestation verify "finalize-source/release-assets/$filename" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/publish-pypi.yml@refs/tags/$RELEASE_TAG"
+          done < finalize-source/release-assets/SHA256SUMS
+
+      - name: Create, verify, and finalize the immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          audit_live_source_and_authority() {
+            if [[ "$GITHUB_REPOSITORY" != "jemsbhai/explainiverse" || \
+                  "$GITHUB_REPOSITORY_OWNER" != "jemsbhai" || \
+                  "$GITHUB_EVENT_NAME" != "workflow_dispatch" || \
+                  "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                  "$GITHUB_TRIGGERING_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
+                  "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" || \
+                  "$GITHUB_RUN_ATTEMPT" != 1 || \
+                  ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "live release authority changed before a write" >&2
+              return 1
+            fi
+            (cd finalize-source/release-assets && \
+              sha256sum --check ../release-assets.sha256 && \
+              sha256sum --check SHA256SUMS)
+            cmp --silent normal-release-plan/release-assets.sha256 \
+              finalize-source/release-assets.sha256
+
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              > normal-release-plan/evidence/live-boundary-tag-ref.json
+            jq -e '.object.type == "tag" and \
+              (.object.sha | test("^[0-9a-f]{40}$"))' \
+              normal-release-plan/evidence/live-boundary-tag-ref.json > /dev/null
+            local tag_object
+            tag_object=$(jq -er \
+              '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+              normal-release-plan/evidence/live-boundary-tag-ref.json)
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+              > normal-release-plan/evidence/live-boundary-tag-object.json
+            jq -e '.verification.verified == true and .object.type == "commit" and \
+              (.object.sha | test("^[0-9a-f]{40}$"))' \
+              normal-release-plan/evidence/live-boundary-tag-object.json > /dev/null
+            local release_commit
+            release_commit=$(jq -er \
+              '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+              normal-release-plan/evidence/live-boundary-tag-object.json)
+            test "$release_commit" = "$GITHUB_SHA"
+            gh api "repos/$GITHUB_REPOSITORY/compare/$release_commit...main" \
+              > normal-release-plan/evidence/live-boundary-main-ancestry.json
+            jq -e --arg commit "$release_commit" \
+              '.base_commit.sha == $commit and .merge_base_commit.sha == $commit and \
+               (.status == "ahead" or .status == "identical")' \
+              normal-release-plan/evidence/live-boundary-main-ancestry.json > /dev/null
+            gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              > normal-release-plan/evidence/live-boundary-immutable-releases.json
+            jq -e '.enabled == true' \
+              normal-release-plan/evidence/live-boundary-immutable-releases.json > /dev/null
+
+            local version=${RELEASE_TAG#v}
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              --retry 12 --retry-delay 5 --retry-all-errors \
+              "https://pypi.org/pypi/explainiverse/$version/json" \
+              --output normal-release-plan/evidence/live-boundary-pypi.json
+            test "$(jq -r '.info.name | ascii_downcase | gsub("-"; "_")' \
+              normal-release-plan/evidence/live-boundary-pypi.json)" = explainiverse
+            test "$(jq -r '.info.version' \
+              normal-release-plan/evidence/live-boundary-pypi.json)" = "$version"
+            local actual_pypi
+            actual_pypi=$(jq -r '.urls[] | "\(.digests.sha256)  \(.filename)"' \
+              normal-release-plan/evidence/live-boundary-pypi.json | sort)
+            test "$actual_pypi" = "$(sort finalize-source/release-assets/SHA256SUMS)"
+          }
+
+          audit_draft_assets() {
+            local uploaded_manifest=$1
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              > normal-release-plan/evidence/live-boundary-draft.json
+            jq -e --arg tag "$RELEASE_TAG" \
+              '.tag_name == $tag and .draft == true and .prerelease == false and \
+               all(.assets[]; .state == "uploaded" and \
+                   (.digest | test("^sha256:[0-9a-f]{64}$")))' \
+              normal-release-plan/evidence/live-boundary-draft.json > /dev/null
+            local expected_live actual_live
+            expected_live=$(sed -E 's/^([0-9a-f]{64})  /sha256:\1  /' \
+              "$uploaded_manifest" | sort)
+            actual_live=$(jq -r \
+              '.assets[] | "\(.digest)  ./\(.name)"' \
+              normal-release-plan/evidence/live-boundary-draft.json | sort)
+            test "$actual_live" = "$expected_live"
+          }
+
+          mkdir -p normal-release-plan/evidence/draft-assets
+          uploaded_manifest="$RUNNER_TEMP/uploaded-release-assets.sha256"
+          : > "$uploaded_manifest"
+
+          audit_live_source_and_authority
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "normal release path refuses a pre-existing GitHub Release" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes \
+            --notes-file finalize-source/release-assets/RELEASE_GOVERNANCE.md \
+            --title "Explainiverse $RELEASE_TAG"
+
+          audit_live_source_and_authority
+          audit_draft_assets "$uploaded_manifest"
+          disclosure=$(< finalize-source/release-assets/RELEASE_GOVERNANCE.md)
+          body=$(jq -er '.body | select(type == "string")' \
+            normal-release-plan/evidence/live-boundary-draft.json)
+          if [[ -z "$disclosure" || "$body" != *"$disclosure"* ]]; then
+            echo "draft GitHub Release omitted the governance disclosure" >&2
+            exit 1
+          fi
+
+          while read -r expected_hash relative_name; do
+            filename=${relative_name#./}
+            test "$relative_name" = "./$filename"
+            audit_live_source_and_authority
+            audit_draft_assets "$uploaded_manifest"
+            test "$(sha256sum "finalize-source/release-assets/$filename" | cut -d' ' -f1)" = \
+              "$expected_hash"
+            gh release upload "$RELEASE_TAG" \
+              "finalize-source/release-assets/$filename" \
+              --repo "$GITHUB_REPOSITORY"
+            printf '%s  ./%s\n' "$expected_hash" "$filename" >> "$uploaded_manifest"
+            sort -o "$uploaded_manifest" "$uploaded_manifest"
+          done < finalize-source/release-assets.sha256
+
+          audit_live_source_and_authority
+          audit_draft_assets "$uploaded_manifest"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir normal-release-plan/evidence/draft-assets
+          expected=$(sed -E 's/^[0-9a-f]{64}  //' \
+            finalize-source/release-assets.sha256 | sort)
+          actual=$(find normal-release-plan/evidence/draft-assets -mindepth 1 \
+            -maxdepth 1 -type f -printf './%f\n' | sort)
+          test "$actual" = "$expected"
+          (cd normal-release-plan/evidence/draft-assets && \
+            sha256sum --check ../../../finalize-source/release-assets.sha256)
+
+          audit_live_source_and_authority
+          audit_draft_assets "$uploaded_manifest"
+          body=$(jq -er '.body | select(type == "string")' \
+            normal-release-plan/evidence/live-boundary-draft.json)
+          [[ -n "$disclosure" && "$body" == *"$disclosure"* ]]
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
-      - name: Require and reverify the finalized immutable release
+      - name: Record the final immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
-            > release-verification/final-release.json
-          test "$(jq -r '.tag_name' release-verification/final-release.json)" = "$RELEASE_TAG"
-          jq -e \
-            '.draft == false and .prerelease == false and .immutable == true' \
-            release-verification/final-release.json > /dev/null
-          python scripts/verify_release_recovery.py release-body \
-            --release-json release-verification/final-release.json \
-            --disclosure provenance/RELEASE_GOVERNANCE.md
-          mkdir -p release-verification/final-assets
+            > normal-release-plan/evidence/final-release.json
+          test "$(jq -r '.tag_name' normal-release-plan/evidence/final-release.json)" = \
+            "$RELEASE_TAG"
+          jq -e '.draft == false and .prerelease == false and .immutable == true' \
+            normal-release-plan/evidence/final-release.json > /dev/null
+          disclosure=$(< finalize-source/release-assets/RELEASE_GOVERNANCE.md)
+          body=$(jq -er '.body | select(type == "string")' \
+            normal-release-plan/evidence/final-release.json)
+          if [[ -z "$disclosure" || "$body" != *"$disclosure"* ]]; then
+            echo "final GitHub Release omitted the governance disclosure" >&2
+            exit 1
+          fi
+          mkdir normal-release-plan/evidence/final-assets
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --dir release-verification/final-assets
-          python scripts/verify_release_recovery.py artifacts \
-            --sums provenance/SHA256SUMS \
-            --dist dist \
-            --pypi-json release-verification/pypi.json \
-            --project explainiverse \
-            --tag "$RELEASE_TAG" \
-            --github-assets release-verification/final-assets \
-            --provenance provenance
-          (cd release-verification/final-assets && sha256sum * | sort) \
-            > release-verification/final-assets.sha256
+            --dir normal-release-plan/evidence/final-assets
+          expected=$(sed -E 's/^[0-9a-f]{64}  //' \
+            finalize-source/release-assets.sha256 | sort)
+          actual=$(find normal-release-plan/evidence/final-assets -mindepth 1 \
+            -maxdepth 1 -type f -printf './%f\n' | sort)
+          test "$actual" = "$expected"
+          (cd normal-release-plan/evidence/final-assets && \
+            sha256sum --check ../../../finalize-source/release-assets.sha256)
+          (cd normal-release-plan/evidence/final-assets && sha256sum ./* | sort) \
+            > normal-release-plan/evidence/final-assets.sha256
 
       - name: Archive normal-path release verification evidence
-        if: always() && inputs.stage_recovery_drill == false
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: normal-release-verification-${{ inputs.tag }}
-          path: release-verification/**
+          path: normal-release-plan/evidence/
           if-no-files-found: error
           retention-days: 90

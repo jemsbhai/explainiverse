@@ -151,10 +151,131 @@
   "immutable_releases": {
     "enabled": true
   },
+  "fork_pr_contributor_approval": {
+    "approval_policy": "all_external_contributors"
+  },
   "admin_snapshot_principals": ["jemsbhai"],
   "release_runner_authority": {
     "allowed_collaborator_logins": ["jemsbhai"],
-    "pending_invitations": []
+    "pending_invitations": [],
+    "registered_runners": [],
+    "repository_variable_names": [],
+    "installed_apps": {
+      "source_url": "https://github.com/settings/installations",
+      "expected_installations": [
+        {
+          "id": 67312423,
+          "name": "ChatGPT Codex Connector",
+          "repository_selection": "all",
+          "repository_access": true,
+          "suspended": true,
+          "danger_zone_action": "Unsuspend",
+          "permission_update_requested": false,
+          "permission_update_review": "not-requested",
+          "permissions": {
+            "read": ["checks", "commit statuses", "metadata"],
+            "write": ["actions", "code", "issues", "pull requests", "workflows"]
+          },
+          "requested_additional_permissions": {"read": [], "write": []}
+        },
+        {
+          "id": 98967149,
+          "name": "Claude",
+          "repository_selection": "all",
+          "repository_access": true,
+          "suspended": true,
+          "danger_zone_action": "Unsuspend",
+          "permission_update_requested": false,
+          "permission_update_review": "not-requested",
+          "permissions": {
+            "read": ["commit statuses", "metadata"],
+            "write": [
+              "actions",
+              "checks",
+              "code",
+              "discussions",
+              "issues",
+              "pull requests",
+              "repository hooks",
+              "workflows"
+            ]
+          },
+          "requested_additional_permissions": {"read": [], "write": []}
+        },
+        {
+          "id": 14141661,
+          "name": "GitGuardian",
+          "repository_selection": "all",
+          "repository_access": true,
+          "suspended": true,
+          "danger_zone_action": "Unsuspend",
+          "permission_update_requested": true,
+          "permission_update_review": "pending-no-displayed-repository-permission-delta",
+          "permissions": {
+            "read": ["code", "metadata"],
+            "write": ["checks", "issues", "pull requests"]
+          },
+          "requested_additional_permissions": {"read": [], "write": []}
+        },
+        {
+          "id": 98315629,
+          "name": "lovable.dev",
+          "repository_selection": "all",
+          "repository_access": true,
+          "suspended": true,
+          "danger_zone_action": "Unsuspend",
+          "permission_update_requested": false,
+          "permission_update_review": "not-requested",
+          "permissions": {
+            "read": ["metadata"],
+            "write": ["administration", "code", "workflows"]
+          },
+          "requested_additional_permissions": {"read": [], "write": []}
+        },
+        {
+          "id": 109872254,
+          "name": "Socket Security",
+          "repository_selection": "all",
+          "repository_access": true,
+          "suspended": false,
+          "danger_zone_action": "Suspend",
+          "permission_update_requested": false,
+          "permission_update_review": "not-requested",
+          "permissions": {
+            "read": ["issues", "merge queues", "metadata"],
+            "write": ["checks", "code", "pull requests"]
+          },
+          "requested_additional_permissions": {"read": [], "write": []}
+        },
+        {
+          "id": 80585128,
+          "name": "Vercel",
+          "repository_selection": "all",
+          "repository_access": true,
+          "suspended": true,
+          "danger_zone_action": "Unsuspend",
+          "permission_update_requested": true,
+          "permission_update_review": "listed-additional-permissions",
+          "permissions": {
+            "read": ["metadata"],
+            "write": [
+              "administration",
+              "checks",
+              "code",
+              "commit statuses",
+              "deployments",
+              "issues",
+              "pull requests",
+              "repository hooks"
+            ]
+          },
+          "requested_additional_permissions": {
+            "read": ["actions"],
+            "write": ["workflows"]
+          }
+        }
+      ]
+    }
   },
   "cuda_evidence": {
     "workflow_path": ".github/workflows/cuda-ci.yml",

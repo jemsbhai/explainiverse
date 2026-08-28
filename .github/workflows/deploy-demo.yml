@@ -3,7 +3,6 @@ name: Deploy Demo to Pages
 on:
   push:
     branches: ["main"]
-  workflow_dispatch: # Allows manual triggering from GitHub UI
 
 permissions:
   contents: read
@@ -13,9 +12,72 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize:
+    name: Authorize the immutable Pages push context
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    if: >-
+      github.repository == 'jemsbhai/explainiverse' &&
+      github.repository_owner == 'jemsbhai' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.sha == github.event.after &&
+      github.run_attempt == 1
+    steps:
+      - name: Reject any repository, event, ref, SHA, or attempt drift
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: jemsbhai/explainiverse
+          EXPECTED_OWNER: jemsbhai
+          EXPECTED_EVENT: push
+          EXPECTED_REF: refs/heads/main
+          ACTUAL_REPOSITORY: ${{ github.repository }}
+          ACTUAL_OWNER: ${{ github.repository_owner }}
+          ACTUAL_EVENT: ${{ github.event_name }}
+          ACTUAL_REF: ${{ github.ref }}
+          ACTUAL_SHA: ${{ github.sha }}
+          EVENT_AFTER: ${{ github.event.after }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          exact_context = (
+              os.environ.get("ACTUAL_REPOSITORY") == os.environ.get("EXPECTED_REPOSITORY")
+              and os.environ.get("ACTUAL_OWNER") == os.environ.get("EXPECTED_OWNER")
+              and os.environ.get("ACTUAL_EVENT") == os.environ.get("EXPECTED_EVENT")
+              and os.environ.get("ACTUAL_REF") == os.environ.get("EXPECTED_REF")
+              and os.environ.get("RUN_ATTEMPT") == "1"
+          )
+          sha = os.environ.get("ACTUAL_SHA", "")
+          event_after = os.environ.get("EVENT_AFTER", "")
+          exact_sha = (
+              re.fullmatch(r"[0-9a-f]{40}", sha) is not None
+              and re.fullmatch(r"[0-9a-f]{40}", event_after) is not None
+              and sha == event_after
+          )
+          if not (exact_context and exact_sha):
+              raise SystemExit("Pages deployment authority context rejected")
+          PY
+
   build:
     name: Build and upload the Pages artifact
+    needs: authorize
+    if: >-
+      needs.authorize.result == 'success' &&
+      github.repository == 'jemsbhai/explainiverse' &&
+      github.repository_owner == 'jemsbhai' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.sha == github.event.after &&
+      github.run_attempt == 1
     runs-on: ubuntu-latest
+    outputs:
+      evidence_artifact_id: ${{ steps.evidence-upload.outputs.artifact-id }}
+      evidence_artifact_digest: ${{ steps.evidence-upload.outputs.artifact-digest }}
+      pages_artifact_id: ${{ steps.pages-upload.outputs.artifact_id }}
     permissions:
       contents: read
     defaults:
@@ -53,8 +115,30 @@ jobs:
         env:
           GITHUB_PAGES: "true"
 
+      - name: Reject links, hardlinks, and special files from the deployable tree
+        shell: bash
+        run: |
+          test -z "$(find dist/demo -type l -print -quit)"
+          test -z "$(find dist/demo -type f -links +1 -print -quit)"
+          test -z "$(find dist/demo ! -type d ! -type f -print -quit)"
+          test -z "$(find dist/demo -mindepth 1 -type d -empty -print -quit)"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path("dist/demo")
+          for entry in root.rglob("*"):
+              relative = entry.relative_to(root).as_posix()
+              if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", relative) is None:
+                  raise SystemExit(f"unsafe Pages path rejected: {relative!r}")
+              if any(part.startswith(".") for part in relative.split("/")):
+                  raise SystemExit(f"hidden Pages path rejected: {relative!r}")
+          PY
+
       - name: Record the exact deployable tree
         shell: bash
+        env:
+          EVENT_AFTER: ${{ github.event.after }}
         run: |
           mkdir -p artifacts/deployment
           demo_file_count=$(find dist/demo -type f | wc -l)
@@ -69,7 +153,12 @@ jobs:
             .trim().split(/\s+/)[0];
           const record = {
             schema_version: 1,
+            repository: process.env.GITHUB_REPOSITORY,
+            repository_owner: process.env.GITHUB_REPOSITORY_OWNER,
+            event: process.env.GITHUB_EVENT_NAME,
+            ref: process.env.GITHUB_REF,
             commit: process.env.GITHUB_SHA,
+            event_after: process.env.EVENT_AFTER,
             workflow_run_id: Number(process.env.GITHUB_RUN_ID),
             workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
             demo_tree_sha256: treeHash,
@@ -81,6 +170,7 @@ jobs:
           NODE
 
       - name: Retain the exact deployment evidence
+        id: evidence-upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: demo-deployment-evidence-${{ github.sha }}
@@ -88,26 +178,375 @@ jobs:
           if-no-files-found: error
           retention-days: 180
 
+      - name: Re-prove the exact deployable tree before Pages packaging
+        shell: bash
+        run: |
+          test -z "$(find dist/demo -type l -print -quit)"
+          test -z "$(find dist/demo -type f -links +1 -print -quit)"
+          test -z "$(find dist/demo ! -type d ! -type f -print -quit)"
+          test -z "$(find dist/demo -mindepth 1 -type d -empty -print -quit)"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path("dist/demo")
+          for entry in root.rglob("*"):
+              relative = entry.relative_to(root).as_posix()
+              if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", relative) is None:
+                  raise SystemExit(f"unsafe Pages path rejected: {relative!r}")
+              if any(part.startswith(".") for part in relative.split("/")):
+                  raise SystemExit(f"hidden Pages path rejected: {relative!r}")
+          PY
+          current_manifest="$RUNNER_TEMP/demo-files.current.sha256"
+          trap 'rm -f "$current_manifest"' EXIT
+          find dist/demo -type f -print0 | sort -z | xargs -0 -r sha256sum \
+            > "$current_manifest"
+          cmp --silent artifacts/deployment/demo-files.sha256 "$current_manifest"
+          sha256sum --check artifacts/deployment/demo-tree.sha256
+
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        id: pages-upload
+        # v5.0.0 transitively pins actions/upload-artifact v7.0.0 at
+        # bbbca2ddaa5d8feaa63e36b76fdaad77386f024f.
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
+          name: github-pages
           path: "packages/js/dist/demo"
 
   deploy:
     name: Deploy the prebuilt Pages artifact
-    needs: build
+    needs: [authorize, build]
+    if: >-
+      needs.authorize.result == 'success' &&
+      needs.build.result == 'success' &&
+      github.repository == 'jemsbhai/explainiverse' &&
+      github.repository_owner == 'jemsbhai' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.sha == github.event.after &&
+      github.run_attempt == 1
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     permissions:
+      actions: read
       pages: write
       id-token: write
 
     steps:
+      - name: Verify the exact server-retained Pages artifact and deployed tree
+        shell: bash
+        env:
+          ACTUAL_REPOSITORY: ${{ github.repository }}
+          ACTUAL_OWNER: ${{ github.repository_owner }}
+          ACTUAL_EVENT: ${{ github.event_name }}
+          ACTUAL_REF: ${{ github.ref }}
+          ACTUAL_SHA: ${{ github.sha }}
+          EVENT_AFTER: ${{ github.event.after }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVIDENCE_ARTIFACT_ID: ${{ needs.build.outputs.evidence_artifact_id }}
+          EVIDENCE_ARTIFACT_DIGEST: ${{ needs.build.outputs.evidence_artifact_digest }}
+          PAGES_ARTIFACT_ID: ${{ needs.build.outputs.pages_artifact_id }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import re
+          import shutil
+          import stat
+          import tarfile
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
+
+          MAX_BYTES = 512 * 1024 * 1024
+          MAX_ENTRIES = 10_000
+          SHA = re.compile(r"[0-9a-f]{40}")
+          DIGEST = re.compile(r"[0-9a-f]{64}")
+          SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+          def reject(message):
+              raise SystemExit(message)
+
+          def exact_int(name):
+              value = os.environ.get(name, "")
+              if not value.isascii() or not value.isdecimal() or int(value) <= 0:
+                  reject(f"invalid {name}")
+              return int(value)
+
+          repository = os.environ.get("ACTUAL_REPOSITORY", "")
+          head_sha = os.environ.get("ACTUAL_SHA", "")
+          run_id = exact_int("RUN_ID")
+          expected_context = {
+              "ACTUAL_REPOSITORY": "jemsbhai/explainiverse",
+              "ACTUAL_OWNER": "jemsbhai",
+              "ACTUAL_EVENT": "push",
+              "ACTUAL_REF": "refs/heads/main",
+              "RUN_ATTEMPT": "1",
+          }
+          if any(os.environ.get(key) != value for key, value in expected_context.items()):
+              reject("Pages deployment authority context rejected")
+          if not SHA.fullmatch(head_sha) or head_sha != os.environ.get("EVENT_AFTER"):
+              reject("Pages deployment SHA rejected")
+
+          token = os.environ.get("GITHUB_TOKEN", "")
+          if not token:
+              reject("missing ephemeral GitHub token")
+          api = f"https://api.github.com/repos/{repository}"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def api_json(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                  if response.status != 200:
+                      reject("GitHub artifact metadata request rejected")
+                  return json.load(response)
+
+          def safe_relative(name):
+              if "\\" in name or name.startswith("/") or not SAFE_PATH.fullmatch(name):
+                  reject("unsafe artifact path rejected")
+              path = PurePosixPath(name)
+              if any(part in ("", ".", "..") or part.startswith(".") for part in path.parts):
+                  reject("unsafe artifact path component rejected")
+              return path
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          def download_artifact(artifact_id, destination):
+              request = urllib.request.Request(f"{api}/actions/artifacts/{artifact_id}/zip", headers=headers)
+              try:
+                  NoRedirectOpener.open(request, timeout=30)
+              except urllib.error.HTTPError as error:
+                  if error.code not in (301, 302, 303, 307, 308):
+                      raise
+                  location = error.headers.get("Location", "")
+              else:
+                  reject("artifact download did not use an authenticated redirect")
+              parsed = urllib.parse.urlsplit(location)
+              if parsed.scheme != "https" or parsed.username or parsed.password or parsed.fragment:
+                  reject("unsafe artifact download redirect rejected")
+              # Deliberately construct a new, unauthenticated request so the repository
+              # token can never cross the GitHub API origin.
+              with urllib.request.urlopen(urllib.request.Request(location), timeout=60) as response:
+                  if response.status != 200:
+                      reject("artifact download rejected")
+                  total = 0
+                  with destination.open("xb") as output:
+                      while chunk := response.read(1024 * 1024):
+                          total += len(chunk)
+                          if total > MAX_BYTES:
+                              reject("artifact exceeds size bound")
+                          output.write(chunk)
+              return total
+
+          NoRedirectOpener = urllib.request.build_opener(NoRedirect())
+
+          def bind_artifact(name, artifact_id, expected_digest=None):
+              query = urllib.parse.urlencode({"name": name, "per_page": "100"})
+              listing = api_json(f"{api}/actions/runs/{run_id}/artifacts?{query}")
+              artifacts = listing.get("artifacts")
+              if listing.get("total_count") != 1 or not isinstance(artifacts, list) or len(artifacts) != 1:
+                  reject(f"ambiguous current-run artifact: {name}")
+              listed = artifacts[0]
+              direct = api_json(f"{api}/actions/artifacts/{artifact_id}")
+              for field in ("id", "name", "expired", "digest", "size_in_bytes"):
+                  if listed.get(field) != direct.get(field):
+                      reject(f"artifact metadata disagreement: {name}")
+              listed_run = listed.get("workflow_run")
+              direct_run = direct.get("workflow_run")
+              if not isinstance(listed_run, dict) or not isinstance(direct_run, dict):
+                  reject(f"missing listed workflow-run binding: {name}")
+              for field in ("id", "head_sha"):
+                  if listed_run.get(field) != direct_run.get(field):
+                      reject(f"artifact workflow-run metadata disagreement: {name}")
+              workflow_run = direct.get("workflow_run")
+              server_digest = direct.get("digest", "")
+              if not isinstance(workflow_run, dict):
+                  reject(f"missing workflow-run binding: {name}")
+              if (
+                  direct.get("id") != artifact_id
+                  or direct.get("name") != name
+                  or direct.get("expired") is not False
+                  or workflow_run.get("id") != run_id
+                  or workflow_run.get("head_sha") != head_sha
+                  or not isinstance(server_digest, str)
+                  or not server_digest.startswith("sha256:")
+                  or not DIGEST.fullmatch(server_digest[7:])
+              ):
+                  reject(f"artifact identity binding rejected: {name}")
+              if expected_digest is not None and server_digest != f"sha256:{expected_digest}":
+                  reject(f"artifact output/server digest mismatch: {name}")
+              return direct, server_digest[7:]
+
+          evidence_id = exact_int("EVIDENCE_ARTIFACT_ID")
+          pages_id = exact_int("PAGES_ARTIFACT_ID")
+          evidence_output_digest = os.environ.get("EVIDENCE_ARTIFACT_DIGEST", "")
+          if not DIGEST.fullmatch(evidence_output_digest):
+              reject("invalid evidence artifact output digest")
+
+          work = Path(os.environ["RUNNER_TEMP"]) / "pages-integrity"
+          work.mkdir(mode=0o700)
+          evidence_meta, evidence_digest = bind_artifact(
+              f"demo-deployment-evidence-{head_sha}", evidence_id, evidence_output_digest
+          )
+          pages_meta, pages_digest = bind_artifact("github-pages", pages_id)
+
+          def obtain_zip(meta, digest, filename):
+              path = work / filename
+              size = download_artifact(meta["id"], path)
+              if size != meta.get("size_in_bytes"):
+                  reject("artifact download size/server metadata mismatch")
+              if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                  reject("artifact download/server digest mismatch")
+              return path
+
+          evidence_zip = obtain_zip(evidence_meta, evidence_digest, "evidence.zip")
+          pages_zip = obtain_zip(pages_meta, pages_digest, "pages.zip")
+
+          def read_zip(path, expected_names):
+              result = {}
+              with zipfile.ZipFile(path) as archive:
+                  infos = archive.infolist()
+                  if len(infos) > MAX_ENTRIES or {info.filename for info in infos} != expected_names:
+                      reject("artifact ZIP entries rejected")
+                  if len(infos) != len(expected_names):
+                      reject("duplicate artifact ZIP entry rejected")
+                  for info in infos:
+                      safe_relative(info.filename)
+                      mode = (info.external_attr >> 16) & 0xFFFF
+                      if info.flag_bits & 1 or info.file_size > MAX_BYTES:
+                          reject("unsafe artifact ZIP member rejected")
+                      if mode and not stat.S_ISREG(mode):
+                          reject("non-regular artifact ZIP member rejected")
+                      result[info.filename] = archive.read(info)
+              return result
+
+          evidence_files = read_zip(evidence_zip, {
+              "demo-files.sha256", "demo-tree.sha256", "deployment-evidence.json"
+          })
+          pages_files = read_zip(pages_zip, {"artifact.tar"})
+
+          manifest_bytes = evidence_files["demo-files.sha256"]
+          manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+          expected_tree_line = f"{manifest_digest}  artifacts/deployment/demo-files.sha256\n".encode()
+          if evidence_files["demo-tree.sha256"] != expected_tree_line:
+              reject("retained manifest digest rejected")
+
+          def no_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      reject("duplicate deployment evidence key rejected")
+                  value[key] = item
+              return value
+
+          record = json.loads(
+              evidence_files["deployment-evidence.json"].decode("utf-8"),
+              object_pairs_hook=no_duplicate_keys,
+          )
+          expected_record = {
+              "schema_version": 1,
+              "repository": repository,
+              "repository_owner": "jemsbhai",
+              "event": "push",
+              "ref": "refs/heads/main",
+              "commit": head_sha,
+              "event_after": head_sha,
+              "workflow_run_id": run_id,
+              "workflow_run_attempt": 1,
+              "demo_tree_sha256": manifest_digest,
+          }
+          if record != expected_record:
+              reject("deployment evidence context rejected")
+
+          manifest = {}
+          manifest_pattern = re.compile(
+              rb"([0-9a-f]{64})  (dist/demo/[A-Za-z0-9][A-Za-z0-9._/-]*)\n"
+          )
+          position = 0
+          for match in manifest_pattern.finditer(manifest_bytes):
+              if match.start() != position:
+                  reject("non-canonical deployable manifest rejected")
+              position = match.end()
+              relative = match.group(2).decode("ascii")[len("dist/demo/"):]
+              safe_relative(relative)
+              if relative in manifest:
+                  reject("duplicate deployable manifest path rejected")
+              manifest[relative] = match.group(1).decode("ascii")
+          if position != len(manifest_bytes) or not manifest or list(manifest) != sorted(manifest):
+              reject("deployable manifest ordering/content rejected")
+
+          tar_path = work / "artifact.tar"
+          tar_path.write_bytes(pages_files["artifact.tar"])
+          if tar_path.stat().st_size > MAX_BYTES:
+              reject("nested Pages tar exceeds size bound")
+          extracted = work / "tree"
+          extracted.mkdir()
+          directories = set()
+          actual = {}
+          total_size = 0
+          with tarfile.open(tar_path, mode="r:") as archive:
+              members = archive.getmembers()
+              if len(members) > MAX_ENTRIES:
+                  reject("nested Pages tar entry count rejected")
+              for member in members:
+                  normalized = member.name
+                  while normalized.startswith("./"):
+                      normalized = normalized[2:]
+                  if normalized in ("", "."):
+                      if not member.isdir():
+                          reject("invalid nested Pages tar root")
+                      continue
+                  relative = safe_relative(normalized.rstrip("/"))
+                  relative_name = relative.as_posix()
+                  if member.isdir():
+                      if relative_name in directories or relative_name in actual:
+                          reject("duplicate nested Pages tar path rejected")
+                      directories.add(relative_name)
+                      continue
+                  if not member.isfile() or member.issym() or member.islnk():
+                      reject("link or special nested Pages tar member rejected")
+                  if relative_name in directories or relative_name in actual:
+                      reject("duplicate nested Pages tar path rejected")
+                  total_size += member.size
+                  if member.size < 0 or total_size > MAX_BYTES:
+                      reject("nested Pages tar content exceeds size bound")
+                  source = archive.extractfile(member)
+                  if source is None:
+                      reject("nested Pages tar file unreadable")
+                  target = extracted.joinpath(*relative.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with target.open("xb") as output:
+                      shutil.copyfileobj(source, output, length=1024 * 1024)
+                  actual[relative_name] = hashlib.sha256(target.read_bytes()).hexdigest()
+          expected_directories = {
+              parent.as_posix()
+              for filename in actual
+              for parent in PurePosixPath(filename).parents
+              if parent.as_posix() != "."
+          }
+          if directories != expected_directories:
+              reject("empty or missing nested Pages tar directory rejected")
+          if actual != manifest:
+              reject("server-retained Pages artifact differs from retained build manifest")
+          PY
+
       - name: Setup Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: github-pages
