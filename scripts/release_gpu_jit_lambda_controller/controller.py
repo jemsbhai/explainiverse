@@ -98,6 +98,37 @@ PHASES: dict[str, dict[str, Any]] = {
     },
 }
 
+CUDA_ROUTING_JOB_NAME = "Require approved CUDA runner routing"
+PUBLICATION_PREFLIGHT_JOB_NAME = "Verify the attested pre-tag external-control snapshot"
+CUDA_TARGET_JOB_NAMES = frozenset(
+    str(runtime.JOB_SPECS[key]["name"])
+    for key in ("single_minimum", "single_latest", "two_minimum", "two_latest")
+)
+PUBLICATION_TARGET_JOB_NAMES = frozenset(
+    str(runtime.JOB_SPECS[key]["name"])
+    for key in ("publication_single_minimum", "publication_single_latest")
+)
+REVIEWED_HOSTED_COMPANION_JOB_NAMES = frozenset(
+    {
+        CUDA_ROUTING_JOB_NAME,
+        PUBLICATION_PREFLIGHT_JOB_NAME,
+        "Verify, build once, and inventory",
+        "Attest the immutable distributions",
+        "Publish through PyPI Trusted Publishing",
+        "Create the immutable GitHub release",
+        "Finalize the immutable GitHub release with fixed commands",
+    }
+)
+REVIEWED_HOSTED_COMPANION_LABELS = {
+    CUDA_ROUTING_JOB_NAME: "ubuntu-latest",
+    PUBLICATION_PREFLIGHT_JOB_NAME: "ubuntu-latest",
+    "Verify, build once, and inventory": "ubuntu-24.04",
+    "Attest the immutable distributions": "ubuntu-latest",
+    "Publish through PyPI Trusted Publishing": "ubuntu-latest",
+    "Create the immutable GitHub release": "ubuntu-latest",
+    "Finalize the immutable GitHub release with fixed commands": "ubuntu-latest",
+}
+
 
 @dataclass(frozen=True, init=False)
 class SealedControllerResources:
@@ -2231,12 +2262,153 @@ class ReleaseGpuController:
         raw, _ = self._paginate(path, "workflow_runs")
         return [_required(item, {"id", "run_attempt"}, "historical_run") for item in raw]
 
-    def _attempt_jobs(self, run_id: int, attempt: int) -> list[Mapping[str, Any]]:
+    @staticmethod
+    def _project_reviewed_attempt_jobs(
+        raw_jobs: Sequence[Mapping[str, Any]], *, attempt: int
+    ) -> list[Mapping[str, Any]]:
+        """Remove only reviewed hosted companion jobs from an attempt page.
+
+        The CUDA and publication workflows contain hosted control/downstream
+        jobs in addition to the nonce-bound JIT matrix.  Those jobs are part of
+        the immutable workflow, but they must not weaken exact JIT cardinality.
+        This projection validates their complete live shape, requires the
+        phase's control job, and leaves every unknown job in the result so the
+        exact-set validator rejects it.
+        """
+
+        _positive(attempt, "attempt_job_projection_attempt")
+        _require(
+            type(raw_jobs) in {list, tuple},
+            "attempt_job_projection_shape_rejected",
+        )
+        projected: list[Mapping[str, Any]] = []
+        companions: dict[str, Mapping[str, Any]] = {}
+        seen_ids: set[int] = set()
+        known_target_names: set[str] = set()
+        known_target_head_shas: set[str] = set()
+        custom_target_present = False
+        all_target_names = CUDA_TARGET_JOB_NAMES | PUBLICATION_TARGET_JOB_NAMES
+
+        for raw in raw_jobs:
+            job = _required(
+                raw,
+                {
+                    "id",
+                    "name",
+                    "head_sha",
+                    "run_attempt",
+                    "status",
+                    "conclusion",
+                    "labels",
+                    "runner_id",
+                    "runner_name",
+                },
+                "attempt_projection_job",
+            )
+            job_id = _positive(job["id"], "attempt_projection_job_id")
+            _require(job_id not in seen_ids, "attempt_projection_duplicate_job_id")
+            seen_ids.add(job_id)
+            name = job["name"]
+            _require(type(name) is str and bool(name), "attempt_projection_job_name_rejected")
+
+            if name not in REVIEWED_HOSTED_COMPANION_JOB_NAMES:
+                projected.append(job)
+                if name in all_target_names:
+                    _commit(job["head_sha"], "attempt_projection_target_head_sha")
+                    _require(
+                        type(job["run_attempt"]) is int
+                        and job["run_attempt"] == attempt
+                        and type(job["labels"]) is list
+                        and all(type(label) is str for label in job["labels"]),
+                        "attempt_projection_target_binding_rejected",
+                    )
+                    known_target_names.add(name)
+                    known_target_head_shas.add(job["head_sha"])
+                    custom_target_present = custom_target_present or any(
+                        RUNNER_NAME_RE.fullmatch(label) is not None for label in job["labels"]
+                    )
+                continue
+
+            labels = job["labels"]
+            runner_id = job["runner_id"]
+            runner_name = job["runner_name"]
+            _commit(job["head_sha"], "attempt_projection_companion_head_sha")
+            _require(
+                name not in companions
+                and type(job["run_attempt"]) is int
+                and job["run_attempt"] == attempt
+                and type(job["status"]) is str
+                and job["status"] in {"queued", "in_progress", "completed"}
+                and (
+                    job["conclusion"] is None
+                    or (
+                        type(job["conclusion"]) is str
+                        and job["conclusion"] in RECOVERY_TERMINAL_CONCLUSIONS
+                    )
+                )
+                and labels == [REVIEWED_HOSTED_COMPANION_LABELS[name]]
+                and (runner_id is None or (type(runner_id) is int and 0 < runner_id < 2**63))
+                and (
+                    runner_name in {None, ""}
+                    or (type(runner_name) is str and runner_name.startswith("GitHub Actions "))
+                ),
+                "attempt_projection_hosted_companion_rejected",
+            )
+            companions[name] = job
+
+        cuda_targets = known_target_names & CUDA_TARGET_JOB_NAMES
+        publication_targets = known_target_names & PUBLICATION_TARGET_JOB_NAMES
+        _require(
+            not (cuda_targets and publication_targets),
+            "attempt_projection_mixed_workflow_targets_rejected",
+        )
+        allowed_companions: frozenset[str]
+        if cuda_targets:
+            allowed_companions = frozenset({CUDA_ROUTING_JOB_NAME})
+            required_control_name = CUDA_ROUTING_JOB_NAME
+        elif publication_targets:
+            allowed_companions = REVIEWED_HOSTED_COMPANION_JOB_NAMES - {CUDA_ROUTING_JOB_NAME}
+            required_control_name = PUBLICATION_PREFLIGHT_JOB_NAME
+        else:
+            allowed_companions = REVIEWED_HOSTED_COMPANION_JOB_NAMES
+            required_control_name = None
+        _require(
+            set(companions).issubset(allowed_companions),
+            "attempt_projection_cross_workflow_companion_rejected",
+        )
+        if required_control_name is not None:
+            _require(
+                required_control_name in companions
+                and len(known_target_head_shas) == 1
+                and all(item["head_sha"] in known_target_head_shas for item in companions.values()),
+                "attempt_projection_control_companion_rejected",
+            )
+            if custom_target_present:
+                control = companions[required_control_name]
+                _require(
+                    control["status"] == "completed"
+                    and control["conclusion"] == "success"
+                    and type(control["runner_id"]) is int
+                    and control["runner_id"] > 0
+                    and type(control["runner_name"]) is str
+                    and control["runner_name"].startswith("GitHub Actions "),
+                    "attempt_projection_control_not_accepted",
+                )
+        return projected
+
+    def _attempt_jobs_with_digests(
+        self, run_id: int, attempt: int
+    ) -> tuple[list[Mapping[str, Any]], list[str]]:
         path = f"/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs" "?filter=all"
-        raw, _ = self._paginate(path, "jobs")
-        return [
+        raw, digests = self._paginate(path, "jobs")
+        jobs = [
             _required(item, {"id", "name", "labels", "status"}, "historical_job") for item in raw
         ]
+        return self._project_reviewed_attempt_jobs(jobs, attempt=attempt), digests
+
+    def _attempt_jobs(self, run_id: int, attempt: int) -> list[Mapping[str, Any]]:
+        jobs, _ = self._attempt_jobs_with_digests(run_id, attempt)
+        return jobs
 
     @staticmethod
     def _validate_exact_attempt_job_set(
@@ -4267,12 +4439,9 @@ class ReleaseGpuController:
         )
         actor = _required(run["actor"], {"login"}, "live_run_actor")
         trigger = _required(run["triggering_actor"], {"login"}, "live_run_trigger")
-        raw_jobs, job_digests = self._paginate(
-            f"/repos/{REPOSITORY}/actions/runs/{session.run['id']}/attempts/1/jobs?filter=all",
-            "jobs",
-        )
+        raw_jobs, job_digests = self._attempt_jobs_with_digests(session.run["id"], 1)
         validated_jobs = self._validate_exact_attempt_job_set(
-            [_required(raw, {"id", "name"}, "live_attempt_job") for raw in raw_jobs],
+            raw_jobs,
             expected_bindings=self._session_expected_job_bindings(session),
             head_sha=session.head_sha,
             context="live_attempt",
@@ -4380,7 +4549,8 @@ class ReleaseGpuController:
         collaborator = _required(collaborators[0], {"login", "permissions"}, "collaborator")
         permissions = _required(collaborator["permissions"], {"admin"}, "collaborator_permissions")
         _require(
-            collaborator["login"] == OWNER and permissions["admin"] is True, "owner_admin_rejected"
+            collaborator["login"] == OWNER and permissions["admin"] is True,
+            "owner_admin_rejected",
         )
         invitations, invitation_digest = self._paginate(f"/repos/{REPOSITORY}/invitations", None)
         _require(invitations == [], "pending_invitations_present")
@@ -4669,12 +4839,9 @@ class ReleaseGpuController:
         }
 
     def _validate_job_still_queued(self, session: PhaseSession, job: JobBinding) -> str:
-        jobs, digests = self._paginate(
-            f"/repos/{REPOSITORY}/actions/runs/{session.run['id']}/attempts/1/jobs?filter=all",
-            "jobs",
-        )
+        jobs, digests = self._attempt_jobs_with_digests(session.run["id"], 1)
         normalized_jobs = self._validate_exact_attempt_job_set(
-            [_required(item, {"id", "name"}, "pre_jit_attempt_job") for item in jobs],
+            jobs,
             expected_bindings=self._session_expected_job_bindings(session),
             head_sha=session.head_sha,
             context="pre_jit_attempt",
@@ -4926,12 +5093,9 @@ class ReleaseGpuController:
 
         observations: list[dict[str, Any]] = []
         for _ in range(poll_limit):
-            jobs, job_digests = self._paginate(
-                f"/repos/{REPOSITORY}/actions/runs/{session.run['id']}/attempts/1/jobs?filter=all",
-                "jobs",
-            )
+            jobs, job_digests = self._attempt_jobs_with_digests(session.run["id"], 1)
             validated_jobs = self._validate_exact_attempt_job_set(
-                [_required(item, {"id", "name"}, "ambiguous_attempt_job") for item in jobs],
+                jobs,
                 expected_bindings=self._session_expected_job_bindings(session),
                 head_sha=session.head_sha,
                 context="ambiguous_remote_attempt",
@@ -5954,12 +6118,9 @@ class ReleaseGpuController:
         completed: dict[str, Any] | None = None
         job_digest = ""
         for _ in range(poll_limit):
-            jobs, digests = self._paginate(
-                f"/repos/{REPOSITORY}/actions/runs/{session.run['id']}/attempts/1/jobs?filter=all",
-                "jobs",
-            )
+            jobs, digests = self._attempt_jobs_with_digests(session.run["id"], 1)
             validated_jobs = self._validate_exact_attempt_job_set(
-                [_required(item, {"id", "name"}, "settlement_attempt_job") for item in jobs],
+                jobs,
                 expected_bindings=self._session_expected_job_bindings(session),
                 head_sha=session.head_sha,
                 context="job_settlement_attempt",

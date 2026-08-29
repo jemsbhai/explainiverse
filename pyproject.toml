@@ -56,6 +56,8 @@ quantus = "^0.6.0"
 grad-cam = "^1.5.5"
 diff-cover = ">=9.2,<11.0"
 twine = ">=5.1,<7.0"
+cryptography = ">=46,<51"
+pywin32 = { version = ">=311,<312", markers = "sys_platform == 'win32'" }
 
 [tool.poetry.group.tutorial]
 optional = true

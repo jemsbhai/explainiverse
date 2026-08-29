@@ -635,8 +635,8 @@ def _preflight_mapping(
         and git_configuration
         == {
             "system_config_disabled": True,
-            "system_config_path": os.devnull,
-            "global_config_path": os.devnull,
+            "system_config_path": "nul",
+            "global_config_path": "nul",
             "system_attributes_disabled": True,
             "repository_fsmonitor_overridden_false": True,
             "repository_untracked_cache_overridden_false": True,

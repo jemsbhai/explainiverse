@@ -79,6 +79,7 @@ jobs:
             --editable ".[all]" \
             "pytest>=8,<9" \
             "pytest-cov>=4.1,<8" \
+            "cryptography==50.0.0" \
             "grad-cam>=1.5.5,<2" \
             "nbformat>=5.10,<6" \
             "nbclient>=0.10,<1" \

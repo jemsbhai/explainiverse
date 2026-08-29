@@ -66,8 +66,8 @@ def _repository_inventory_record() -> dict[str, Any]:
         "critical_sources": {},
         "git_configuration": {
             "system_config_disabled": True,
-            "system_config_path": os.devnull,
-            "global_config_path": os.devnull,
+            "system_config_path": "nul",
+            "global_config_path": "nul",
             "system_attributes_disabled": True,
             "repository_fsmonitor_overridden_false": True,
             "repository_untracked_cache_overridden_false": True,
@@ -96,6 +96,10 @@ def _operator_resources() -> operator.OperatorSealedResources:
             "runtime_bundle_sha256": runtime_bundle.sha256,
         },
     )
+
+
+def test_source_seal_forces_lf_checkout_bytes_for_every_tracked_text_file() -> None:
+    assert Path(".gitattributes").read_bytes() == b"* text=auto eol=lf\n"
 
 
 def _plan() -> Any:
@@ -2140,6 +2144,13 @@ def test_operator_preflight_archives_exact_full_executable_inventory(
         (
             lambda repository: repository["git_configuration"].update(
                 repository_fsmonitor_overridden_false=False
+            ),
+            "operator_preflight_git_configuration_rejected",
+        ),
+        (
+            lambda repository: repository["git_configuration"].update(
+                system_config_path="/dev/null",
+                global_config_path="/dev/null",
             ),
             "operator_preflight_git_configuration_rejected",
         ),

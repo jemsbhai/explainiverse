@@ -1448,6 +1448,36 @@ def test_pypi_cryptographic_verifier_is_pinned_in_the_hash_locked_release_graph(
     assert "--hash=sha256:" in package_block
 
 
+def test_release_tool_test_prerequisites_are_exact_and_not_runtime_extras():
+    python_workflow = _read("python-ci.yml")
+    compatibility = python_workflow.split("  test:", 1)[1].split(
+        "\n  minimum-direct-dependencies:", 1
+    )[0]
+    minimum = python_workflow.split("  minimum-direct-dependencies:", 1)[1].split(
+        "\n  quantus-reference:", 1
+    )[0]
+    dependency = _read("dependency-constraints.yml").split(
+        "\n  scikit-image-next-major-discovery:", 1
+    )[0]
+    cryptography_pin = '"cryptography==50.0.0"'
+    pywin32_pin = "\"pywin32==311; sys_platform == 'win32'\""
+
+    assert compatibility.count(cryptography_pin) == 1
+    assert compatibility.count(pywin32_pin) == 1
+    assert minimum.count(cryptography_pin) == 1
+    assert pywin32_pin not in minimum
+    assert dependency.count(cryptography_pin) == 1
+    assert pywin32_pin not in dependency
+
+    runtime_surface = (
+        (ROOT / "pyproject.toml")
+        .read_text(encoding="utf-8")
+        .split("[tool.poetry.group.dev.dependencies]", 1)[0]
+    )
+    assert "cryptography" not in runtime_surface
+    assert "pywin32" not in runtime_surface
+
+
 def _assert_macos_openmp_contract(workflow):
     compatibility_job = workflow.split("  test:", 1)[1].split(
         "\n  minimum-direct-dependencies:", 1

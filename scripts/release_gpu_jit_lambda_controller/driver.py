@@ -18,7 +18,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from scripts.release_gpu_jit_lambda_live import adapter as live
@@ -53,6 +53,13 @@ from .controller import (
     _sha,
     _validated_authority_evidence_identity,
 )
+
+
+def _is_windows_absolute_path(value: Any) -> bool:
+    """Validate an archived Windows path without depending on the verifier OS."""
+
+    return type(value) is str and PureWindowsPath(value).is_absolute()
+
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 EVIDENCE_LABEL_RE = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
@@ -3472,7 +3479,7 @@ class EvidenceJournal:
             type(python_row) is dict
             and set(python_row) == common | {"pinned_runtime_manifest_authority"}
             and type(python_row["absolute_path"]) is str
-            and Path(python_row["absolute_path"]).is_absolute()
+            and _is_windows_absolute_path(python_row["absolute_path"])
             and type(python_row["sha256"]) is str
             and SHA256_RE.fullmatch(python_row["sha256"]) is not None
             and python_row["version"] == "Python 3.13.15"
@@ -3690,7 +3697,7 @@ class EvidenceJournal:
             and shim["schema_version"] == 1
             and shim["kind"] == "explainiverse-operator-preloader-shim"
             and type(shim["preloader_path"]) is str
-            and Path(shim["preloader_path"]).is_absolute()
+            and _is_windows_absolute_path(shim["preloader_path"])
             and type(shim["preloader_bytes"]) is int
             and 1 <= shim["preloader_bytes"] <= 4 * 1024 * 1024
             and type(shim["preloader_sha256"]) is str
@@ -3821,7 +3828,7 @@ class EvidenceJournal:
             and set(repository) == repository_keys
             and repository["repository"] == REPOSITORY
             and type(repository["absolute_root"]) is str
-            and Path(repository["absolute_root"]).is_absolute()
+            and _is_windows_absolute_path(repository["absolute_root"])
             and repository["origin_url"] == "https://github.com/jemsbhai/explainiverse.git"
             and repository["head_sha"] == immutable_plan["head_sha"]
             and type(repository["tree_object_sha"]) is str
@@ -3840,8 +3847,8 @@ class EvidenceJournal:
             repository["git_configuration"]
             == {
                 "system_config_disabled": True,
-                "system_config_path": os.devnull,
-                "global_config_path": os.devnull,
+                "system_config_path": "nul",
+                "global_config_path": "nul",
                 "system_attributes_disabled": True,
                 "repository_fsmonitor_overridden_false": True,
                 "repository_untracked_cache_overridden_false": True,
@@ -3947,7 +3954,7 @@ class EvidenceJournal:
             and source["schema_version"] == 1
             and source["kind"] == "explainiverse-operator-clean-source-preload"
             and type(source["repository_root"]) is str
-            and Path(source["repository_root"]).is_absolute()
+            and _is_windows_absolute_path(source["repository_root"])
             and source["repository_root"] == repository["absolute_root"]
             and source["origin_url"] == "https://github.com/jemsbhai/explainiverse.git"
             and source["head_sha"] == immutable_plan["head_sha"]
@@ -4011,7 +4018,7 @@ class EvidenceJournal:
             and python_install["schema_version"] == 1
             and python_install["kind"] == "explainiverse-operator-python-runtime-installed"
             and type(python_install["python_runtime_root"]) is str
-            and Path(python_install["python_runtime_root"]).is_absolute()
+            and _is_windows_absolute_path(python_install["python_runtime_root"])
             and python_install["archive_sha256"] == OPERATOR_PYTHON_ARCHIVE_SHA256
             and python_install["manifest_sha256"] == OPERATOR_PYTHON_MANIFEST_SHA256
             and type(python_install["file_count"]) is int
@@ -4034,7 +4041,7 @@ class EvidenceJournal:
             and site_install["schema_version"] == 1
             and site_install["kind"] == "explainiverse-operator-runtime-installed"
             and type(site_install["runtime_root"]) is str
-            and Path(site_install["runtime_root"]).is_absolute()
+            and _is_windows_absolute_path(site_install["runtime_root"])
             and site_install["manifest_sha256"] == OPERATOR_SITE_MANIFEST_SHA256
             and type(site_install["file_count"]) is int
             and site_install["file_count"] == 756
@@ -4612,7 +4619,7 @@ class EvidenceJournal:
         _require(
             set(ssh_executable) == executable_keys
             and type(ssh_executable["absolute_path"]) is str
-            and Path(ssh_executable["absolute_path"]).is_absolute()
+            and _is_windows_absolute_path(ssh_executable["absolute_path"])
             and type(ssh_executable["sha256"]) is str
             and SHA256_RE.fullmatch(ssh_executable["sha256"]) is not None
             and ssh_executable["regular_file"] is True
@@ -4630,7 +4637,7 @@ class EvidenceJournal:
                 "ambient_token_environment_forwarded",
             }
             and type(github_executable["absolute_path"]) is str
-            and Path(github_executable["absolute_path"]).is_absolute()
+            and _is_windows_absolute_path(github_executable["absolute_path"])
             and type(github_executable["sha256"]) is str
             and SHA256_RE.fullmatch(github_executable["sha256"]) is not None
             and github_executable["regular_file"] is True

@@ -339,6 +339,97 @@ def _attempt_jobs_for_session(
     return result
 
 
+def _hosted_attempt_job(
+    *,
+    name: str,
+    head_sha: str,
+    job_id: int,
+    label: str,
+    status: str = "completed",
+    conclusion: str | None = "success",
+) -> dict[str, Any]:
+    active = status in {"in_progress", "completed"} and conclusion != "skipped"
+    return {
+        "id": job_id,
+        "name": name,
+        "head_sha": head_sha,
+        "run_attempt": 1,
+        "labels": [label],
+        "status": status,
+        "conclusion": conclusion,
+        "runner_id": job_id + 10_000 if active else None,
+        "runner_name": f"GitHub Actions {job_id + 10_000}" if active else None,
+    }
+
+
+def _live_attempt_api_jobs(
+    session: controller.PhaseSession,
+    *,
+    overrides: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    jobs = _attempt_jobs_for_session(session, overrides=overrides)
+    if session.phase in {"pull-request", "final-main"}:
+        return [
+            _hosted_attempt_job(
+                name=controller.CUDA_ROUTING_JOB_NAME,
+                head_sha=session.head_sha,
+                job_id=90,
+                label="ubuntu-latest",
+            ),
+            *jobs,
+        ]
+    assert session.phase == "publication"
+    companions = [
+        _hosted_attempt_job(
+            name=controller.PUBLICATION_PREFLIGHT_JOB_NAME,
+            head_sha=session.head_sha,
+            job_id=800,
+            label="ubuntu-latest",
+        ),
+        _hosted_attempt_job(
+            name="Verify, build once, and inventory",
+            head_sha=session.head_sha,
+            job_id=801,
+            label="ubuntu-24.04",
+            status="queued",
+            conclusion=None,
+        ),
+        _hosted_attempt_job(
+            name="Attest the immutable distributions",
+            head_sha=session.head_sha,
+            job_id=802,
+            label="ubuntu-latest",
+            status="queued",
+            conclusion=None,
+        ),
+        _hosted_attempt_job(
+            name="Publish through PyPI Trusted Publishing",
+            head_sha=session.head_sha,
+            job_id=803,
+            label="ubuntu-latest",
+            status="queued",
+            conclusion=None,
+        ),
+        _hosted_attempt_job(
+            name="Create the immutable GitHub release",
+            head_sha=session.head_sha,
+            job_id=804,
+            label="ubuntu-latest",
+            status="queued",
+            conclusion=None,
+        ),
+        _hosted_attempt_job(
+            name="Finalize the immutable GitHub release with fixed commands",
+            head_sha=session.head_sha,
+            job_id=805,
+            label="ubuntu-latest",
+            status="queued",
+            conclusion=None,
+        ),
+    ]
+    return [companions[0], *jobs, *companions[1:]]
+
+
 def _phase_dispatch_evidence(
     session: controller.PhaseSession,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -424,6 +515,121 @@ def _phase_dispatch_evidence(
         "dispatch_receipt": dict(session.dispatch_receipt.__dict__),
     }
     return intent, settlement
+
+
+def test_attempt_jobs_projects_live_final_cuda_api_shape() -> None:
+    session = _session()
+    api_jobs = _live_attempt_api_jobs(session)
+    transport = QueueTransport()
+    path = (
+        f"/repos/{controller.REPOSITORY}/actions/runs/{session.run['id']}"
+        "/attempts/1/jobs?filter=all&per_page=100&page=1"
+    )
+    transport.add(
+        "GET",
+        path,
+        200,
+        {"total_count": len(api_jobs), "jobs": api_jobs},
+    )
+    service = controller.ReleaseGpuController(
+        transport,
+        NoRemote(),
+        resources=TEST_RESOURCES,
+        clock=lambda: NOW,
+    )
+    projected = service._attempt_jobs(session.run["id"], 1)
+    assert [item["id"] for item in projected] == [item.job_id for item in session.queued_jobs]
+    assert all(item["name"] != controller.CUDA_ROUTING_JOB_NAME for item in projected)
+
+
+def test_attempt_jobs_projects_live_publication_api_shape() -> None:
+    session = _publication_session()
+    api_jobs = _live_attempt_api_jobs(session)
+    assert len(api_jobs) == 8
+    transport = QueueTransport()
+    path = (
+        f"/repos/{controller.REPOSITORY}/actions/runs/{session.run['id']}"
+        "/attempts/1/jobs?filter=all&per_page=100&page=1"
+    )
+    transport.add(
+        "GET",
+        path,
+        200,
+        {"total_count": len(api_jobs), "jobs": api_jobs},
+    )
+    service = controller.ReleaseGpuController(
+        transport,
+        NoRemote(),
+        resources=TEST_RESOURCES,
+        clock=lambda: NOW,
+    )
+    projected = service._attempt_jobs(session.run["id"], 1)
+    assert [item["id"] for item in projected] == [item.job_id for item in session.queued_jobs]
+    assert all(
+        item["name"] not in controller.REVIEWED_HOSTED_COMPANION_JOB_NAMES for item in projected
+    )
+
+
+def test_attempt_jobs_keeps_unknown_extra_job_for_exact_set_rejection() -> None:
+    session = _session()
+    api_jobs = [
+        *_live_attempt_api_jobs(session),
+        _hosted_attempt_job(
+            name="Unexpected hosted side job",
+            head_sha=session.head_sha,
+            job_id=899,
+            label="ubuntu-latest",
+            status="queued",
+            conclusion=None,
+        ),
+    ]
+    projected = controller.ReleaseGpuController._project_reviewed_attempt_jobs(
+        api_jobs,
+        attempt=1,
+    )
+    assert projected[-1]["name"] == "Unexpected hosted side job"
+    with pytest.raises(controller.ControllerError, match="live_shape_cardinality_rejected"):
+        controller.ReleaseGpuController._validate_exact_attempt_job_set(
+            projected,
+            expected_bindings=controller.ReleaseGpuController._session_expected_job_bindings(
+                session
+            ),
+            head_sha=session.head_sha,
+            context="live_shape",
+        )
+
+
+def test_attempt_jobs_requires_accepted_control_before_custom_runner_jobs() -> None:
+    session = _session()
+    api_jobs = _live_attempt_api_jobs(session)
+    api_jobs[0]["conclusion"] = "failure"
+    with pytest.raises(controller.ControllerError, match="attempt_projection_control_not_accepted"):
+        controller.ReleaseGpuController._project_reviewed_attempt_jobs(api_jobs, attempt=1)
+
+
+def test_attempt_jobs_rejects_cross_workflow_reviewed_companion() -> None:
+    session = _session()
+    api_jobs = [
+        *_live_attempt_api_jobs(session),
+        _hosted_attempt_job(
+            name=controller.PUBLICATION_PREFLIGHT_JOB_NAME,
+            head_sha=session.head_sha,
+            job_id=898,
+            label="ubuntu-latest",
+        ),
+    ]
+    with pytest.raises(
+        controller.ControllerError,
+        match="attempt_projection_cross_workflow_companion_rejected",
+    ):
+        controller.ReleaseGpuController._project_reviewed_attempt_jobs(api_jobs, attempt=1)
+
+
+def test_archived_windows_paths_validate_independently_of_verifier_os() -> None:
+    assert driver._is_windows_absolute_path(r"C:\fixture\operator\ssh.exe")
+    assert not driver._is_windows_absolute_path("/fixture/operator/ssh.exe")
+    assert not driver._is_windows_absolute_path(r"fixture\operator\ssh.exe")
+    assert not driver._is_windows_absolute_path(r"C:fixture\operator\ssh.exe")
 
 
 def _provider_restored_payload(control_sha256: str) -> dict[str, Any]:
@@ -745,8 +951,8 @@ def _test_operator_repository_and_source(
         "critical_sources": critical_sources,
         "git_configuration": {
             "system_config_disabled": True,
-            "system_config_path": os.devnull,
-            "global_config_path": os.devnull,
+            "system_config_path": "nul",
+            "global_config_path": "nul",
             "system_attributes_disabled": True,
             "repository_fsmonitor_overridden_false": True,
             "repository_untracked_cache_overridden_false": True,
@@ -2266,6 +2472,73 @@ def test_capture_authority_rejects_replayed_capture_and_raw_pages() -> None:
         )
 
 
+@pytest.mark.parametrize("nonowner_permission", ["read", "write"])
+def test_capture_authority_rejects_every_second_collaborator(
+    nonowner_permission: str,
+) -> None:
+    class AuthorityController(controller.ReleaseGpuController):
+        def _paginate(self, path: str, key: str | None) -> tuple[list[Any], list[str]]:
+            if path.endswith("/collaborators?affiliation=all"):
+                return [
+                    {
+                        "login": controller.OWNER,
+                        "permissions": {"admin": True},
+                    },
+                    {
+                        "login": "b-urge",
+                        "permissions": {
+                            "admin": False,
+                            "maintain": False,
+                            "push": nonowner_permission == "write",
+                            "triage": False,
+                            "pull": True,
+                        },
+                    },
+                ], ["1" * 64]
+            if path.endswith("/invitations"):
+                return [], ["2" * 64]
+            if path.endswith("/actions/variables"):
+                return [], ["3" * 64]
+            raise AssertionError(path)
+
+        def _runner_inventory(self) -> tuple[list[Mapping[str, Any]], str]:
+            return [], "4" * 64
+
+        def _nonce_history(
+            self,
+            nonces: list[str],
+            *,
+            exclude: tuple[int, int, int] | None = None,
+            allowed_active_job_ids: set[int] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "observed_at": controller._iso(NOW),
+                "response_sha256": "5" * 64,
+                "historical_match_count": 0,
+                "unexpected_queued_or_in_progress_count": 0,
+            }
+
+    mapping, raw_pages = _app_capture(captured_at=NOW - timedelta(minutes=1))
+    capture = controller.TrustedAppCapture.from_mapping(
+        mapping,
+        resources=TEST_RESOURCES,
+        evidence_reader=raw_pages.__getitem__,
+        now=NOW,
+    )
+    service = AuthorityController(
+        QueueTransport(),
+        NoRemote(),
+        resources=TEST_RESOURCES,
+        clock=lambda: NOW,
+    )
+    with pytest.raises(controller.ControllerError, match="authority_not_sole_collaborator"):
+        service.capture_authority(
+            _session(),
+            capture,
+            installed_app_evidence_reader=raw_pages.__getitem__,
+        )
+
+
 def test_capture_authority_phase_dispatch_boundary_blocks_cross_phase_replay() -> None:
     class BoundaryController(controller.ReleaseGpuController):
         def _paginate(self, path: str, key: str | None) -> tuple[list[Any], list[str]]:
@@ -2503,8 +2776,8 @@ def test_ambiguous_online_runner_is_never_deleted() -> None:
         jobs_path,
         200,
         {
-            "total_count": 4,
-            "jobs": _attempt_jobs_for_session(
+            "total_count": 5,
+            "jobs": _live_attempt_api_jobs(
                 session,
                 overrides={
                     job.key: {
@@ -6714,7 +6987,7 @@ def test_cancel_success_visibility_timeout_is_reconciled_without_replay() -> Non
             "head_sha": session.head_sha,
         },
     )
-    jobs = _attempt_jobs_for_session(
+    jobs = _live_attempt_api_jobs(
         session,
         overrides={
             item.key: {"status": "completed", "conclusion": "cancelled"}

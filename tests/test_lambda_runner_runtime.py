@@ -320,6 +320,17 @@ def test_exact_runtime_plan_is_canonical_and_short_lived() -> None:
     assert plan["execution_authorized"] is True
 
 
+@pytest.mark.parametrize("permission", ["read", "write"])
+def test_every_second_collaborator_is_rejected(permission: str) -> None:
+    plan = valid_plan()
+    plan["authority_window"]["collaborators"] = [
+        {"login": "b-urge", "permission": permission},
+        {"login": contract.OWNER, "permission": "admin"},
+    ]
+    with pytest.raises(contract.ContractError, match="authority_not_sole_collaborator"):
+        contract.validate_runtime_plan(plan, now=NOW)
+
+
 def test_plan_document_rejects_noncanonical_and_duplicate_json() -> None:
     plan = valid_plan()
     with pytest.raises(contract.ContractError, match="plan_not_canonical"):
