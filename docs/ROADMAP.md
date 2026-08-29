@@ -76,6 +76,11 @@ device scope until a GPU runner is part of the release gate.
   uncertainty tutorial's t-interval is scoped to its supplied seeded streams, and its three
   empirical replacement references demonstrate intervention dependence rather than a universal
   baseline.
+- The latest complete locked tutorial re-execution was published at
+  `2026-08-29T08:33:50+00:00`. Its metadata binds package-source SHA-256
+  `71f16fd3955ff06d7fd4cd65083d84b40073c6da0af560eff76bc8f1709ab7d5` and lock SHA-256
+  `9e72cb8fa7020e37c58c24c663779537641c50f0c36049416c1375767a32f768`; all four reviewed
+  published-output digests remained unchanged under clean offline re-execution.
 - The TypeScript package is private and experimental; it must pass its own build/test/lint and
   package-content gates, but is not claimed to implement the Python method inventory.
 

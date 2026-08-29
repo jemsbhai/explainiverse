@@ -79,6 +79,7 @@ jobs:
             --editable ".[all]" \
             "pytest>=8,<9" \
             "pytest-cov>=4.1,<8" \
+            "cryptography==50.0.0" \
             "grad-cam>=1.5.5,<2" \
             "nbformat>=5.10,<6" \
             "nbclient>=0.10,<1" \
@@ -99,7 +100,10 @@ jobs:
       - name: Exercise the selected substantive public surface
         env:
           TEST_TARGETS: ${{ matrix.tests }}
-        run: python -m pytest --strict-config --strict-markers -m "not quantus_reference" $TEST_TARGETS
+        run: |
+          read -r -a test_targets <<< "$TEST_TARGETS"
+          python -m pytest --strict-config --strict-markers \
+            -m "not quantus_reference" "${test_targets[@]}"
 
   scikit-image-next-major-discovery:
     name: scikit-image 1.x prerelease availability (blocking monitor)

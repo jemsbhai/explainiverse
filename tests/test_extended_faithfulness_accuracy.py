@@ -12,6 +12,7 @@ The equations are checked against:
 import numpy as np
 import pytest
 
+import explainiverse.evaluation.faithfulness_extended as extended_faithfulness
 from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation.faithfulness_extended import (
     _extract_attribution_array,
@@ -36,6 +37,16 @@ def _manual_trapezoid(values, coordinates):
     y = np.asarray(values, dtype=np.float64)
     x = np.asarray(coordinates, dtype=np.float64)
     return float(np.sum((y[:-1] + y[1:]) * np.diff(x) / 2.0))
+
+
+def test_numpy_trapezoid_compatibility_binding_remains_callable():
+    """The NumPy 1.x/2.x compatibility binding resolves without a static-only export."""
+    values = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    coordinates = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+
+    observed = extended_faithfulness._trapezoid(values, coordinates)
+
+    assert float(observed) == pytest.approx(_manual_trapezoid(values, coordinates))
 
 
 class LinearScalarModel:

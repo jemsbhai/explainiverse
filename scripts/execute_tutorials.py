@@ -200,11 +200,46 @@ def _notebook_source_digest(notebook: NotebookNode) -> str:
     )
 
 
+def _canonical_stream_text(value: Any) -> str | None:
+    """Return the exact text represented by a valid notebook stream value."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(part, str) for part in value):
+        return "".join(value)
+    return None
+
+
+def _canonical_published_outputs(outputs: Sequence[Any]) -> list[Any]:
+    """Ignore transport-only chunk boundaries between equivalent streams."""
+    canonical: list[Any] = []
+    for raw_output in outputs:
+        output = copy.deepcopy(raw_output)
+        if output.get("output_type") == "stream":
+            text = _canonical_stream_text(output.get("text"))
+            if text is not None:
+                output["text"] = text
+                if canonical:
+                    previous = canonical[-1]
+                    previous_identity = {
+                        key: value for key, value in previous.items() if key != "text"
+                    }
+                    output_identity = {key: value for key, value in output.items() if key != "text"}
+                    if (
+                        previous.get("output_type") == "stream"
+                        and isinstance(previous.get("text"), str)
+                        and previous_identity == output_identity
+                    ):
+                        previous["text"] += text
+                        continue
+        canonical.append(output)
+    return canonical
+
+
 def _published_outputs_payload(notebook: NotebookNode) -> list[dict[str, Any]]:
     return [
         {
             "execution_count": cell.execution_count,
-            "outputs": copy.deepcopy(cell.outputs),
+            "outputs": _canonical_published_outputs(cell.outputs),
         }
         for cell in notebook.cells
         if cell.cell_type == "code"
@@ -354,8 +389,13 @@ def _validate_source(path: Path, notebook: NotebookNode) -> None:
 def _parse_utc_timestamp(value: Any, *, path: Path) -> None:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{path.name}: executed_at_utc must be a non-empty ISO-8601 string")
+    parseable = re.sub(
+        r"(?<=\.\d{6})\d(?=(?:Z|[+-]00:00)\Z)",
+        "",
+        value,
+    )
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(parseable.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{path.name}: executed_at_utc is not valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):

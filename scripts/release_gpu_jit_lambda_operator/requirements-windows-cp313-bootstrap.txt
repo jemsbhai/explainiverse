@@ -1,0 +1,6 @@
+# Explainiverse production operator download-only pip bootstrap
+# Target: CPython 3.13.15, Windows AMD64 only. Wheel only; no source build.
+--require-hashes
+--only-binary=:all:
+
+pip==26.1.2 --hash=sha256:382ff9f685ee3bc25864f820aa50505825f10f5458ffff07e30a6d96e5715cab

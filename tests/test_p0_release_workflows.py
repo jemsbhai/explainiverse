@@ -3,17 +3,232 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
+PUBLISH_JOB_IDS = (
+    "preflight",
+    "cuda-release",
+    "build",
+    "attest",
+    "publish",
+    "github-release",
+)
+EXPECTED_RELEASE_PROVENANCE = {
+    "RELEASE_GOVERNANCE.json",
+    "RELEASE_GOVERNANCE.md",
+    "SHA256SUMS",
+    "accepted-reproducibility-distributions.json",
+    "accepted-reproducibility-environment-comparison.json",
+    "accepted-reproducibility-environment-one.json",
+    "accepted-reproducibility-environment-two.json",
+    "admin-capture.json",
+    "admin-capture.json.sha256",
+    "bound-reproducibility-distributions.json",
+    "bound-reproducibility-environment.json",
+    "cuda-evidence.sha256",
+    "cuda-jobs.json",
+    "cuda-run.json",
+    "explainiverse-build.cdx.json",
+    "external-controls.json",
+    "external-controls.json.sha256",
+    "preflight-source-run.json",
+    "publish-vs-reproducibility-one.json",
+    "publish-vs-reproducibility-two.json",
+    "release-environment.json",
+    "reproducibility-expected-run.json",
+    "reproducibility-source-run.json",
+}
 
 
 def _read(name):
     return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def _assert_exact_provenance_inventories(workflow, expected_occurrences):
+    marker = "expected_provenance=$(printf '%s\\n' \\\n"
+    segments = workflow.split(marker)[1:]
+    assert len(segments) == expected_occurrences
+    for segment in segments:
+        inventory, remainder = segment.split("actual_provenance=", 1)
+        names = set()
+        for raw_line in inventory.splitlines():
+            line = raw_line.strip()
+            if line.endswith("\\"):
+                name = line[:-1].strip()
+            elif line.endswith("| sort)"):
+                name = line[: -len("| sort)")].strip()
+            else:
+                continue
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", name):
+                names.add(name)
+        assert names == EXPECTED_RELEASE_PROVENANCE
+        assert 'test "$actual_provenance" = "$expected_provenance"' in remainder
+
+
+def _cuda_routing_guard_script(workflow):
+    routing = workflow.split("  cuda-runner-routing:", 1)[1].split("\n  single-gpu:", 1)[0]
+    script = routing.split("          python3 - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+    return textwrap.dedent(script)
+
+
+def _publish_front_door_guard_script(workflow):
+    preflight = workflow.split("  preflight:", 1)[1].split("\n  cuda-release:", 1)[0]
+    guard = preflight.split(
+        "      - name: Require an exact first-attempt owner tag publication",
+        1,
+    )[1].split("\n      - name:", 1)[0]
+    script = guard.split("          python3 - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+    return textwrap.dedent(script)
+
+
+def _publish_immutable_source_gate(workflow):
+    preflight = workflow.split("  preflight:", 1)[1].split("\n  cuda-release:", 1)[0]
+    return preflight.split(
+        "      - name: Verify the signed immutable release source before external work",
+        1,
+    )[1].split("\n      - name:", 1)[0]
+
+
+def _publish_job_block(workflow, job_id):
+    marker = f"  {job_id}:\n"
+    remainder = workflow.split(marker, 1)[1]
+    next_job = re.search(r"^  [a-z][a-z-]+:\n", remainder, flags=re.MULTILINE)
+    return remainder if next_job is None else remainder[: next_job.start()]
+
+
+def _assert_publish_jobs_are_first_attempt_only(workflow):
+    exact_guard = "    if: ${{ github.run_attempt == 1 }}"
+    for job_id in PUBLISH_JOB_IDS:
+        block = _publish_job_block(workflow, job_id)
+        guards = re.findall(r"^    if:.*$", block, flags=re.MULTILINE)
+        assert guards == [exact_guard], job_id
+        assert block.index(exact_guard) < block.index("    runs-on:"), job_id
+        if "    needs:" in block:
+            assert block.index("    needs:") < block.index(exact_guard), job_id
+
+
+def _apply_environment_overrides(environment, overrides):
+    for name, value in overrides.items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+
+
+def _run_cuda_routing_guard(workflow, **overrides):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GITHUB_REPOSITORY": "jemsbhai/explainiverse",
+            "GITHUB_REPOSITORY_OWNER": "jemsbhai",
+            "GITHUB_ACTOR": "jemsbhai",
+            "GITHUB_TRIGGERING_ACTOR": "jemsbhai",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF": "refs/heads/codex/reviewed-cuda-candidate",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "SINGLE_MINIMUM_RUNNER_NONCE": "0000000000000001",
+            "SINGLE_LATEST_RUNNER_NONCE": "0000000000000002",
+            "TWO_MINIMUM_RUNNER_NONCE": "0000000000000003",
+            "TWO_LATEST_RUNNER_NONCE": "0000000000000004",
+        }
+    )
+    _apply_environment_overrides(environment, overrides)
+    return subprocess.run(
+        [sys.executable, "-c", _cuda_routing_guard_script(workflow)],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+
+def _run_publish_front_door_guard(workflow, **overrides):
+    release_tag = overrides.get("RELEASE_TAG", "v0.15.0")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GITHUB_REPOSITORY": "jemsbhai/explainiverse",
+            "GITHUB_REPOSITORY_OWNER": "jemsbhai",
+            "GITHUB_ACTOR": "jemsbhai",
+            "GITHUB_TRIGGERING_ACTOR": "jemsbhai",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF": f"refs/tags/{release_tag}",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "RELEASE_TAG": "v0.15.0",
+            "STAGE_RECOVERY_DRILL": "true",
+            "SINGLE_MINIMUM_RUNNER_NONCE": "0000000000000001",
+            "SINGLE_LATEST_RUNNER_NONCE": "0000000000000002",
+        }
+    )
+    _apply_environment_overrides(environment, overrides)
+    return subprocess.run(
+        [sys.executable, "-c", _publish_front_door_guard_script(workflow)],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+
+def _assert_publish_front_door_contract(workflow):
+    exact_main_fetch = "git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'"
+    assert workflow.count(exact_main_fetch) == 4
+    preflight = workflow.split("  preflight:", 1)[1].split("\n  cuda-release:", 1)[0]
+    front_door = "Require an exact first-attempt owner tag publication"
+    checkout = "Check out the immutable release tag"
+    immutable_source = "Verify the signed immutable release source before external work"
+    setup_python = "Set up Python 3.12"
+    snapshot = "Download and bind the preflight run and attested snapshot"
+
+    assert preflight.index(front_door) < preflight.index("Validate preflight run input")
+    assert preflight.split("    steps:\n", 1)[1].lstrip().startswith(f"- name: {front_door}")
+    assert preflight.index(checkout) < preflight.index(immutable_source)
+    assert preflight.index(immutable_source) < preflight.index(setup_python)
+    assert preflight.index(immutable_source) < preflight.index(snapshot)
+    post_checkout = preflight.split(f"      - name: {checkout}", 1)[1]
+    assert post_checkout.split("\n      - name:", 1)[1].startswith(f" {immutable_source}")
+
+    guard_script = _publish_front_door_guard_script(workflow)
+    assert 'repository == "jemsbhai/explainiverse"' in guard_script
+    assert 'repository_owner == "jemsbhai"' in guard_script
+    assert "actor == repository_owner" in guard_script
+    assert "triggering_actor == repository_owner" in guard_script
+    assert 'event_name == "workflow_dispatch"' in guard_script
+    assert 'run_attempt == "1"' in guard_script
+    assert 're.fullmatch(r"v[0-9]+\\.[0-9]+\\.[0-9]+", release_tag)' in guard_script
+    assert 'ref == f"refs/tags/{release_tag}"' in guard_script
+    assert 'release_tag == "v0.15.0"' in guard_script
+    assert 'stage_recovery_drill != "true"' in guard_script
+    assert 're.fullmatch(r"[a-f0-9]{16}", value)' in guard_script
+    assert "len(set(runner_nonces)) == len(runner_nonces)" in guard_script
+    assert "SINGLE_MINIMUM_RUNNER_NONCE" in preflight
+    assert "SINGLE_LATEST_RUNNER_NONCE" in preflight
+    assert "raise SystemExit(" in guard_script
+
+    immutable_gate = _publish_immutable_source_gate(workflow)
+    assert "checkout_sha=$(git rev-parse HEAD)" in immutable_gate
+    assert '[[ "$checkout_sha" != "$GITHUB_SHA" ]]' in immutable_gate
+    assert '[[ "$(git cat-file -t "$RELEASE_TAG")" != tag ]]' in immutable_gate
+    assert 'git rev-parse "$RELEASE_TAG^{commit}"' in immutable_gate
+    assert 'git rev-parse "$RELEASE_TAG^{tag}"' in immutable_gate
+    assert 'gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object"' in immutable_gate
+    assert "--jq '.verification.verified'" in immutable_gate
+    assert ')" != true ]]' in immutable_gate
+    assert exact_main_fetch in immutable_gate
+    assert "if ! git merge-base --is-ancestor HEAD origin/main" in immutable_gate
+    assert "release_version=$(sed -n" in immutable_gate
+    assert '[[ "$release_version" != "${RELEASE_TAG#v}" ]]' in immutable_gate
+    assert "python " not in immutable_gate
+    assert "python3 " not in immutable_gate
 
 
 def _assert_cuda_runner_routing_contract(workflow, publish):
@@ -29,21 +244,51 @@ def _assert_cuda_runner_routing_contract(workflow, publish):
     routing = workflow.split("  cuda-runner-routing:", 1)[1].split("\n  single-gpu:", 1)[0]
     single = workflow.split("  single-gpu:", 1)[1].split("\n  two-gpu:", 1)[0]
     two = workflow.split("  two-gpu:", 1)[1]
+    authorization = routing.split(
+        "      - name: Reject untrusted CUDA runner execution contexts", 1
+    )[1]
+    guard_script = _cuda_routing_guard_script(workflow)
     assert workflow.index("  cuda-runner-routing:") < workflow.index("  single-gpu:")
     assert "runs-on: ubuntu-latest" in routing
-    assert "CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}" in routing
-    assert "CUDA_TWO_RUNNER: ${{ vars.CUDA_TWO_RUNNER }}" in routing
-    assert f'[[ "$CUDA_SINGLE_RUNNER" != "{single_label}" ]]' in routing
-    assert f'[[ "$CUDA_TWO_RUNNER" != "{two_label}" ]]' in routing
-    assert '"schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch"' in routing
-    assert routing.count("exit 1") == 2
+    assert "python3 - <<'PY'" in authorization
+    assert 'repository == "jemsbhai/explainiverse"' in authorization
+    assert 'repository_owner == "jemsbhai"' in authorization
+    assert "\n    actor == repository_owner\n" in guard_script
+    assert "\n    and triggering_actor == repository_owner\n" in guard_script
+    assert 'event_name == "workflow_dispatch"' in authorization
+    assert 'event_name == "schedule"' not in authorization
+    assert 'run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT")' in authorization
+    assert 'first_attempt = run_attempt == "1"' in authorization
+    assert 're.fullmatch(r"[a-f0-9]{16}", value)' in authorization
+    assert "len(set(runner_nonces)) == len(runner_nonces)" in authorization
+    assert "and first_attempt" in authorization
+    assert "raise SystemExit(" in authorization
+    assert 'event_name == "pull_request"' not in authorization
+    assert 'event_name == "push"' not in authorization
+    assert "continue-on-error" not in authorization
+    assert "Checkout" not in routing
+    for topology, edge in (
+        ("SINGLE", "MINIMUM"),
+        ("SINGLE", "LATEST"),
+        ("TWO", "MINIMUM"),
+        ("TWO", "LATEST"),
+    ):
+        input_name = f"{topology.lower()}_{edge.lower()}_runner_nonce"
+        assert f"{topology}_{edge}_RUNNER_NONCE: ${{{{ inputs.{input_name} }}}}" in routing
+        assert f"      {input_name}:" in workflow
+    assert "vars.CUDA_SINGLE_RUNNER" not in workflow
+    assert "vars.CUDA_TWO_RUNNER" not in workflow
     assert "continue-on-error" not in routing
     assert "needs: cuda-runner-routing" in single
     assert "if: ${{ always() }}" in single
     assert (
-        "${{ needs.cuda-runner-routing.result == 'success' &&\n"
-        f"      '{single_label}' || 'ubuntu-latest' }}" in single
+        "${{ github.run_attempt == 1 &&\n"
+        "      needs.cuda-runner-routing.result == 'success' &&\n"
+        f"      format('{single_label}-jit-{{0}}', matrix.runner_nonce) ||\n"
+        "      'ubuntu-latest' }}" in single
     )
+    assert "runner_nonce: ${{ inputs.single_minimum_runner_nonce }}" in single
+    assert "runner_nonce: ${{ inputs.single_latest_runner_nonce }}" in single
     single_reporter = single.split(
         "      - name: Fail the required check when CUDA routing is rejected", 1
     )[1].split("\n      - name: Checkout", 1)[0]
@@ -51,16 +296,23 @@ def _assert_cuda_runner_routing_contract(workflow, publish):
     assert single_steps.index("Fail the required check when CUDA routing is rejected") < (
         single_steps.index("      - name: Checkout")
     )
-    assert "if: needs.cuda-runner-routing.result != 'success'" in single_reporter
+    assert (
+        "if: github.run_attempt != 1 || needs.cuda-runner-routing.result != 'success'"
+        in single_reporter
+    )
     assert single_reporter.count("exit 1") == 1
     assert "continue-on-error" not in single_reporter
     assert "if: always()" not in single_steps
     assert "needs: cuda-runner-routing" in two
     assert "always() &&" in two
     assert (
-        "${{ needs.cuda-runner-routing.result == 'success' &&\n"
-        f"      '{two_label}' || 'ubuntu-latest' }}" in two
+        "${{ github.run_attempt == 1 &&\n"
+        "      needs.cuda-runner-routing.result == 'success' &&\n"
+        f"      format('{two_label}-jit-{{0}}', matrix.runner_nonce) ||\n"
+        "      'ubuntu-latest' }}" in two
     )
+    assert "runner_nonce: ${{ inputs.two_minimum_runner_nonce }}" in two
+    assert "runner_nonce: ${{ inputs.two_latest_runner_nonce }}" in two
     two_reporter = two.split(
         "      - name: Fail the required check when CUDA routing is rejected", 1
     )[1].split("\n      - name: Checkout", 1)[0]
@@ -68,24 +320,47 @@ def _assert_cuda_runner_routing_contract(workflow, publish):
     assert two_steps.index("Fail the required check when CUDA routing is rejected") < (
         two_steps.index("      - name: Checkout")
     )
-    assert "if: needs.cuda-runner-routing.result != 'success'" in two_reporter
+    assert (
+        "if: github.run_attempt != 1 || needs.cuda-runner-routing.result != 'success'"
+        in two_reporter
+    )
     assert two_reporter.count("exit 1") == 1
     assert "continue-on-error" not in two_reporter
     assert "if: always()" not in two_steps
 
     preflight = publish.split("  preflight:", 1)[1].split("\n  cuda-release:", 1)[0]
     publish_cuda = publish.split("  cuda-release:", 1)[1].split("\n  build:", 1)[0]
-    assert "Require exact reviewed single-GPU runner routing" in preflight
-    publish_routing = preflight.split(
-        "      - name: Require exact reviewed single-GPU runner routing", 1
-    )[1].split("\n      - name:", 1)[0]
-    assert "CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}" in publish_routing
-    assert f'[[ "$CUDA_SINGLE_RUNNER" != "{single_label}" ]]' in publish_routing
-    assert publish_routing.count("exit 1") == 1
-    assert "continue-on-error" not in publish_routing
+    assert "Require exact reviewed single-GPU runner routing" not in preflight
+    assert "SINGLE_MINIMUM_RUNNER_NONCE: ${{ inputs.single_minimum_runner_nonce }}" in preflight
+    assert "SINGLE_LATEST_RUNNER_NONCE: ${{ inputs.single_latest_runner_nonce }}" in preflight
+    assert 're.fullmatch(r"[a-f0-9]{16}", value)' in preflight
+    assert "len(set(runner_nonces)) == len(runner_nonces)" in preflight
+    assert "evidence_nonces & release_nonces" in preflight
+    assert "release runner nonces reuse CUDA evidence nonces" in preflight
     assert "needs: preflight" in publish_cuda
-    assert f"runs-on: {single_label}" in publish_cuda
+    assert (
+        f"runs-on: ${{{{ format('{single_label}-jit-{{0}}', matrix.runner_nonce) }}}}"
+        in publish_cuda
+    )
+    assert "runner_nonce: ${{ inputs.single_minimum_runner_nonce }}" in publish_cuda
+    assert "runner_nonce: ${{ inputs.single_latest_runner_nonce }}" in publish_cuda
     assert "ubuntu-latest" not in publish_cuda
+
+
+def test_tagged_repository_python_never_inherits_github_tokens():
+    for workflow_name in ("publish-pypi.yml", "recover-github-release.yml"):
+        workflow = _read(workflow_name)
+        for step in workflow.split("\n      - name:")[1:]:
+            header = step.split("\n      - name:", 1)[0]
+            if "GH_TOKEN:" not in header and "GITHUB_TOKEN:" not in header:
+                continue
+            for line in header.splitlines():
+                stripped = line.strip()
+                if re.search(r"(?:python|python3) (?:release-source/)?scripts/", stripped):
+                    assert "env -u GH_TOKEN -u GITHUB_TOKEN" in stripped, (
+                        workflow_name,
+                        stripped,
+                    )
 
 
 def test_every_external_action_is_pinned_to_a_full_commit_sha():
@@ -117,10 +392,44 @@ def test_preflight_requires_fresh_admin_capture_then_attests_and_binds_it():
     assert '"$GITHUB_ACTOR" != "$GITHUB_TRIGGERING_ACTOR"' in workflow
     assert "if: always()" in workflow
 
+    verify_job = workflow.split("  verify:", 1)[1].split("\n  attest:", 1)[0]
+    attest_job = workflow.split("  attest:", 1)[1]
+    assert "id-token: write" not in verify_job
+    assert "attestations: write" not in verify_job
+    assert "release_external_controls.py bind" in verify_job
+    assert "id: upload" in verify_job
+    assert "artifact-id: ${{ steps.upload.outputs.artifact-id }}" in verify_job
+    assert "artifact-digest: ${{ steps.upload.outputs.artifact-digest }}" in verify_job
+
+    assert "needs: verify" in attest_job
+    assert "id-token: write" in attest_job
+    assert "attestations: write" in attest_job
+    assert "actions/checkout@" not in attest_job
+    assert "actions/setup-python@" not in attest_job
+    assert "python scripts/" not in attest_job
+    assert "GH_TOKEN: ${{ github.token }}" in attest_job
+    assert "actions/artifacts/$ARTIFACT_ID/zip" in attest_job
+    assert 'gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"' in attest_job
+    assert "--arg name release-control-preflight" in attest_job
+    assert ".workflow_run.id == $run and .workflow_run.head_sha == $head" in attest_job
+    assert ".digest == $digest" in attest_job
+    assert "artifact digest must be 64 lowercase hexadecimal characters" in attest_job
+    assert 'test "$actual_artifact_digest" = "$ARTIFACT_DIGEST"' in attest_job
+    assert 'archive_entries=$(unzip -Z1 "$artifact_archive" | sort)' in attest_job
+    assert "! -type f -print -quit" in attest_job
+    assert "sha256sum --check admin-capture.json.sha256" in attest_job
+    assert "sha256sum --check cuda-evidence.sha256" in attest_job
+    assert "sha256sum --check external-controls.json.sha256" in attest_job
+    assert attest_job.index("Download and verify only the exact low-authority artifact") < (
+        attest_job.index("actions/attest-build-provenance@")
+    )
+
 
 def test_publish_cannot_build_without_preflight_and_real_cuda_edges():
     workflow = _read("publish-pypi.yml")
     lowered = workflow.lower()
+    _assert_publish_front_door_contract(workflow)
+    _assert_publish_jobs_are_first_attempt_only(workflow)
     assert "preflight_run_id:" in workflow
     assert "needs: [preflight, cuda-release]" in workflow
     assert "gh attestation verify release-preflight/artifact/external-controls.json" in workflow
@@ -129,56 +438,134 @@ def test_publish_cannot_build_without_preflight_and_real_cuda_edges():
     assert "Release CUDA single-GPU (Torch ${{ matrix.torch-edge }}, zero skips)" in workflow
     assert 'EXPLAINIVERSE_REQUIRED_CUDA_DEVICES: "1"' in workflow
     assert "needs: preflight" in workflow
-    assert workflow.count("check_pypi_version_absent.py") == 2
+    assert workflow.count("check_pypi_version_absent.py") == 1
     assert workflow.index("check_pypi_version_absent.py") < workflow.index("  build:")
-    assert workflow.rindex("check_pypi_version_absent.py") < workflow.index(
-        "pypa/gh-action-pypi-publish@"
-    )
     assert "jobs?filter=all&per_page=100" in workflow
     assert "gh api --paginate" in workflow
     assert workflow.count("gh-action-pypi-publish@") == 1
     assert "skip-existing" not in lowered
     for forbidden in ("${{ secrets.", "password:", "pypi_api_token", "__token__", "user:"):
         assert forbidden not in lowered
+    attester = workflow.split("  attest:", 1)[1].split("\n  publish:", 1)[0]
     publisher = workflow.split("  publish:", 1)[1].split("\n  github-release:", 1)[0]
+    release_preparer = workflow.split("  github-release:", 1)[1].split(
+        "\n  github-release-finalize:", 1
+    )[0]
+    release_finalizer = workflow.split("  github-release-finalize:", 1)[1]
+    build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
+
+    assert "id: upload_distributions" in build_job
+    assert "id: upload_provenance" in build_job
+    assert "distributions_artifact_id:" in build_job
+    assert "distributions_artifact_digest:" in build_job
+    assert "provenance_artifact_id:" in build_job
+    assert "provenance_artifact_digest:" in build_job
+
+    assert "actions: read" in attester
+    assert "id-token: write" in attester
+    assert "attestations: write" in attester
+    assert "actions/checkout@" not in attester
+    assert "actions/setup-python@" not in attester
+    assert "python scripts/" not in attester
+    assert "actions/download-artifact@" not in attester
+    assert "actions/artifacts/$artifact_id/zip" in attester
+    assert 'gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"' in attester
+    assert ".workflow_run.id == $run and .workflow_run.head_sha == $head" in attester
+    assert ".digest == $digest" in attester
+    assert 'test "$actual_digest" = "$artifact_digest"' in attester
+    assert "distribution hash manifest is malformed" in attester
+    assert attester.index('test "$actual_digest" = "$artifact_digest"') < attester.index(
+        "actions/attest-build-provenance@"
+    )
     assert "attestations: true" in publisher
     assert "environment:\n      name: pypi" in publisher
     assert "id-token: write" in publisher
+    assert "actions: read" in publisher
+    assert "attestations: read" in publisher
+    assert "actions/checkout@" not in publisher
+    assert "actions/setup-python@" not in publisher
+    assert "python scripts/" not in publisher
+    assert "python release-source/scripts/" not in publisher
+    assert "actions/download-artifact@" not in publisher
+    assert "actions/artifacts/$artifact_id/zip" in publisher
+    assert 'gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"' in publisher
+    assert ".workflow_run.id == $run and .workflow_run.head_sha == $head" in publisher
+    assert ".digest == $digest" in publisher
+    assert 'test "$actual_digest" = "$artifact_digest"' in publisher
+    assert 'gh attestation verify "$artifact"' in publisher
+    assert "status=$(curl --silent --show-error --location" in publisher
+    assert 'if [[ "$status" != 404 ]]; then' in publisher
+    assert publisher.index('gh attestation verify "$artifact"') < publisher.index(
+        "pypa/gh-action-pypi-publish@"
+    )
+    assert publisher.index("PyPI absence guard requires exact HTTP 404") < publisher.index(
+        "pypa/gh-action-pypi-publish@"
+    )
     assert "create_release_governance_record.py" in workflow
     assert "external-controls.json" in workflow
-    assert "--notes-file provenance/RELEASE_GOVERNANCE.md" in workflow
+    assert "--notes-file finalize-source/release-assets/RELEASE_GOVERNANCE.md" in workflow
     assert "--draft" in workflow and "--draft=false" in workflow
-    assert "release-verification/pypi.json" in workflow
-    assert "release-verification/draft-assets" in workflow
-    assert "release-verification/final-assets" in workflow
-    assert workflow.count("verify_release_recovery.py artifacts") == 2
+    assert "normal-release-plan/evidence/pre-finalize-pypi.json" in workflow
+    assert "normal-release-plan/evidence/draft-assets" in workflow
+    assert "normal-release-plan/evidence/final-assets" in workflow
+    assert workflow.count("verify_release_recovery.py artifacts") == 1
     assert "'.draft == false and .prerelease == false and .immutable == true'" in workflow
     assert (
         'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \\\n'
         '            -H "X-GitHub-Api-Version: 2026-03-10"'
     ) in workflow
-    immutable_release_precondition = (
-        'gh api --method GET "repos/$GITHUB_REPOSITORY/immutable-releases" \\\n'
-        '            -H "X-GitHub-Api-Version: 2026-03-10" \\\n'
-        "            > release-verification/immutable-releases.json\n"
-        "          jq -e '.enabled == true' "
-        "release-verification/immutable-releases.json > /dev/null\n"
-        '          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false'
+    assert release_finalizer.index("live-boundary-immutable-releases.json") < (
+        release_finalizer.index('gh release edit "$RELEASE_TAG"')
     )
-    assert immutable_release_precondition in workflow
     assert "Archive normal-path release verification evidence" in workflow
     assert "if: always() && inputs.stage_recovery_drill == false" in workflow
     assert "retention-days: 90" in workflow
     assert "verify_pypi_provenance.py" in workflow
-    assert "--output-dir release-verification/pypi-provenance" in workflow
+    assert "--output-dir pypi-provenance" in workflow
     assert "pypi-attestations verify pypi" in workflow
     assert '--repository "https://github.com/$GITHUB_REPOSITORY"' in workflow
     assert "--provenance-file" in workflow
     assert "pypi-attestations-version.txt" in workflow
     assert "--require-hashes" in workflow
     assert "defaults:\n  run:\n    shell: bash" in workflow
-    assert "'.enabled == true' release-verification/immutable-releases.json" in workflow
-    build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
+    assert "normal-release-plan/evidence/immutable-releases.json" in workflow
+
+    assert "contents: write" not in release_preparer
+    assert "Verify signed immutable release source before candidate code" in release_preparer
+    assert "gh release create" not in release_preparer
+    assert "gh release upload" not in release_preparer
+    assert "gh release edit" not in release_preparer
+    assert "contents: write" in release_finalizer
+    assert "needs: [build, github-release]" in release_finalizer
+    assert "github.run_attempt == 1 && inputs.stage_recovery_drill == false" in (release_finalizer)
+    for forbidden in (
+        "actions/checkout@",
+        "actions/setup-python@",
+        "python scripts/",
+        "python3 scripts/",
+        "pip install",
+        "poetry ",
+        "verify_release_recovery.py",
+        "verify_pypi_provenance.py",
+    ):
+        assert forbidden not in release_finalizer
+    assert "actions/artifacts/$artifact_id/zip" in release_finalizer
+    assert "PLAN_ARTIFACT_ID: ${{ needs.github-release.outputs.plan_artifact_id }}" in (
+        release_finalizer
+    )
+    assert 'test "$actual_digest" = "$artifact_digest"' in release_finalizer
+    assert ".workflow_run.id == $run and .workflow_run.head_sha == $head" in release_finalizer
+    assert "release-distributions" in release_finalizer
+    assert "release-provenance" in release_finalizer
+    assert "cmp --silent normal-release-plan/release-assets.sha256" in release_finalizer
+    assert "finalize-source/release-assets.sha256" in release_finalizer
+    assert ".verification.verified == true" in release_finalizer
+    assert "finalize-main-ancestry.json" in release_finalizer
+    assert 'gh attestation verify "finalize-source/release-assets/$filename"' in (release_finalizer)
+    assert 'gh release upload "$RELEASE_TAG"' in release_finalizer
+    assert '"finalize-source/release-assets/$filename"' in release_finalizer
+    assert 'gh release upload "$RELEASE_TAG" "normal-release-plan/' not in release_finalizer
+
     assert "actions: read" in build_job and "attestations: read" in build_job
     assert "sha256sum --check admin-capture.json.sha256" in build_job
     assert "sha256sum --check cuda-evidence.sha256" in build_job
@@ -217,9 +604,13 @@ def test_publish_rebuilds_a_clean_tag_and_binds_the_attested_reproducibility_byt
         )
         == 2
     )
-    assert "python release-source/scripts/create_release_governance_record.py" in build_job
     assert (
-        "cd release-source\n            python scripts/record_release_environment.py" in build_job
+        "env -u GH_TOKEN -u GITHUB_TOKEN python release-source/scripts/create_release_governance_record.py"
+        in build_job
+    )
+    assert (
+        "cd release-source\n            env -u GH_TOKEN -u GITHUB_TOKEN python scripts/record_release_environment.py"
+        in build_job
     )
     assert "--requirements .github/requirements/release-tools.txt" in build_job
     assert '--output "$GITHUB_WORKSPACE/provenance/release-environment.json"' in build_job
@@ -244,6 +635,10 @@ def test_publish_rebuilds_a_clean_tag_and_binds_the_attested_reproducibility_byt
     assert "live reproducibility run differs from the attested check run" in build_job
     assert 'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$reproducibility_run_id"' in build_job
     assert build_job.count('gh run download "$reproducibility_run_id"') == 3
+    assert "reproducibility_run_attempt=$(" in build_job
+    assert "provenance/reproducibility-source-run.json" in build_job
+    assert '--expected-run-id "$reproducibility_run_id"' in build_job
+    assert '--expected-run-attempt "$reproducibility_run_attempt"' in build_job
 
     for name, destination in (
         ("reproducibility-one", "reproducibility-proof/one"),
@@ -294,20 +689,35 @@ def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
     assert 'gh attestation verify "$artifact"' in workflow
     assert "publish-pypi.yml@refs/tags/$RELEASE_TAG" in workflow
     assert "https://pypi.org/pypi/explainiverse/$version/json" in workflow
-    assert "--github-assets recovery/verified-release-assets" in workflow
-    assert "--provenance provenance" in workflow
+    assert "release-assets.sha256" in workflow
+    assert 'test "$actual_digest" = "$ARTIFACT_DIGEST"' in workflow
+    assert "actions/artifacts/$ARTIFACT_ID/zip" in workflow
+    assert "actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" in workflow
+    assert "release-distributions" in workflow
+    assert "release-provenance" in workflow
+    assert ".workflow_run.id == $run and .workflow_run.head_sha == $head" in workflow
+    assert 'test "$actual_digest" = "$artifact_digest"' in workflow
+    assert "cmp recovery/source-release-assets.sha256 recovery/release-assets.sha256" in workflow
+    assert "mutation-tag-object.json" in workflow
+    assert "mutation-main-ancestry.json" in workflow
+    assert ".verification.verified == true" in workflow
+    assert '.conclusion == "failure"' in workflow
+    assert "pre-mutation-pypi.json" in workflow
+    assert 'test "$actual_pypi" = "$expected_pypi"' in workflow
     assert "--draft=false" in workflow
     assert "final-github-assets.sha256" in workflow
     assert "final-github-release.json" in workflow
-    assert "Archive complete or partial recovery evidence" in workflow
+    assert "Archive complete or partial recovery evidence for fixed mutation" in workflow
+    assert "Archive complete or partial fixed-command recovery evidence" in workflow
     assert "if: always()" in workflow
-    assert "--notes-file provenance/RELEASE_GOVERNANCE.md" in workflow
+    assert "--notes-file recovery/source-release-assets/RELEASE_GOVERNANCE.md" in workflow
+    assert "for asset in recovery/source-release-assets/*" in workflow
+    assert 'gh release upload "$RELEASE_TAG" "$asset"' in workflow
+    assert 'gh release create "$RELEASE_TAG" ./recovery/release-assets/*' not in workflow
     assert "recovery draft omitted the original governance disclosure" in workflow
     assert "'.isDraft == false and .isPrerelease == false'" in workflow
     assert "'.immutable == true' recovery/final-github-release-api.json" in workflow
-    assert "verify_release_recovery.py release-body" in workflow
-    assert "--release-json recovery/final-github-release-api.json" in workflow
-    assert "--disclosure provenance/RELEASE_GOVERNANCE.md" in workflow
+    assert "final GitHub Release omitted the original governance disclosure" in workflow
     assert (
         'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \\\n'
         '            -H "X-GitHub-Api-Version: 2026-03-10"'
@@ -318,6 +728,89 @@ def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
     assert "pypi-attestations verify pypi" in workflow
     assert "pypi-attestations-version.txt" in workflow
     assert "--require-hashes" in workflow
+    assert workflow.count('"$GITHUB_RUN_ATTEMPT" != "1"') == 2
+    assert "    needs: verify\n    if: ${{ always() }}\n" in workflow
+    assert "VERIFY_RESULT: ${{ needs.verify.result }}" in workflow
+    assert workflow.count("gh api --paginate --slurp") == 5
+    assert workflow.count("actions/workflows/recover-github-release.yml/runs?per_page=100") == 5
+    assert re.search(r"runs\?[^\"\n]*\bevent=", workflow) is None
+    assert "recovery/recovery-workflow-history.json" in workflow
+    assert (
+        "cmp recovery/recovery-workflow-history.json \\\n"
+        '            "$RECOVERY_HISTORY_NORMALIZED"' in workflow
+    )
+    assert '"direct_owner_dispatch_cryptographically_distinguished": False' in workflow
+    assert '"declared_history_contract_enforced": True' in workflow
+    assert '"history_scope": "complete-retained-workflow-api-history"' in workflow
+    assert workflow.count("sha256sum --check recovery-history-normalizer.py.sha256") == 3
+    assert workflow.count("revalidate_recovery_history pre-create") == 1
+    assert workflow.count('revalidate_recovery_history "pre-upload-$name"') == 1
+    assert workflow.count("revalidate_recovery_history pre-finalize") == 1
+
+    verify_job = workflow.split("  verify:", 1)[1].split("\n  recover:", 1)[0]
+    recover_job = workflow.split("  recover:", 1)[1]
+    assert "contents: write" not in verify_job
+    assert "verify_release_recovery.py" in verify_job
+    assert "verify_pypi_provenance.py" in verify_job
+    assert "needs: verify" in recover_job
+    assert "if: ${{ always() }}" in recover_job
+    assert "contents: write" in recover_job
+    assert "recovery/source-release-assets" in recover_job
+    assert 'gh attestation verify "recovery/source-release-assets/$filename"' in recover_job
+    for forbidden in (
+        "actions/checkout@",
+        "actions/setup-python@",
+        "python scripts/",
+        "python3 scripts/",
+        "pip install",
+        "verify_release_recovery.py",
+        "verify_pypi_provenance.py",
+    ):
+        assert forbidden not in recover_job
+
+
+def test_recovery_runbook_requires_durable_operator_dispatch_and_terminal_proof():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    recovery = runbook.split("## Post-PyPI recovery drill", 1)[1].split(
+        "## Legacy 0.14.0 incident", 1
+    )[0]
+    assert "gh workflow run recover-github-release.yml" not in recovery
+    assert "`--action dispatch-release-recovery`" in recovery
+    assert "durable pending intent" in recovery
+    assert "observation-only run-history" in recovery
+    assert "never blindly retried" in recovery
+    assert "never use **Re-run failed jobs** or **Re-run all jobs**" in recovery
+    assert "dispatch-settled receipt is not a\nrecovery-success record" in recovery
+    assert "workflow completion and no-republish proof false" in recovery
+    assert "terminal recovery run and every job" in recovery
+    assert "PyPI file inventory proving no second upload" in recovery
+    assert "cannot cryptographically distinguish" in recovery
+    assert "same trusted repository owner" in recovery
+    assert "declared first-attempt, actor, nonce, and history contract" in recovery
+    migration = (ROOT / "docs" / "MIGRATION_0_15.md").read_text(encoding="utf-8")
+    assert "gh workflow run recover-github-release.yml" not in migration
+    assert "`--action dispatch-release-recovery`" in migration
+    assert "observation-only reconciliation" in migration
+    assert "dispatch-settled receipt is not completion evidence" in migration
+    assert "cannot cryptographically distinguish" in migration
+    assert "same trusted repository owner" in migration
+
+
+def test_privileged_release_jobs_reject_extra_or_missing_provenance_assets():
+    publish = _read("publish-pypi.yml")
+    recovery = _read("recover-github-release.yml")
+    _assert_exact_provenance_inventories(publish, 3)
+    _assert_exact_provenance_inventories(recovery, 1)
+
+    for workflow, occurrences in ((publish, 3), (recovery, 1)):
+        mutated = workflow.replace(
+            "            explainiverse-build.cdx.json \\\n",
+            "",
+            1,
+        )
+        assert mutated != workflow
+        with pytest.raises(AssertionError):
+            _assert_exact_provenance_inventories(mutated, occurrences)
 
 
 def test_cuda_workflow_has_required_and_scheduled_minimum_latest_zero_skip_lanes():
@@ -353,22 +846,355 @@ def test_cuda_workflows_route_only_through_exact_reviewed_labels():
     _assert_cuda_runner_routing_contract(_read("cuda-ci.yml"), _read("publish-pypi.yml"))
 
 
+@pytest.mark.parametrize(
+    ("overrides", "authorized"),
+    (
+        pytest.param({}, True, id="owner-dispatch-reviewed-branch"),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/main"},
+            False,
+            id="schedule-never-opens-one-use-runner-route",
+        ),
+        pytest.param(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_REF": "refs/pull/17/merge",
+            },
+            False,
+            id="pull-request-with-exact-runner-variables",
+        ),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"},
+            False,
+            id="push-with-exact-runner-variables",
+        ),
+        pytest.param(
+            {"GITHUB_ACTOR": "write-collaborator"},
+            False,
+            id="non-owner-dispatch",
+        ),
+        pytest.param(
+            {"GITHUB_TRIGGERING_ACTOR": "write-collaborator"},
+            False,
+            id="non-owner-rerun",
+        ),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/develop"},
+            False,
+            id="schedule-outside-main",
+        ),
+        pytest.param(
+            {"SINGLE_MINIMUM_RUNNER_NONCE": "AAAAAAAAAAAAAAAA"},
+            False,
+            id="uppercase-runner-nonce",
+        ),
+        pytest.param(
+            {"SINGLE_MINIMUM_RUNNER_NONCE": "0" * 15},
+            False,
+            id="short-runner-nonce",
+        ),
+        pytest.param(
+            {"SINGLE_MINIMUM_RUNNER_NONCE": None},
+            False,
+            id="missing-runner-nonce",
+        ),
+        pytest.param(
+            {
+                "SINGLE_MINIMUM_RUNNER_NONCE": "0000000000000002",
+                "SINGLE_LATEST_RUNNER_NONCE": "0000000000000002",
+            },
+            False,
+            id="reused-runner-nonce",
+        ),
+        pytest.param(
+            {"GITHUB_RUN_ATTEMPT": "2"},
+            False,
+            id="rerun-attempt-two",
+        ),
+        pytest.param(
+            {"GITHUB_RUN_ATTEMPT": "0"},
+            False,
+            id="zero-attempt",
+        ),
+        pytest.param(
+            {"GITHUB_RUN_ATTEMPT": None},
+            False,
+            id="missing-attempt",
+        ),
+        pytest.param(
+            {"GITHUB_RUN_ATTEMPT": "first"},
+            False,
+            id="non-numeric-attempt",
+        ),
+        pytest.param(
+            {
+                "GITHUB_REPOSITORY": "attacker/explainiverse",
+                "GITHUB_REPOSITORY_OWNER": "attacker",
+                "GITHUB_ACTOR": "attacker",
+                "GITHUB_TRIGGERING_ACTOR": "attacker",
+            },
+            False,
+            id="fork-owner-dispatch",
+        ),
+    ),
+)
+def test_cuda_router_authorizes_only_owner_first_dispatch_with_distinct_nonces(
+    overrides, authorized
+):
+    workflow = _read("cuda-ci.yml")
+    completed = _run_cuda_routing_guard(workflow, **overrides)
+
+    assert (completed.returncode == 0) is authorized
+    if not authorized:
+        assert "custom CUDA runners require an owner-triggered first-attempt" in completed.stderr
+
+
+def test_owner_dispatch_unlocks_both_exact_cuda_runner_routes():
+    workflow = _read("cuda-ci.yml")
+    assert _run_cuda_routing_guard(workflow).returncode == 0
+
+    single = workflow.split("  single-gpu:", 1)[1].split("\n  two-gpu:", 1)[0]
+    two = workflow.split("  two-gpu:", 1)[1]
+    assert (
+        "${{ github.run_attempt == 1 &&\n"
+        "      needs.cuda-runner-routing.result == 'success' &&\n"
+        "      format('explainiverse-cuda-single-jit-{0}', matrix.runner_nonce) ||\n"
+        "      'ubuntu-latest' }}" in single
+    )
+    assert (
+        "${{ github.run_attempt == 1 &&\n"
+        "      needs.cuda-runner-routing.result == 'success' &&\n"
+        "      format('explainiverse-cuda-two-jit-{0}', matrix.runner_nonce) ||\n"
+        "      'ubuntu-latest' }}" in two
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "authorized"),
+    (
+        pytest.param({}, True, id="v0-15-0-first-attempt-owner-drill"),
+        pytest.param(
+            {"RELEASE_TAG": "v0.15.1", "STAGE_RECOVERY_DRILL": "false"},
+            True,
+            id="future-release-normal-path-remains-available",
+        ),
+        pytest.param(
+            {"GITHUB_REF": "refs/heads/main"},
+            False,
+            id="branch-ref-cannot-select-a-tag-input",
+        ),
+        pytest.param(
+            {"GITHUB_REF": "refs/tags/v0.15.1"},
+            False,
+            id="different-tag-ref",
+        ),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": "push"},
+            False,
+            id="non-dispatch-event",
+        ),
+        pytest.param(
+            {"GITHUB_EVENT_NAME": None},
+            False,
+            id="missing-event",
+        ),
+        pytest.param(
+            {"RELEASE_TAG": "0.15.0"},
+            False,
+            id="malformed-stable-tag",
+        ),
+        pytest.param({"GITHUB_RUN_ATTEMPT": "2"}, False, id="rerun-attempt-two"),
+        pytest.param({"GITHUB_RUN_ATTEMPT": "0"}, False, id="zero-attempt"),
+        pytest.param({"GITHUB_RUN_ATTEMPT": None}, False, id="missing-attempt"),
+        pytest.param(
+            {"GITHUB_RUN_ATTEMPT": "first"},
+            False,
+            id="non-numeric-attempt",
+        ),
+        pytest.param({"GITHUB_ACTOR": "write-collaborator"}, False, id="non-owner-actor"),
+        pytest.param(
+            {"GITHUB_TRIGGERING_ACTOR": "write-collaborator"},
+            False,
+            id="non-owner-triggering-actor",
+        ),
+        pytest.param(
+            {"GITHUB_REPOSITORY": "attacker/explainiverse"},
+            False,
+            id="wrong-repository",
+        ),
+        pytest.param(
+            {"STAGE_RECOVERY_DRILL": "false"},
+            False,
+            id="v0-15-0-without-drill",
+        ),
+        pytest.param(
+            {"STAGE_RECOVERY_DRILL": None},
+            False,
+            id="v0-15-0-with-missing-drill-input",
+        ),
+        pytest.param(
+            {"SINGLE_MINIMUM_RUNNER_NONCE": "AAAAAAAAAAAAAAAA"},
+            False,
+            id="uppercase-release-runner-nonce",
+        ),
+        pytest.param(
+            {"SINGLE_MINIMUM_RUNNER_NONCE": None},
+            False,
+            id="missing-release-runner-nonce",
+        ),
+        pytest.param(
+            {
+                "SINGLE_MINIMUM_RUNNER_NONCE": "0000000000000002",
+                "SINGLE_LATEST_RUNNER_NONCE": "0000000000000002",
+            },
+            False,
+            id="reused-release-runner-nonce",
+        ),
+    ),
+)
+def test_publish_front_door_requires_first_attempt_owner_and_candidate_drill(overrides, authorized):
+    completed = _run_publish_front_door_guard(_read("publish-pypi.yml"), **overrides)
+
+    assert (completed.returncode == 0) is authorized
+    if not authorized:
+        assert "publication preflight requires" in completed.stderr
+
+
+def test_publish_front_door_contract_rejects_source_and_ordering_drift():
+    workflow = _read("publish-pypi.yml")
+    mutations = (
+        workflow.replace(
+            'event_name == "workflow_dispatch"',
+            "event_name == event_name",
+            1,
+        ),
+        workflow.replace(
+            'ref == f"refs/tags/{release_tag}"',
+            "ref == ref",
+            1,
+        ),
+        workflow.replace(
+            're.fullmatch(r"v[0-9]+\\.[0-9]+\\.[0-9]+", release_tag)',
+            "release_tag",
+            1,
+        ),
+        workflow.replace(
+            're.fullmatch(r"[a-f0-9]{16}", value)',
+            "value",
+            1,
+        ),
+        workflow.replace(
+            "distinct_nonces = len(set(runner_nonces)) == len(runner_nonces)",
+            "distinct_nonces = True",
+            1,
+        ),
+        workflow.replace(
+            '[[ "$checkout_sha" != "$GITHUB_SHA" ]]',
+            '[[ "$checkout_sha" != "$checkout_sha" ]]',
+            1,
+        ),
+        workflow.replace(
+            '[[ "$(git cat-file -t "$RELEASE_TAG")" != tag ]]',
+            '[[ "$(git cat-file -t "$RELEASE_TAG")" != commit ]]',
+            1,
+        ),
+        workflow.replace(
+            'git rev-parse "$RELEASE_TAG^{commit}"',
+            'git rev-parse "$RELEASE_TAG"',
+            1,
+        ),
+        workflow.replace(
+            "--jq '.verification.verified'",
+            "--jq '.verification.reason'",
+            1,
+        ),
+        workflow.replace(
+            "git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'",
+            "git fetch --no-tags origin main",
+            1,
+        ),
+        workflow.replace(
+            "git merge-base --is-ancestor HEAD origin/main",
+            "git merge-base HEAD origin/main",
+            1,
+        ),
+        workflow.replace(
+            '[[ "$release_version" != "${RELEASE_TAG#v}" ]]',
+            '[[ "$release_version" != "$release_version" ]]',
+            1,
+        ),
+        workflow.replace(
+            "      - name: Verify the signed immutable release source before external work",
+            "      - name: Verify the signed immutable release source after external work",
+            1,
+        ),
+    )
+
+    for index, mutated in enumerate(mutations):
+        assert mutated != workflow, index
+        with pytest.raises((AssertionError, IndexError, ValueError)):
+            _assert_publish_front_door_contract(mutated)
+
+
+def test_every_publish_job_rejects_partial_reruns_before_runner_allocation():
+    workflow = _read("publish-pypi.yml")
+    exact_guard = "    if: ${{ github.run_attempt == 1 }}"
+    _assert_publish_jobs_are_first_attempt_only(workflow)
+
+    for job_id in PUBLISH_JOB_IDS:
+        marker = f"  {job_id}:\n"
+        job_start = workflow.index(marker) + len(marker)
+        job_end_match = re.search(r"^  [a-z][a-z-]+:\n", workflow[job_start:], flags=re.MULTILINE)
+        job_end = len(workflow) if job_end_match is None else job_start + job_end_match.start()
+        guard_start = workflow.index(exact_guard, job_start, job_end)
+        guard_end = workflow.index("\n", guard_start) + 1
+        mutations = (
+            workflow[:guard_start] + workflow[guard_end:],
+            workflow[:guard_start]
+            + "    if: ${{ github.run_attempt == '1' }}\n"
+            + workflow[guard_end:],
+            workflow[:guard_start]
+            + "    if: ${{ always() && github.run_attempt == 1 }}\n"
+            + workflow[guard_end:],
+        )
+        for mutated in mutations:
+            with pytest.raises((AssertionError, IndexError, ValueError)):
+                _assert_publish_jobs_are_first_attempt_only(mutated)
+
+
 def test_cuda_runner_routing_contract_rejects_fail_open_drift():
     workflow = _read("cuda-ci.yml")
     publish = _read("publish-pypi.yml")
     mutations = (
         (
             workflow.replace(
-                "      'explainiverse-cuda-single' || 'ubuntu-latest'",
-                "      'ubuntu-latest' || 'ubuntu-latest'",
+                "      format('explainiverse-cuda-single-jit-{0}', matrix.runner_nonce) ||",
+                "      'ubuntu-latest' ||",
                 1,
             ),
             publish,
         ),
         (
             workflow.replace(
-                "      'explainiverse-cuda-two' || 'ubuntu-latest'",
-                "      'explainiverse-cuda-single' || 'ubuntu-latest'",
+                "      ${{ github.run_attempt == 1 &&\n"
+                "      needs.cuda-runner-routing.result == 'success' &&",
+                "      ${{ needs.cuda-runner-routing.result == 'success' &&",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "if: github.run_attempt != 1 || needs.cuda-runner-routing.result != 'success'",
+                "if: needs.cuda-runner-routing.result != 'success'",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "      format('explainiverse-cuda-two-jit-{0}', matrix.runner_nonce) ||",
+                "      format('explainiverse-cuda-single-jit-{0}', matrix.runner_nonce) ||",
                 1,
             ),
             publish,
@@ -376,17 +1202,17 @@ def test_cuda_runner_routing_contract_rejects_fail_open_drift():
         (workflow.replace("    needs: cuda-runner-routing\n", "", 1), publish),
         (
             workflow.replace(
-                '[[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]',
-                '[[ "$CUDA_SINGLE_RUNNER" != "" ]]',
+                're.fullmatch(r"[a-f0-9]{16}", value)',
+                "value",
                 1,
             ),
             publish,
         ),
-        (workflow.replace("            exit 1\n", "            exit 0\n", 1), publish),
+        (workflow.replace("          exit 1\n", "          exit 0\n", 1), publish),
         (
             workflow,
             publish.replace(
-                "    runs-on: explainiverse-cuda-single",
+                "    runs-on: ${{ format('explainiverse-cuda-single-jit-{0}', matrix.runner_nonce) }}",
                 "    runs-on: ubuntu-latest",
                 1,
             ),
@@ -394,16 +1220,67 @@ def test_cuda_runner_routing_contract_rejects_fail_open_drift():
         (
             workflow,
             publish.replace(
-                '[[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]',
-                '[[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-two" ]]',
+                "len(set(runner_nonces)) == len(runner_nonces)",
+                "True",
                 1,
             ),
         ),
+        (
+            workflow.replace(
+                'repository == "jemsbhai/explainiverse"',
+                "repository == repository",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "actor == repository_owner",
+                "actor == actor",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "triggering_actor == repository_owner",
+                "triggering_actor == triggering_actor",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                'approved_event = event_name == "workflow_dispatch"',
+                "approved_event = True",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                "distinct_nonces = len(set(runner_nonces)) == len(runner_nonces)",
+                "distinct_nonces = True",
+                1,
+            ),
+            publish,
+        ),
+        (
+            workflow.replace(
+                'first_attempt = run_attempt == "1"',
+                "first_attempt = True",
+                1,
+            ),
+            publish,
+        ),
     )
 
-    for mutated_workflow, mutated_publish in mutations:
-        with pytest.raises(AssertionError):
+    for index, (mutated_workflow, mutated_publish) in enumerate(mutations):
+        try:
             _assert_cuda_runner_routing_contract(mutated_workflow, mutated_publish)
+        except AssertionError:
+            continue
+        raise AssertionError(f"CUDA routing mutation {index} escaped the contract")
 
 
 def test_cuda_cam_matrix_uses_each_family_valid_target_contract():
@@ -482,6 +1359,23 @@ def test_dependency_schedule_covers_each_declared_edge_and_next_major_probe():
     assert "Archive candidate source-compatibility probe" in workflow
 
 
+def test_release_workflow_shell_fragments_preserve_arguments_and_option_boundaries():
+    dependency = _read("dependency-constraints.yml")
+    publish = _read("publish-pypi.yml")
+    recovery = _read("recover-github-release.yml")
+
+    assert 'read -r -a test_targets <<< "$TEST_TARGETS"' in dependency
+    assert '"${test_targets[@]}"' in dependency
+    assert ' -m "not quantus_reference" $TEST_TARGETS' not in dependency
+    assert "(cd dist && sha256sum -- *.whl *.tar.gz)" in publish
+    assert 'gh release create "$RELEASE_TAG" \\' in publish
+    assert 'gh release upload "$RELEASE_TAG" \\' in publish
+    assert '"finalize-source/release-assets/$filename"' in publish
+    assert 'gh release create "$RELEASE_TAG" ./normal-release-plan/release-assets/*' not in publish
+    assert publish.count("sha256sum ./* | sort") == 3
+    assert "sha256sum ./* | sort" in recovery
+
+
 def test_required_context_policy_matches_new_p0_and_preserved_p1_gates():
     policy = json.loads((ROOT / ".github" / "release-control-policy.json").read_text())
     required = set(policy["required_checks"])
@@ -511,6 +1405,31 @@ def test_required_context_policy_matches_new_p0_and_preserved_p1_gates():
     )
     assert policy["immutable_releases"] == {"enabled": True}
     assert policy["admin_snapshot_principals"] == ["jemsbhai"]
+    authority = policy["release_runner_authority"]
+    assert authority["allowed_collaborator_logins"] == ["jemsbhai"]
+    assert authority["pending_invitations"] == []
+    assert authority["registered_runners"] == []
+    assert authority["repository_variable_names"] == []
+    installed_apps = authority["installed_apps"]
+    assert installed_apps["source_url"] == "https://github.com/settings/installations"
+    assert {value["id"] for value in installed_apps["expected_installations"]} == {
+        67312423,
+        98967149,
+        14141661,
+        98315629,
+        109872254,
+        80585128,
+    }
+    assert {
+        value["name"]: value["suspended"] for value in installed_apps["expected_installations"]
+    } == {
+        "ChatGPT Codex Connector": True,
+        "Claude": True,
+        "GitGuardian": True,
+        "lovable.dev": True,
+        "Socket Security": False,
+        "Vercel": True,
+    }
     assert set(policy["cuda_evidence"]["required_jobs"]) == {
         "CUDA single-GPU (Torch minimum)",
         "CUDA single-GPU (Torch latest)",
@@ -527,6 +1446,111 @@ def test_pypi_cryptographic_verifier_is_pinned_in_the_hash_locked_release_graph(
     assert pin_line == "pypi-attestations==0.0.30 " + "\\"
     package_block = locked[locked.index(pin_line) :].split("\n\n", 1)[0]
     assert "--hash=sha256:" in package_block
+
+
+def test_release_tool_test_prerequisites_are_exact_and_not_runtime_extras():
+    python_workflow = _read("python-ci.yml")
+    compatibility = python_workflow.split("  test:", 1)[1].split(
+        "\n  minimum-direct-dependencies:", 1
+    )[0]
+    minimum = python_workflow.split("  minimum-direct-dependencies:", 1)[1].split(
+        "\n  quantus-reference:", 1
+    )[0]
+    dependency = _read("dependency-constraints.yml").split(
+        "\n  scikit-image-next-major-discovery:", 1
+    )[0]
+    cryptography_pin = '"cryptography==50.0.0"'
+    pywin32_pin = "\"pywin32==311; sys_platform == 'win32'\""
+
+    assert compatibility.count(cryptography_pin) == 1
+    assert compatibility.count(pywin32_pin) == 1
+    assert minimum.count(cryptography_pin) == 1
+    assert pywin32_pin not in minimum
+    assert dependency.count(cryptography_pin) == 1
+    assert pywin32_pin not in dependency
+
+    runtime_surface = (
+        (ROOT / "pyproject.toml")
+        .read_text(encoding="utf-8")
+        .split("[tool.poetry.group.dev.dependencies]", 1)[0]
+    )
+    assert "cryptography" not in runtime_surface
+    assert "pywin32" not in runtime_surface
+
+
+def _assert_poetry_pytest_uses_the_repository_module_path(
+    workflow: str,
+    *,
+    step_name: str,
+    next_step_name: str,
+) -> None:
+    step = workflow.split(f"      - name: {step_name}", 1)[1].split(
+        f"\n      - name: {next_step_name}", 1
+    )[0]
+    assert "poetry run python -m pytest --strict-config --strict-markers" in step
+    assert "poetry run pytest" not in step
+
+
+def test_poetry_ci_and_publication_tests_preserve_the_repository_import_path():
+    _assert_poetry_pytest_uses_the_repository_module_path(
+        _read("python-ci.yml"),
+        step_name="Run branch-aware coverage gate",
+        next_step_name="Enforce changed-line coverage on pull requests",
+    )
+    _assert_poetry_pytest_uses_the_repository_module_path(
+        _read("publish-pypi.yml"),
+        step_name="Run the complete Python release gate",
+        next_step_name="Run the complete experimental JavaScript gate",
+    )
+
+
+def test_poetry_test_launcher_contract_rejects_the_console_script_near_match():
+    cases = (
+        (
+            _read("python-ci.yml"),
+            "Run branch-aware coverage gate",
+            "Enforce changed-line coverage on pull requests",
+        ),
+        (
+            _read("publish-pypi.yml"),
+            "Run the complete Python release gate",
+            "Run the complete experimental JavaScript gate",
+        ),
+    )
+    for workflow, step_name, next_step_name in cases:
+        mutated = workflow.replace(
+            "poetry run python -m pytest --strict-config --strict-markers",
+            "poetry run pytest --strict-config --strict-markers",
+            1,
+        )
+        with pytest.raises(AssertionError):
+            _assert_poetry_pytest_uses_the_repository_module_path(
+                mutated,
+                step_name=step_name,
+                next_step_name=next_step_name,
+            )
+
+
+def _assert_captum_guidance_uses_the_repository_module_path(matrix: str) -> None:
+    mandatory_gates = matrix.split("## Mandatory compatibility gates", 1)[1]
+    assert "python -m pytest --strict-config --strict-markers" in mandatory_gates
+    assert "\npytest --strict-config --strict-markers" not in mandatory_gates
+
+
+def test_active_captum_guidance_preserves_the_repository_import_path():
+    matrix = (ROOT / "docs" / "CAPTUM_SUPPORT_MATRIX.md").read_text(encoding="utf-8")
+    _assert_captum_guidance_uses_the_repository_module_path(matrix)
+
+
+def test_active_captum_guidance_rejects_the_console_script_near_match():
+    matrix = (ROOT / "docs" / "CAPTUM_SUPPORT_MATRIX.md").read_text(encoding="utf-8")
+    mutated = matrix.replace(
+        "python -m pytest --strict-config --strict-markers",
+        "pytest --strict-config --strict-markers",
+        1,
+    )
+    with pytest.raises(AssertionError):
+        _assert_captum_guidance_uses_the_repository_module_path(mutated)
 
 
 def _assert_macos_openmp_contract(workflow):
@@ -690,6 +1714,141 @@ def test_release_runbook_records_legacy_incident_without_fabricating_recovery():
 
 def test_release_runbook_dispatches_recovery_from_the_tag_and_defers_to_assets():
     runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
-    assert "gh workflow run recover-github-release.yml --ref $releaseTag" in runbook
+    assert "gh workflow run recover-github-release.yml --ref $releaseTag" not in runbook
+    assert "`--action dispatch-release-recovery`" in runbook
+    assert "exact immutable publication plan,\ntag commit" in runbook
     assert "release notes remain mutable" in runbook
     assert "governance assets are authoritative" in runbook
+
+
+def test_operator_docs_forbid_direct_publish_dispatch_and_preserve_the_input_contract():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    migration = (ROOT / "docs" / "MIGRATION_0_15.md").read_text(encoding="utf-8")
+    for operator_doc in (runbook, migration):
+        assert "gh workflow run publish-pypi.yml" not in operator_doc
+        assert "workflow: publish-pypi.yml" in operator_doc
+        assert "ref: v0.15.0" in operator_doc
+        assert "tag: v0.15.0" in operator_doc
+        assert "preflight_run_id: <successful-release-preflight-run-id>" in operator_doc
+        assert "cuda_run_id: <accepted-final-main-cuda-run-id>" in operator_doc
+        assert "single_minimum_runner_nonce: <fresh-16-lowercase-hex-nonce>" in operator_doc
+        assert (
+            "single_latest_runner_nonce: <different-fresh-16-lowercase-hex-nonce>" in operator_doc
+        )
+        assert "stage_recovery_drill: true" in operator_doc
+    assert "does not make the current release a GO" in runbook
+    assert "does not clear the live release blockers or authorize a tag" in migration
+    assert "distinct, previously unused, and disjoint" in runbook
+
+
+def test_migration_guide_uses_exactly_once_staged_publication_and_recovery():
+    migration = (ROOT / "docs" / "MIGRATION_0_15.md").read_text(encoding="utf-8")
+    assert "preflight_run_id: <successful-release-preflight-run-id>" in migration
+    assert "cuda_run_id: <accepted-final-main-cuda-run-id>" in migration
+    assert "single_minimum_runner_nonce: <fresh-16-lowercase-hex-nonce>" in migration
+    assert "single_latest_runner_nonce: <different-fresh-16-lowercase-hex-nonce>" in migration
+    assert "stage_recovery_drill: true" in migration
+    assert "gh workflow run recover-github-release.yml --ref $releaseTag" not in migration
+    assert "`--action dispatch-release-recovery`" in migration
+    assert "journals exact inputs and pre-dispatch run IDs before one POST" in migration
+    assert "observation-only reconciliation of the pending intent" in migration
+    assert "Do not rerun that source run or any of its jobs" in migration
+    assert "rerun failed jobs" not in migration
+    assert "byte-identical without a\nsecond upload" in migration
+    assert "contains no PyPI publisher action, credential" in migration
+
+
+def test_release_runbook_requires_external_authority_for_mutable_workflows():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    assert "guard is defense in depth, not the authority boundary" in runbook
+    assert "is the sole collaborator" in runbook
+    assert "zero pending invitations" in runbook
+    assert "queued or in-progress job targeting any planned nonce-bearing label" in runbook
+    assert "re-invite each collaborator at the exact prior permission" in runbook
+    assert "Restoration is not complete" in runbook
+    assert "Only then directly generate each one-use JIT configuration" in runbook
+    assert "administrator/provider controls" in runbook
+    assert "disjoint from all four accepted CUDA-evidence nonces" in runbook
+    assert "repository JIT endpoint has no `no_default_labels` request field" in runbook
+    assert "exact JIT response must prove the sole returned" in runbook
+    assert "label before execution" in runbook
+    assert "--installed-app-authority $installedAppAuthority" in runbook
+    assert "no more than 10 minutes before the JSON snapshot" in runbook
+
+
+def test_release_docs_order_b01_before_the_fresh_b02_capture_and_keep_variables_empty():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    limitation = (ROOT / "docs" / "LIMITATION_MITIGATION_PLAN.md").read_text(encoding="utf-8")
+    matrix = (ROOT / "docs" / "RELEASE_BLOCKER_CLOSURE_MATRIX.md").read_text(encoding="utf-8")
+
+    assert runbook.index("Finish and settle the final-main automatic checks") < runbook.index(
+        "Administrator-authenticated pre-tag snapshot"
+    )
+    assert "Complete these B01 prerequisites before beginning" in runbook
+    for ledger in (limitation, matrix):
+        assert "publisher/signing" in ledger
+        assert re.search(r"before B02's\s+30-minute", ledger)
+        assert "Keep repository variables empty" in ledger
+        assert "Set exact variables" not in ledger
+    assert "rerun only failed downstream jobs" not in limitation
+    assert "fresh downstream-only recovery dispatch" in limitation
+    assert "Never use **Re-run failed jobs**" in limitation
+
+
+def test_release_runbook_refreshes_main_scopes_the_token_and_defines_the_signed_tag_boundary():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    assert "git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'" in runbook
+    assert 'gh api "repos/$expectedRepository/commits/main" --jq .sha' in runbook
+    assert "$liveMainCommit -ne $releaseCommit" in runbook
+    token_set = runbook.index("$env:GH_TOKEN = gh auth token")
+    token_finally = runbook.index("finally {", token_set)
+    token_remove = runbook.index(
+        "Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue", token_finally
+    )
+    assert token_set < token_finally < token_remove
+
+    tag_boundary = runbook.index("## Immutable signed-tag boundary")
+    boundary_fetch = runbook.index("git fetch --no-tags origin", tag_boundary)
+    boundary_local_main = runbook.index("$fetchedMainCommit", boundary_fetch)
+    boundary_live_main = runbook.index(
+        'gh api "repos/jemsbhai/explainiverse/commits/main" --jq .sha', boundary_local_main
+    )
+    remote_tag_absence = runbook.index(
+        '"repos/jemsbhai/explainiverse/git/ref/tags/$releaseTag" "remote release tag"',
+        boundary_live_main,
+    )
+    remote_release_absence = runbook.index(
+        '"repos/jemsbhai/explainiverse/releases/tags/$releaseTag" "GitHub Release"',
+        remote_tag_absence,
+    )
+    exact_404 = runbook.index("one exact HTTP 404", boundary_live_main)
+    tag_create = runbook.index("tag --sign `", remote_release_absence)
+    tag_type = runbook.index("git cat-file -t $releaseTag", tag_create)
+    tag_peel = runbook.index('git rev-parse "$($releaseTag)^{commit}"', tag_type)
+    tag_verify = runbook.index("verify-tag $releaseTag", tag_peel)
+    tag_push = runbook.index(
+        'git push origin "refs/tags/$releaseTag:refs/tags/$releaseTag"', tag_verify
+    )
+    ref_api = runbook.index("git/ref/tags/$releaseTag", tag_push)
+    object_api = runbook.index("git/tags/$($tagRef.object.sha)", ref_api)
+    verified = runbook.index("$tagObject.verification.verified", object_api)
+    assert boundary_fetch < boundary_local_main < boundary_live_main < exact_404
+    assert boundary_live_main < remote_tag_absence < remote_release_absence < tag_create
+    assert (
+        tag_create < tag_type < tag_peel < tag_verify < tag_push < ref_api < object_api < verified
+    )
+
+
+def test_release_runbook_marks_the_tag_no_return_and_ambiguous_upload_boundaries():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    assert re.search(r"within the 30-minute publication\s+freshness limit", runbook)
+    assert "retained for only 14 days" in runbook
+    assert re.search(
+        r"not recoverable by\s+rerunning or rebinding evidence after the immutable tag",
+        runbook,
+    )
+    assert "reconcile a missing/ambiguous dispatch response by read-only discovery" in runbook
+    assert "never replay the POST" in runbook
+    assert "source publish job did not finish with one unambiguous" in runbook
+    assert "Treat a lost success response or a publish job that failed" in runbook
+    assert "do not rerun OIDC" in runbook

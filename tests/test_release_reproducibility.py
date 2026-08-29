@@ -29,6 +29,17 @@ environment = _load_script(
 )
 compare_distribution_directories = comparison.compare_distribution_directories
 compare_release_environments = environment.compare_release_environments
+
+
+def _compare_release_environments(first, second, *, run_id="123456", run_attempt="1"):
+    return compare_release_environments(
+        first,
+        second,
+        expected_run_id=run_id,
+        expected_run_attempt=run_attempt,
+    )
+
+
 release_environment = environment.release_environment
 
 
@@ -244,10 +255,11 @@ def test_environment_comparison_matches_stable_identity_and_proves_distinct_buil
     second["platform"] = "Linux-6.11-another-host"
     second["python"]["executable"] = "/another/stable/python/path"
 
-    report = compare_release_environments(first, second)
+    report = _compare_release_environments(first, second)
 
     assert report["compatible"] is True
     assert report["comparison"] == "stable-environment-identity"
+    assert report["source_workflow"] == {"run_id": "123456", "run_attempt": "1"}
     assert report["distinct_build_identities"] == {
         "first": "123456:1:one",
         "second": "123456:1:two",
@@ -314,18 +326,18 @@ def test_environment_comparison_rejects_stable_identity_drift(mutation, match):
     mutation(second)
 
     with pytest.raises(ValueError, match=match):
-        compare_release_environments(first, second)
+        _compare_release_environments(first, second)
 
 
 def test_environment_comparison_rejects_reused_or_missing_build_identity():
     first = _recorded_environment("123456:1:one")
     second = _recorded_environment("123456:1:one")
     with pytest.raises(ValueError, match="second build identity must use slot 'two'"):
-        compare_release_environments(first, second)
+        _compare_release_environments(first, second)
 
     second["build_identity"] = None
     with pytest.raises(ValueError, match="second release environment has no build identity"):
-        compare_release_environments(first, second)
+        _compare_release_environments(first, second)
 
 
 @pytest.mark.parametrize("identity", ["forged-two", "123456:1:three", "123456:1:two:extra"])
@@ -334,7 +346,7 @@ def test_environment_comparison_rejects_unstructured_build_identity(identity):
     second = _recorded_environment(identity)
 
     with pytest.raises(ValueError, match=r"RUN_ID:RUN_ATTEMPT:one\|two"):
-        compare_release_environments(first, second)
+        _compare_release_environments(first, second)
 
 
 @pytest.mark.parametrize(
@@ -355,7 +367,7 @@ def test_environment_comparison_binds_build_identity_to_hosted_matrix_job(field,
     second["runner"][field] = value
 
     with pytest.raises(ValueError, match=match):
-        compare_release_environments(first, second)
+        _compare_release_environments(first, second)
 
 
 def test_environment_comparison_retains_but_does_not_require_unique_runner_display_names():
@@ -363,7 +375,7 @@ def test_environment_comparison_retains_but_does_not_require_unique_runner_displ
     second = _recorded_environment("123456:1:two")
     second["runner"]["RUNNER_NAME"] = first["runner"]["RUNNER_NAME"]
 
-    report = compare_release_environments(first, second)
+    report = _compare_release_environments(first, second)
 
     assert report["hosted_runner_jobs"]["first"]["runner_name"] == "GitHub Actions 1"
     assert report["hosted_runner_jobs"]["second"]["runner_name"] == "GitHub Actions 1"
@@ -381,7 +393,31 @@ def test_environment_comparison_binds_recorded_commit_to_github_sha():
     second["runner"]["GITHUB_SHA"] = "d" * 40
 
     with pytest.raises(ValueError, match="first source commit does not match runner GITHUB_SHA"):
-        compare_release_environments(first, second)
+        _compare_release_environments(first, second)
+
+
+@pytest.mark.parametrize(
+    ("run_id", "run_attempt", "match"),
+    [
+        ("654321", "1", "GITHUB_RUN_ID does not match the current workflow run"),
+        ("123456", "2", "GITHUB_RUN_ATTEMPT does not match the current workflow attempt"),
+        ("0", "1", "expected run ID must be a positive decimal string"),
+        ("123456", "0", "expected run attempt must be a positive decimal string"),
+    ],
+)
+def test_environment_comparison_rejects_manifests_from_a_different_attempt(
+    run_id, run_attempt, match
+):
+    first = _recorded_environment("123456:1:one")
+    second = _recorded_environment("123456:1:two")
+
+    with pytest.raises(ValueError, match=match):
+        _compare_release_environments(
+            first,
+            second,
+            run_id=run_id,
+            run_attempt=run_attempt,
+        )
 
 
 def test_environment_comparison_cli_writes_both_complete_manifests(monkeypatch, tmp_path):
@@ -400,6 +436,10 @@ def test_environment_comparison_cli_writes_both_complete_manifests(monkeypatch, 
             "--compare",
             str(first_path),
             str(second_path),
+            "--expected-run-id",
+            "123456",
+            "--expected-run-attempt",
+            "1",
             "--output",
             str(output_path),
         ],
@@ -431,6 +471,10 @@ def test_environment_comparison_cli_writes_failure_report_before_nonzero_exit(
             "--compare",
             str(first_path),
             str(second_path),
+            "--expected-run-id",
+            "123456",
+            "--expected-run-attempt",
+            "1",
             "--output",
             str(output_path),
         ],
@@ -482,6 +526,10 @@ def test_reproducibility_workflow_uses_two_clean_runners_and_no_publish_step():
     assert "--require-hashes" in workflow
     assert "--only-binary=:all:" in workflow
     assert "SOURCE_DATE_EPOCH" in workflow
+    assert 'SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"' in workflow
+    assert "export SOURCE_DATE_EPOCH" in workflow
+    assert 'export SOURCE_DATE_EPOCH="$(' not in workflow
+    assert "python -m twine check ./dist/*" in workflow
     assert "Artifact byte reproducibility" in workflow
     assert "compare_distribution_artifacts.py" in workflow
     assert (
@@ -492,6 +540,8 @@ def test_reproducibility_workflow_uses_two_clean_runners_and_no_publish_step():
     assert "REPRODUCIBILITY_JOB_TOTAL: ${{ strategy.job-total }}" in workflow
     assert "REPRODUCIBILITY_RUNNER_ENVIRONMENT: ${{ runner.environment }}" in workflow
     assert "--compare" in workflow
+    assert '--expected-run-id "$GITHUB_RUN_ID"' in workflow
+    assert '--expected-run-attempt "$GITHUB_RUN_ATTEMPT"' in workflow
     assert "release-environment-comparison.json" in workflow
     assert "release-environment-one.json" in workflow
     assert "release-environment-two.json" in workflow
@@ -516,7 +566,15 @@ def test_publish_build_uses_the_same_hashed_tools_and_records_its_environment():
     assert "record_release_environment.py" in workflow
     assert "provenance/release-environment.json" in workflow
     assert "SOURCE_DATE_EPOCH" in workflow
+    assert 'SOURCE_DATE_EPOCH="$(git -C release-source log -1 --format=%ct)"' in workflow
+    assert "export SOURCE_DATE_EPOCH" in workflow
+    assert 'export SOURCE_DATE_EPOCH="$(' not in workflow
+    assert "python -m twine check ./dist/*" in workflow
     assert "PYTHONHASHSEED=0" in workflow
+    assert "reproducibility_run_attempt=$(" in workflow
+    assert "provenance/reproducibility-source-run.json" in workflow
+    assert '--expected-run-id "$reproducibility_run_id"' in workflow
+    assert '--expected-run-attempt "$reproducibility_run_attempt"' in workflow
     assert '"poetry==2.3.2"' not in workflow
     assert '"twine==6.2.0"' not in workflow
     assert '"cyclonedx-bom==7.2.1"' not in workflow

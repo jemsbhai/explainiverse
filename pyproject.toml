@@ -56,6 +56,8 @@ quantus = "^0.6.0"
 grad-cam = "^1.5.5"
 diff-cover = ">=9.2,<11.0"
 twine = ">=5.1,<7.0"
+cryptography = ">=46,<51"
+pywin32 = { version = ">=311,<312", markers = "sys_platform == 'win32'" }
 
 [tool.poetry.group.tutorial]
 optional = true
@@ -91,13 +93,22 @@ show_missing = true
 [tool.black]
 line-length = 100
 target-version = ['py310', 'py311', 'py312']
+# This one-line external trust shim is byte-sealed at a reviewed SHA-256.
+extend-exclude = '^/scripts/release_gpu_jit_lambda_operator/preloader_shim\.py$'
 
 [tool.isort]
 profile = "black"
 line_length = 100
+skip_glob = ["scripts/release_gpu_jit_lambda_operator/preloader_shim.py"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["scripts/release_gpu_jit_lambda_operator/preloader_shim.py"]
 
 [tool.mypy]
 mypy_path = "src"
+exclude = ['^scripts[\\/]release_gpu_jit_lambda_operator[\\/]preloader_shim\.py$']
+explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = [

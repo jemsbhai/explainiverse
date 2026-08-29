@@ -2,6 +2,23 @@ name: CUDA release contracts
 
 on:
   workflow_dispatch:
+    inputs:
+      single_minimum_runner_nonce:
+        description: "16-hex binding for the minimum single-GPU custom runner"
+        required: true
+        type: string
+      single_latest_runner_nonce:
+        description: "16-hex binding for the latest single-GPU custom runner"
+        required: true
+        type: string
+      two_minimum_runner_nonce:
+        description: "16-hex binding for the minimum two-GPU custom runner"
+        required: true
+        type: string
+      two_latest_runner_nonce:
+        description: "16-hex binding for the latest two-GPU custom runner"
+        required: true
+        type: string
   schedule:
     - cron: "41 4 * * 3"
   push:
@@ -27,31 +44,71 @@ jobs:
     timeout-minutes: 2
 
     steps:
-      - name: Require exact reviewed CUDA runner labels
+      - name: Reject untrusted CUDA runner execution contexts
         env:
-          CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
-          CUDA_TWO_RUNNER: ${{ vars.CUDA_TWO_RUNNER }}
+          SINGLE_MINIMUM_RUNNER_NONCE: ${{ inputs.single_minimum_runner_nonce }}
+          SINGLE_LATEST_RUNNER_NONCE: ${{ inputs.single_latest_runner_nonce }}
+          TWO_MINIMUM_RUNNER_NONCE: ${{ inputs.two_minimum_runner_nonce }}
+          TWO_LATEST_RUNNER_NONCE: ${{ inputs.two_latest_runner_nonce }}
         run: |
-          if [[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]; then
-            echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
-            exit 1
-          fi
-          if [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ "$CUDA_TWO_RUNNER" != "explainiverse-cuda-two" ]]; then
-              echo "CUDA_TWO_RUNNER must be exactly explainiverse-cuda-two" >&2
-              exit 1
-            fi
-          fi
+          python3 - <<'PY'
+          import os
+          import re
+
+          repository = os.environ.get("GITHUB_REPOSITORY")
+          repository_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
+          actor = os.environ.get("GITHUB_ACTOR")
+          triggering_actor = os.environ.get("GITHUB_TRIGGERING_ACTOR")
+          event_name = os.environ.get("GITHUB_EVENT_NAME")
+          run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT")
+          runner_nonces = (
+              os.environ.get("SINGLE_MINIMUM_RUNNER_NONCE"),
+              os.environ.get("SINGLE_LATEST_RUNNER_NONCE"),
+              os.environ.get("TWO_MINIMUM_RUNNER_NONCE"),
+              os.environ.get("TWO_LATEST_RUNNER_NONCE"),
+          )
+
+          trusted_repository = (
+              repository == "jemsbhai/explainiverse"
+              and repository_owner == "jemsbhai"
+          )
+          trusted_trigger = (
+              actor == repository_owner
+              and triggering_actor == repository_owner
+          )
+          approved_event = event_name == "workflow_dispatch"
+          exact_nonces = all(
+              isinstance(value, str)
+              and re.fullmatch(r"[a-f0-9]{16}", value) is not None
+              for value in runner_nonces
+          )
+          distinct_nonces = len(set(runner_nonces)) == len(runner_nonces)
+          first_attempt = run_attempt == "1"
+          if not (
+              trusted_repository
+              and trusted_trigger
+              and approved_event
+              and exact_nonces
+              and distinct_nonces
+              and first_attempt
+          ):
+              raise SystemExit(
+                  "custom CUDA runners require an owner-triggered first-attempt "
+                  "dispatch with four distinct reviewed runner nonces"
+              )
+          PY
 
   single-gpu:
     name: CUDA single-GPU (Torch ${{ matrix.torch-edge }})
     needs: cuda-runner-routing
     if: ${{ always() }}
-    # A rejected prerequisite selects only the hosted failure reporter below;
-    # accepted work can run only on the reviewed custom GPU label.
+    # A rejected prerequisite or partial rerun selects only the hosted failure
+    # reporter below; accepted work can run only on the reviewed custom GPU label.
     runs-on: >-
-      ${{ needs.cuda-runner-routing.result == 'success' &&
-      'explainiverse-cuda-single' || 'ubuntu-latest' }}
+      ${{ github.run_attempt == 1 &&
+      needs.cuda-runner-routing.result == 'success' &&
+      format('explainiverse-cuda-single-jit-{0}', matrix.runner_nonce) ||
+      'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -60,9 +117,11 @@ jobs:
           - torch-edge: minimum
             python-version: "3.10"
             constraints: .github/constraints/captum-min.txt
+            runner_nonce: ${{ inputs.single_minimum_runner_nonce }}
           - torch-edge: latest
             python-version: "3.12"
             constraints: none
+            runner_nonce: ${{ inputs.single_latest_runner_nonce }}
     env:
       EXPLAINIVERSE_REQUIRED_CUDA_DEVICES: "1"
       EXPLAINIVERSE_ENFORCE_CUDA_MANIFEST: "1"
@@ -70,7 +129,7 @@ jobs:
 
     steps:
       - name: Fail the required check when CUDA routing is rejected
-        if: needs.cuda-runner-routing.result != 'success'
+        if: github.run_attempt != 1 || needs.cuda-runner-routing.result != 'success'
         run: |
           echo "approved single-GPU runner routing is unavailable" >&2
           exit 1
@@ -119,11 +178,13 @@ jobs:
     if: >-
       always() &&
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    # A rejected prerequisite selects only the hosted failure reporter below;
-    # accepted work can run only on the reviewed custom GPU label.
+    # A rejected prerequisite or partial rerun selects only the hosted failure
+    # reporter below; accepted work can run only on the reviewed custom GPU label.
     runs-on: >-
-      ${{ needs.cuda-runner-routing.result == 'success' &&
-      'explainiverse-cuda-two' || 'ubuntu-latest' }}
+      ${{ github.run_attempt == 1 &&
+      needs.cuda-runner-routing.result == 'success' &&
+      format('explainiverse-cuda-two-jit-{0}', matrix.runner_nonce) ||
+      'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -132,9 +193,11 @@ jobs:
           - torch-edge: minimum
             python-version: "3.10"
             constraints: .github/constraints/captum-min.txt
+            runner_nonce: ${{ inputs.two_minimum_runner_nonce }}
           - torch-edge: latest
             python-version: "3.12"
             constraints: none
+            runner_nonce: ${{ inputs.two_latest_runner_nonce }}
     env:
       EXPLAINIVERSE_REQUIRED_CUDA_DEVICES: "2"
       EXPLAINIVERSE_ENFORCE_CUDA_MANIFEST: "1"
@@ -142,7 +205,7 @@ jobs:
 
     steps:
       - name: Fail the required check when CUDA routing is rejected
-        if: needs.cuda-runner-routing.result != 'success'
+        if: github.run_attempt != 1 || needs.cuda-runner-routing.result != 'success'
         run: |
           echo "approved two-GPU runner routing is unavailable" >&2
           exit 1

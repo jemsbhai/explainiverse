@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import urllib.error
 import urllib.parse
@@ -28,8 +29,18 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 _SHA = re.compile(r"[0-9a-f]{40}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 _TAG = re.compile(r"v\d+\.\d+\.\d+")
 _MAX_SNAPSHOT_AGE = timedelta(minutes=30)
+_MAX_INSTALLED_APP_CAPTURE_AGE = timedelta(minutes=10)
+_MAX_CLOCK_SKEW = timedelta(minutes=1)
+_MAX_APP_EVIDENCE_BYTES = 10 * 1024 * 1024
+_APP_EVIDENCE_MEDIA_TYPE = "text/plain; charset=utf-8"
+_APP_EVIDENCE_KIND_ORDER = {
+    "installation-list": 0,
+    "installation-configure": 1,
+    "permission-update": 2,
+}
 
 
 class ApiNotFoundError(RuntimeError):
@@ -66,6 +77,500 @@ def _canonical_names(values: Sequence[Any], name: str) -> list[str]:
     return sorted(names)
 
 
+def _aware_utc_timestamp(value: Any, name: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be an RFC 3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an RFC 3339 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _canonical_app_evidence(value: Any, name: str) -> Mapping[str, Any]:
+    evidence = _mapping(value, name)
+    expected_keys = {
+        "filename",
+        "kind",
+        "installation_id",
+        "source_url",
+        "captured_at",
+        "media_type",
+        "full_page",
+        "bytes",
+        "sha256",
+    }
+    if set(evidence) != expected_keys:
+        raise ValueError(
+            f"{name} keys must be exactly {sorted(expected_keys)!r}; "
+            f"got {sorted(evidence, key=str)!r}"
+        )
+    filename = evidence.get("filename")
+    if (
+        not isinstance(filename, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename) is None
+        or filename in {".", ".."}
+    ):
+        raise ValueError(f"{name} filename must be a safe unique basename")
+    kind = evidence.get("kind")
+    if kind not in _APP_EVIDENCE_KIND_ORDER:
+        raise ValueError(f"{name} kind is not recognized")
+    installation_id = evidence.get("installation_id")
+    if kind == "installation-list":
+        if installation_id is not None:
+            raise ValueError(f"{name} installation-list id must be null")
+    elif (
+        isinstance(installation_id, bool)
+        or not isinstance(installation_id, int)
+        or installation_id < 1
+    ):
+        raise ValueError(f"{name} installation id must be a positive integer")
+    source_url = evidence.get("source_url")
+    if not isinstance(source_url, str) or not source_url.startswith("https://github.com/"):
+        raise ValueError(f"{name} source_url must be an HTTPS github.com URL")
+    captured_at = _aware_utc_timestamp(evidence.get("captured_at"), f"{name} captured_at")
+    if evidence.get("media_type") != _APP_EVIDENCE_MEDIA_TYPE:
+        raise ValueError(f"{name} media_type must be {_APP_EVIDENCE_MEDIA_TYPE!r}")
+    if evidence.get("full_page") is not True:
+        raise ValueError(f"{name} full_page must be true")
+    byte_count = evidence.get("bytes")
+    if (
+        isinstance(byte_count, bool)
+        or not isinstance(byte_count, int)
+        or not 1 <= byte_count <= _MAX_APP_EVIDENCE_BYTES
+    ):
+        raise ValueError(f"{name} bytes must be a positive bounded integer")
+    digest = evidence.get("sha256")
+    if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+        raise ValueError(f"{name} sha256 must be 64 lowercase hexadecimal characters")
+    return {
+        "filename": filename,
+        "kind": kind,
+        "installation_id": installation_id,
+        "source_url": source_url,
+        "captured_at": captured_at.isoformat(),
+        "media_type": _APP_EVIDENCE_MEDIA_TYPE,
+        "full_page": True,
+        "bytes": byte_count,
+        "sha256": digest,
+    }
+
+
+def _app_evidence_header(evidence: Mapping[str, Any]) -> str:
+    installation_id = evidence["installation_id"]
+    normalized_id = "null" if installation_id is None else str(installation_id)
+    return (
+        f"source_url={evidence['source_url']}\t"
+        f"captured_at={evidence['captured_at']}\t"
+        f"kind={evidence['kind']}\t"
+        f"installation_id={normalized_id}\n"
+    )
+
+
+def _canonical_app_installation(value: Any, name: str) -> Mapping[str, Any]:
+    installation = _mapping(value, name)
+    expected_keys = {
+        "id",
+        "name",
+        "repository_selection",
+        "repository_access",
+        "suspended",
+        "danger_zone_action",
+        "permission_update_requested",
+        "permission_update_review",
+        "permissions",
+        "requested_additional_permissions",
+    }
+    if set(installation) != expected_keys:
+        raise ValueError(
+            f"{name} keys must be exactly {sorted(expected_keys)!r}; "
+            f"got {sorted(installation, key=str)!r}"
+        )
+    installation_id = installation.get("id")
+    if isinstance(installation_id, bool) or not isinstance(installation_id, int):
+        raise ValueError(f"{name} id must be a positive integer")
+    if installation_id < 1:
+        raise ValueError(f"{name} id must be a positive integer")
+    app_name = installation.get("name")
+    if not isinstance(app_name, str) or not app_name:
+        raise ValueError(f"{name} name must be a non-empty string")
+    repository_selection = installation.get("repository_selection")
+    if repository_selection not in {"all", "selected"}:
+        raise ValueError(f"{name} repository_selection must be 'all' or 'selected'")
+    for field in (
+        "repository_access",
+        "suspended",
+        "permission_update_requested",
+    ):
+        if not isinstance(installation.get(field), bool):
+            raise ValueError(f"{name} {field} must be boolean")
+    if repository_selection == "all" and installation.get("repository_access") is not True:
+        raise ValueError(f"{name} all-repository selection must include the release repository")
+    expected_danger_action = "Unsuspend" if installation.get("suspended") else "Suspend"
+    if installation.get("danger_zone_action") != expected_danger_action:
+        raise ValueError(
+            f"{name} danger_zone_action must be {expected_danger_action!r} for the "
+            "recorded suspension state"
+        )
+
+    normalized_permissions: dict[str, Mapping[str, list[str]]] = {}
+    for field in ("permissions", "requested_additional_permissions"):
+        permission_map = _mapping(installation.get(field), f"{name} {field}")
+        if set(permission_map) != {"read", "write"}:
+            raise ValueError(f"{name} {field} keys must be exactly ['read', 'write']")
+        normalized_permissions[field] = {
+            access: _canonical_names(
+                _sequence(permission_map.get(access), f"{name} {field} {access}"),
+                f"{name} {field} {access}",
+            )
+            for access in ("read", "write")
+        }
+
+    requested_permissions = normalized_permissions["requested_additional_permissions"]
+    has_displayed_delta = any(requested_permissions[access] for access in ("read", "write"))
+    if installation.get("permission_update_requested"):
+        expected_update_review = (
+            "listed-additional-permissions"
+            if has_displayed_delta
+            else "pending-no-displayed-repository-permission-delta"
+        )
+    else:
+        expected_update_review = "not-requested"
+        if has_displayed_delta:
+            raise ValueError(f"{name} cannot list requested permissions without a pending update")
+    if installation.get("permission_update_review") != expected_update_review:
+        raise ValueError(f"{name} permission_update_review must be {expected_update_review!r}")
+
+    return {
+        "id": installation_id,
+        "name": app_name,
+        "repository_selection": repository_selection,
+        "repository_access": installation.get("repository_access"),
+        "suspended": installation.get("suspended"),
+        "danger_zone_action": expected_danger_action,
+        "permission_update_requested": installation.get("permission_update_requested"),
+        "permission_update_review": expected_update_review,
+        "permissions": normalized_permissions["permissions"],
+        "requested_additional_permissions": normalized_permissions[
+            "requested_additional_permissions"
+        ],
+    }
+
+
+def _require_complete_app_evidence(
+    installations: Sequence[Mapping[str, Any]],
+    evidence: Sequence[Mapping[str, Any]],
+    *,
+    aggregate_time: datetime,
+) -> None:
+    expected_roles = {("installation-list", None)}
+    expected_urls = {("installation-list", None): "https://github.com/settings/installations"}
+    for installation in installations:
+        installation_id = installation["id"]
+        configure_role = ("installation-configure", installation_id)
+        expected_roles.add(configure_role)
+        expected_urls[configure_role] = (
+            f"https://github.com/settings/installations/{installation_id}"
+        )
+        if installation["permission_update_requested"]:
+            update_role = ("permission-update", installation_id)
+            expected_roles.add(update_role)
+            expected_urls[update_role] = (
+                f"https://github.com/settings/installations/{installation_id}/permissions/update"
+            )
+    actual_roles = {(value["kind"], value["installation_id"]) for value in evidence}
+    if actual_roles != expected_roles or len(evidence) != len(expected_roles):
+        raise ValueError(
+            "installed App evidence must contain exactly one complete list page, one "
+            "Configure page per installation, and one permission-update page exactly "
+            "when an update is pending"
+        )
+    page_times: list[datetime] = []
+    for item in evidence:
+        role = (item["kind"], item["installation_id"])
+        if item["source_url"] != expected_urls[role]:
+            raise ValueError(
+                f"installed App evidence source URL differs for {role!r}: "
+                f"expected {expected_urls[role]!r}, got {item['source_url']!r}"
+            )
+        page_time = _aware_utc_timestamp(item["captured_at"], "installed App evidence captured_at")
+        page_times.append(page_time)
+        page_age = aggregate_time - page_time
+        if page_age < -_MAX_CLOCK_SKEW:
+            raise ValueError(
+                f"installed App evidence page postdates the aggregate capture for {role!r}"
+            )
+        if page_age > _MAX_INSTALLED_APP_CAPTURE_AGE:
+            raise ValueError(
+                f"installed App evidence page is stale within the capture session for {role!r}"
+            )
+    if aggregate_time != max(page_times):
+        raise ValueError(
+            "installed App authority captured_at must equal the latest evidence page timestamp"
+        )
+
+
+def _normalize_installed_app_authority(
+    value: Any,
+    *,
+    repository: Any,
+    capture_principal: Any,
+    evidence_reader: Callable[[str], bytes] | None = None,
+) -> Mapping[str, Any]:
+    authority = _mapping(value, "installed App authority capture")
+    expected_keys = {
+        "schema_version",
+        "captured_at",
+        "capture_principal",
+        "repository",
+        "source_url",
+        "coverage_complete",
+        "installations",
+        "evidence",
+    }
+    if set(authority) != expected_keys:
+        raise ValueError(
+            "installed App authority capture keys must be exactly "
+            f"{sorted(expected_keys)!r}; got {sorted(authority, key=str)!r}"
+        )
+    if type(authority.get("schema_version")) is not int or authority.get("schema_version") != 1:
+        raise ValueError("installed App authority capture schema_version must be 1")
+    captured_datetime = _aware_utc_timestamp(
+        authority.get("captured_at"), "installed App authority captured_at"
+    )
+    if authority.get("capture_principal") != capture_principal:
+        raise ValueError(
+            "installed App authority capture_principal must match the authenticated "
+            "GitHub API principal"
+        )
+    if authority.get("repository") != repository:
+        raise ValueError("installed App authority repository must match the release repository")
+    if authority.get("coverage_complete") is not True:
+        raise ValueError("installed App authority coverage_complete must be true")
+    installations = [
+        _canonical_app_installation(raw, "installed App installation")
+        for raw in _sequence(authority.get("installations"), "installed App installations")
+    ]
+    installation_ids = [installation["id"] for installation in installations]
+    if len(installation_ids) != len(set(installation_ids)):
+        raise ValueError("installed App installation ids must be unique")
+    installations.sort(key=lambda installation: installation["id"])
+    evidence = [
+        _canonical_app_evidence(raw, "installed App evidence")
+        for raw in _sequence(authority.get("evidence"), "installed App evidence")
+    ]
+    evidence_roles = [(value["kind"], value["installation_id"]) for value in evidence]
+    if len(evidence_roles) != len(set(evidence_roles)):
+        raise ValueError("installed App evidence page roles must be unique")
+    evidence_filenames = [value["filename"] for value in evidence]
+    if len(evidence_filenames) != len(set(evidence_filenames)):
+        raise ValueError("installed App evidence filenames must be unique")
+    evidence_digests = [value["sha256"] for value in evidence]
+    if len(evidence_digests) != len(set(evidence_digests)):
+        raise ValueError("installed App evidence file digests must be unique")
+    if evidence_reader is not None:
+        for item in evidence:
+            raw = evidence_reader(item["filename"])
+            if not isinstance(raw, bytes):
+                raise ValueError("installed App evidence reader must return bytes")
+            if len(raw) != item["bytes"]:
+                raise ValueError(
+                    f"installed App evidence {item['filename']!r} byte count differs "
+                    "from the captured manifest"
+                )
+            if hashlib.sha256(raw).hexdigest() != item["sha256"]:
+                raise ValueError(
+                    f"installed App evidence {item['filename']!r} digest differs "
+                    "from the captured manifest"
+                )
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    f"installed App evidence {item['filename']!r} is not strict UTF-8 text"
+                ) from exc
+            expected_header = _app_evidence_header(item)
+            if not text.startswith(expected_header) or len(text) == len(expected_header):
+                raise ValueError(
+                    f"installed App evidence {item['filename']!r} does not begin with the "
+                    "exact source/time/kind/installation header followed by page content"
+                )
+    evidence.sort(
+        key=lambda item: (
+            _APP_EVIDENCE_KIND_ORDER[item["kind"]],
+            item["installation_id"] or 0,
+        )
+    )
+    _require_complete_app_evidence(
+        installations,
+        evidence,
+        aggregate_time=captured_datetime,
+    )
+    return {
+        "schema_version": 1,
+        "captured_at": captured_datetime.astimezone(timezone.utc).isoformat(),
+        "capture_principal": capture_principal,
+        "repository": repository,
+        "source_url": authority.get("source_url"),
+        "coverage_complete": True,
+        "installations": installations,
+        "evidence": evidence,
+    }
+
+
+def _read_installed_app_evidence_file(directory: Path, filename: str) -> bytes:
+    if (
+        not isinstance(filename, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename) is None
+        or filename in {".", ".."}
+    ):
+        raise ValueError("installed App evidence filename must be a safe basename")
+    root = directory.resolve(strict=True)
+    candidate = root / filename
+    before = candidate.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or candidate.is_symlink():
+        raise ValueError(f"installed App evidence {filename!r} must be a single-link regular file")
+    if not 1 <= before.st_size <= _MAX_APP_EVIDENCE_BYTES:
+        raise ValueError(f"installed App evidence {filename!r} has an invalid size")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(candidate, flags)
+    try:
+        opened = os.fstat(descriptor)
+        identity_fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+        if any(getattr(before, field) != getattr(opened, field) for field in identity_fields):
+            raise ValueError(f"installed App evidence {filename!r} changed while opening")
+        chunks: list[bytes] = []
+        remaining = _MAX_APP_EVIDENCE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if any(getattr(opened, field) != getattr(after, field) for field in identity_fields):
+            raise ValueError(f"installed App evidence {filename!r} changed while reading")
+        if len(raw) != opened.st_size:
+            raise ValueError(f"installed App evidence {filename!r} could not be read completely")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def verify_installed_app_restoration(
+    *,
+    before: Mapping[str, Any],
+    restored: Mapping[str, Any],
+    repository: str,
+    capture_principal: str,
+    before_evidence_reader: Callable[[str], bytes],
+    restored_evidence_reader: Callable[[str], bytes],
+    now: datetime | None = None,
+) -> Mapping[str, Any]:
+    """Prove that App access returned exactly to its separately captured pre-window state."""
+    normalized_before = _normalize_installed_app_authority(
+        before,
+        repository=repository,
+        capture_principal=capture_principal,
+        evidence_reader=before_evidence_reader,
+    )
+    normalized_restored = _normalize_installed_app_authority(
+        restored,
+        repository=repository,
+        capture_principal=capture_principal,
+        evidence_reader=restored_evidence_reader,
+    )
+    if normalized_before["source_url"] != normalized_restored["source_url"]:
+        raise ValueError("restored installed App source URL differs from the pre-window record")
+    if normalized_before["installations"] != normalized_restored["installations"]:
+        raise ValueError("restored installed App state differs from the pre-window record")
+    before_digests = {item["sha256"] for item in normalized_before["evidence"]}
+    restored_digests = {item["sha256"] for item in normalized_restored["evidence"]}
+    if before_digests.intersection(restored_digests):
+        raise ValueError("restored installed App evidence reuses a pre-window page capture")
+    before_time = _aware_utc_timestamp(
+        normalized_before["captured_at"], "pre-window installed App captured_at"
+    )
+    restored_time = _aware_utc_timestamp(
+        normalized_restored["captured_at"], "restored installed App captured_at"
+    )
+    if restored_time <= before_time:
+        raise ValueError("restored installed App capture must postdate the pre-window capture")
+    verified_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if restored_time - verified_at > _MAX_CLOCK_SKEW:
+        raise ValueError("restored installed App capture is in the future")
+    if verified_at - restored_time > _MAX_SNAPSHOT_AGE:
+        raise ValueError("restored installed App capture is stale; recapture within 30 minutes")
+    before_pages = {
+        (item["kind"], item["installation_id"]): item for item in normalized_before["evidence"]
+    }
+    for item in normalized_restored["evidence"]:
+        role = (item["kind"], item["installation_id"])
+        restored_page_time = _aware_utc_timestamp(
+            item["captured_at"], "restored installed App evidence captured_at"
+        )
+        page_age = verified_at - restored_page_time
+        if page_age < -_MAX_CLOCK_SKEW:
+            raise ValueError(f"restored installed App evidence page is in the future for {role!r}")
+        if page_age > _MAX_SNAPSHOT_AGE:
+            raise ValueError(
+                f"restored installed App evidence page is stale for {role!r}; "
+                "recapture within 30 minutes"
+            )
+        before_page_time = _aware_utc_timestamp(
+            before_pages[role]["captured_at"],
+            "pre-window installed App evidence captured_at",
+        )
+        if restored_page_time <= before_page_time:
+            raise ValueError(
+                f"restored installed App evidence page must postdate the matching "
+                f"pre-window page for {role!r}"
+            )
+
+    def digest(value: Mapping[str, Any]) -> str:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    return {
+        "schema_version": 1,
+        "verified_at": verified_at.isoformat(),
+        "repository": repository,
+        "capture_principal": capture_principal,
+        "pre_window_capture_sha256": digest(normalized_before),
+        "restored_capture_sha256": digest(normalized_restored),
+        "restoration_exact": True,
+        "installations": normalized_restored["installations"],
+    }
+
+
+def _manifest_input_paths(path: Path, manifest: Mapping[str, Any]) -> list[Path]:
+    paths = [path]
+    for raw in _sequence(manifest.get("evidence"), "installed App evidence"):
+        item = _mapping(raw, "installed App evidence")
+        filename = item.get("filename")
+        if (
+            not isinstance(filename, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename) is None
+            or filename in {".", ".."}
+        ):
+            raise ValueError("installed App evidence filename must be a safe basename")
+        paths.append(path.parent / filename)
+    return paths
+
+
+def _reject_output_aliases(output: Path, protected: Sequence[Path]) -> None:
+    output_paths = (output, output.with_suffix(output.suffix + ".sha256"))
+    protected_paths = {path.resolve(strict=False) for path in protected}
+    for path in output_paths:
+        if path.resolve(strict=False) in protected_paths:
+            raise ValueError(
+                f"output path {str(path)!r} must not overwrite an input or retained evidence file"
+            )
+
+
 def load_policy(path: Path) -> tuple[Mapping[str, Any], str]:
     """Load a policy and return it with its exact-file SHA-256 digest."""
     raw = path.read_bytes()
@@ -90,6 +595,36 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
         )
     if observation.get("tag_exists") is not False:
         violations.append("release tag already exists; the control snapshot must precede tagging")
+
+    fork_approval_policy = _mapping(
+        policy.get("fork_pr_contributor_approval"),
+        "fork pull-request contributor approval policy",
+    )
+    if set(fork_approval_policy) != {"approval_policy"}:
+        violations.append(
+            "fork_pr_contributor_approval policy keys must be exactly ['approval_policy']"
+        )
+    expected_fork_approval = fork_approval_policy.get("approval_policy")
+    if expected_fork_approval != "all_external_contributors":
+        violations.append(
+            "fork_pr_contributor_approval policy must require "
+            f"'all_external_contributors'; got {expected_fork_approval!r}"
+        )
+    fork_approval = _mapping(
+        observation.get("fork_pr_contributor_approval"),
+        "fork pull-request contributor approval observation",
+    )
+    if set(fork_approval) != {"approval_policy"}:
+        violations.append(
+            "fork_pr_contributor_approval observation keys must be exactly ['approval_policy']"
+        )
+    actual_fork_approval = fork_approval.get("approval_policy")
+    if actual_fork_approval != expected_fork_approval:
+        violations.append(
+            "fork_pr_contributor_approval.approval_policy: expected "
+            f"{expected_fork_approval!r}, got {actual_fork_approval!r}"
+        )
+
     expected_principals = _canonical_names(
         _sequence(policy.get("admin_snapshot_principals"), "admin_snapshot_principals"),
         "admin_snapshot_principals",
@@ -99,6 +634,169 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
             f"capture_principal: expected one of {expected_principals!r}, "
             f"got {observation.get('capture_principal')!r}"
         )
+
+    authority_policy = _mapping(
+        policy.get("release_runner_authority"), "release runner authority policy"
+    )
+    expected_collaborator_logins = _canonical_names(
+        _sequence(
+            authority_policy.get("allowed_collaborator_logins"),
+            "release runner allowed collaborator logins",
+        ),
+        "release runner allowed collaborator logins",
+    )
+    expected_invitations = list(
+        _sequence(
+            authority_policy.get("pending_invitations"),
+            "release runner pending invitations policy",
+        )
+    )
+    if expected_invitations:
+        violations.append(
+            "release_runner_authority.pending_invitations policy must be an empty array"
+        )
+
+    authority = _mapping(
+        observation.get("release_runner_authority"),
+        "release runner authority observation",
+    )
+    actual_collaborator_logins: list[str] = []
+    actual_write_logins: list[str] = []
+    seen_collaborators: set[str] = set()
+    for raw_collaborator in _sequence(
+        authority.get("collaborators"), "release runner collaborators"
+    ):
+        collaborator = _mapping(raw_collaborator, "release runner collaborator")
+        login = collaborator.get("login")
+        if not isinstance(login, str) or not login:
+            violations.append("release runner collaborator login must be a non-empty string")
+            continue
+        if login in seen_collaborators:
+            violations.append(f"release runner collaborator {login!r} is duplicated")
+            continue
+        seen_collaborators.add(login)
+        actual_collaborator_logins.append(login)
+        permissions = _mapping(
+            collaborator.get("permissions"),
+            f"release runner collaborator {login!r} permissions",
+        )
+        effective_write = False
+        for permission_name in ("admin", "maintain", "push"):
+            permission_value = permissions.get(permission_name)
+            if not isinstance(permission_value, bool):
+                violations.append(
+                    f"release runner collaborator {login!r} permission "
+                    f"{permission_name!r} must be boolean"
+                )
+            elif permission_value:
+                effective_write = True
+        if effective_write:
+            actual_write_logins.append(login)
+    actual_collaborator_logins.sort()
+    actual_write_logins.sort()
+    if actual_collaborator_logins != expected_collaborator_logins:
+        violations.append(
+            "release_runner_authority.allowed_collaborator_logins: expected "
+            f"{expected_collaborator_logins!r}, got {actual_collaborator_logins!r}"
+        )
+    missing_write_logins = sorted(set(expected_collaborator_logins) - set(actual_write_logins))
+    if missing_write_logins:
+        violations.append(
+            "release_runner_authority.required_write_logins: expected effective write for "
+            f"{expected_collaborator_logins!r}, missing {missing_write_logins!r}"
+        )
+
+    pending_invitations = list(
+        _sequence(
+            authority.get("pending_invitations"),
+            "release runner pending invitations",
+        )
+    )
+    if pending_invitations != expected_invitations:
+        violations.append(
+            "release_runner_authority.pending_invitations: expected "
+            f"{expected_invitations!r}, got {pending_invitations!r}"
+        )
+
+    for field in ("registered_runners", "repository_variable_names"):
+        expected_values = list(
+            _sequence(
+                authority_policy.get(field),
+                f"release runner {field} policy",
+            )
+        )
+        if expected_values:
+            violations.append(f"release_runner_authority.{field} policy must be an empty array")
+        actual_values = list(_sequence(authority.get(field), f"release runner {field}"))
+        if actual_values != expected_values:
+            violations.append(
+                f"release_runner_authority.{field}: expected "
+                f"{expected_values!r}, got {actual_values!r}"
+            )
+
+    installed_apps_policy = _mapping(
+        authority_policy.get("installed_apps"),
+        "release runner installed Apps policy",
+    )
+    if set(installed_apps_policy) != {"source_url", "expected_installations"}:
+        violations.append(
+            "release_runner_authority.installed_apps policy keys must be exactly "
+            "['expected_installations', 'source_url']"
+        )
+    expected_installations = [
+        _canonical_app_installation(value, "expected installed App installation")
+        for value in _sequence(
+            installed_apps_policy.get("expected_installations"),
+            "expected installed App installations",
+        )
+    ]
+    expected_installations.sort(key=lambda installation: installation["id"])
+    expected_installation_ids = [value["id"] for value in expected_installations]
+    if len(expected_installation_ids) != len(set(expected_installation_ids)):
+        violations.append("expected installed App installation ids must be unique")
+    sensitive_permissions = {"actions", "administration", "workflows"}
+    for installation in expected_installations:
+        effective_sensitive = sensitive_permissions.intersection(
+            installation["permissions"]["write"]
+        )
+        requested_sensitive = sensitive_permissions.intersection(
+            installation["requested_additional_permissions"]["write"]
+        )
+        if (
+            installation["repository_access"]
+            and not installation["suspended"]
+            and (effective_sensitive or requested_sensitive)
+        ):
+            violations.append(
+                "release_runner_authority.installed_apps policy leaves active runner "
+                f"authority for {installation['name']!r}: "
+                f"{sorted(effective_sensitive | requested_sensitive)!r}"
+            )
+        if installation["permission_update_requested"] and not installation["suspended"]:
+            violations.append(
+                "release_runner_authority.installed_apps policy leaves an unresolved "
+                f"permission update active for {installation['name']!r}"
+            )
+    try:
+        installed_apps = _normalize_installed_app_authority(
+            authority.get("installed_apps"),
+            repository=observation.get("repository"),
+            capture_principal=observation.get("capture_principal"),
+        )
+    except ValueError as exc:
+        violations.append(f"release_runner_authority.installed_apps: invalid ({exc})")
+    else:
+        if installed_apps.get("source_url") != installed_apps_policy.get("source_url"):
+            violations.append(
+                "release_runner_authority.installed_apps.source_url: expected "
+                f"{installed_apps_policy.get('source_url')!r}, "
+                f"got {installed_apps.get('source_url')!r}"
+            )
+        if installed_apps.get("installations") != expected_installations:
+            violations.append(
+                "release_runner_authority.installed_apps.installations differ from the "
+                "complete reviewed installation policy"
+            )
 
     branch = _mapping(observation.get("branch_protection"), "branch_protection")
     branch_policy = _mapping(policy.get("branch_protection"), "branch_protection policy")
@@ -411,6 +1109,8 @@ def capture_observation(
     release_tag: str,
     release_commit: str,
     get_json: Callable[[str], Any],
+    installed_app_authority: Mapping[str, Any],
+    installed_app_evidence_reader: Callable[[str], bytes],
 ) -> Mapping[str, Any]:
     """Capture all policy-controlled GitHub state through an injected client."""
     repository = str(policy["repository"])
@@ -440,6 +1140,52 @@ def capture_observation(
         get_json(f"{root}/environments/{environment_name}/secrets"),
         "environment secrets response",
     )
+    raw_fork_approval = _mapping(
+        get_json(f"{root}/actions/permissions/fork-pr-contributor-approval"),
+        "fork pull-request contributor approval response",
+    )
+    raw_collaborators = list(
+        _sequence(
+            get_json(f"{root}/collaborators?affiliation=all&per_page=100"),
+            "repository collaborators response",
+        )
+    )
+    if len(raw_collaborators) >= 100:
+        raise ValueError(
+            "repository collaborators capture may be incomplete at the 100-entry page limit"
+        )
+    raw_invitations = list(
+        _sequence(
+            get_json(f"{root}/invitations?per_page=100"),
+            "repository invitations response",
+        )
+    )
+    if len(raw_invitations) >= 100:
+        raise ValueError(
+            "repository invitations capture may be incomplete at the 100-entry page limit"
+        )
+    raw_runners_response = _mapping(
+        get_json(f"{root}/actions/runners?per_page=100"),
+        "repository runners response",
+    )
+    raw_runners = list(_sequence(raw_runners_response.get("runners"), "repository runners"))
+    if raw_runners_response.get("total_count") != len(raw_runners):
+        raise ValueError(
+            "repository runners capture is incomplete: "
+            f"total_count={raw_runners_response.get('total_count')!r}, "
+            f"captured={len(raw_runners)}"
+        )
+    raw_variables_response = _mapping(
+        get_json(f"{root}/actions/variables?per_page=100"),
+        "repository variables response",
+    )
+    raw_variables = list(_sequence(raw_variables_response.get("variables"), "repository variables"))
+    if raw_variables_response.get("total_count") != len(raw_variables):
+        raise ValueError(
+            "repository variables capture is incomplete: "
+            f"total_count={raw_variables_response.get('total_count')!r}, "
+            f"captured={len(raw_variables)}"
+        )
     check_response = _mapping(
         get_json(f"{root}/commits/{release_commit}/check-runs?per_page=100"),
         "check runs response",
@@ -467,6 +1213,63 @@ def capture_observation(
             for value in _sequence(response.get("secrets"), "secret metadata")
         )
 
+    normalized_collaborators = []
+    for raw_value in raw_collaborators:
+        value = _mapping(raw_value, "repository collaborator")
+        permissions = _mapping(value.get("permissions"), "repository collaborator permissions")
+        normalized_collaborators.append(
+            {
+                "login": value.get("login"),
+                "role_name": value.get("role_name"),
+                "permissions": {
+                    name: permissions.get(name) for name in ("admin", "maintain", "push")
+                },
+            }
+        )
+    normalized_collaborators.sort(key=lambda value: str(value["login"]))
+
+    normalized_invitations = []
+    for raw_value in raw_invitations:
+        value = _mapping(raw_value, "repository invitation")
+        invitee = _mapping(value.get("invitee"), "repository invitation invitee")
+        normalized_invitations.append(
+            {
+                "id": value.get("id"),
+                "invitee": invitee.get("login"),
+                "permissions": value.get("permissions"),
+            }
+        )
+    normalized_invitations.sort(key=lambda value: (str(value["invitee"]), str(value["id"])))
+
+    normalized_runners = []
+    for raw_value in raw_runners:
+        value = _mapping(raw_value, "repository runner")
+        normalized_runners.append(
+            {
+                "id": value.get("id"),
+                "name": value.get("name"),
+                "os": value.get("os"),
+                "status": value.get("status"),
+                "busy": value.get("busy"),
+                "labels": [
+                    {
+                        "id": label.get("id"),
+                        "name": label.get("name"),
+                        "type": label.get("type"),
+                    }
+                    for label in (
+                        _mapping(item, "repository runner label")
+                        for item in _sequence(value.get("labels"), "repository runner labels")
+                    )
+                ],
+            }
+        )
+    normalized_runners.sort(key=lambda value: (str(value["name"]), str(value["id"])))
+
+    repository_variable_names = sorted(
+        str(_mapping(value, "repository variable metadata")["name"]) for value in raw_variables
+    )
+
     raw_branch = _mapping(
         get_json(f"{root}/branches/{branch}/protection"), "branch protection response"
     )
@@ -476,6 +1279,12 @@ def capture_observation(
     principal = _mapping(get_json("user"), "authenticated GitHub user").get("login")
     if not isinstance(principal, str) or not principal:
         raise ValueError("authenticated GitHub user response has no login")
+    normalized_installed_apps = _normalize_installed_app_authority(
+        installed_app_authority,
+        repository=repository,
+        capture_principal=principal,
+        evidence_reader=installed_app_evidence_reader,
+    )
 
     def enabled_field(name: str) -> Mapping[str, Any]:
         value = _mapping(raw_branch.get(name), f"branch protection {name}")
@@ -613,9 +1422,19 @@ def capture_observation(
         "repository": repository,
         "default_branch": branch,
         "capture_principal": principal,
+        "release_runner_authority": {
+            "collaborators": normalized_collaborators,
+            "pending_invitations": normalized_invitations,
+            "registered_runners": normalized_runners,
+            "repository_variable_names": repository_variable_names,
+            "installed_apps": normalized_installed_apps,
+        },
         "release_tag": release_tag,
         "release_commit": release_commit,
         "tag_exists": tag_exists,
+        "fork_pr_contributor_approval": {
+            "approval_policy": raw_fork_approval.get("approval_policy")
+        },
         "immutable_releases": {
             "enabled": immutable_releases.get("enabled"),
             "enforced_by_owner": immutable_releases.get("enforced_by_owner"),
@@ -636,16 +1455,16 @@ def make_snapshot(
     policy_sha256: str,
     observation: Mapping[str, Any],
     workflow_run: Mapping[str, Any],
+    now: datetime | None = None,
 ) -> Mapping[str, Any]:
     violations = evaluate_controls(policy, observation)
-    return {
+    observed_at = now or datetime.now(timezone.utc)
+    snapshot = {
         "schema_version": 1,
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observed_at": observed_at.astimezone(timezone.utc).isoformat(),
         "policy_sha256": policy_sha256,
         "workflow_run": dict(workflow_run),
         "observation": dict(observation),
-        "repository_controls_accepted": not violations,
-        "violations": violations,
         "pypi_trusted_publisher": {
             "expected": dict(
                 _mapping(policy.get("pypi_trusted_publisher"), "trusted publisher policy")
@@ -653,6 +1472,13 @@ def make_snapshot(
             "verification_status": "blocked_no_public_read_api",
         },
     }
+    try:
+        verify_snapshot_freshness(snapshot, now=observed_at)
+    except ValueError as exc:
+        violations.append(f"snapshot freshness: {exc}")
+    snapshot["repository_controls_accepted"] = not violations
+    snapshot["violations"] = violations
+    return snapshot
 
 
 def verify_snapshot_freshness(
@@ -673,10 +1499,62 @@ def verify_snapshot_freshness(
         raise ValueError("external-control snapshot observed_at must include a timezone")
     current = now or datetime.now(timezone.utc)
     age = current.astimezone(timezone.utc) - observed.astimezone(timezone.utc)
-    if age < timedelta(minutes=-1):
+    if age < -_MAX_CLOCK_SKEW:
         raise ValueError("external-control snapshot observed_at is in the future")
     if age > max_age:
         raise ValueError(f"external-control snapshot is stale ({age}); recapture within {max_age}")
+
+    observation = _mapping(snapshot.get("observation"), "snapshot observation")
+    authority = _mapping(
+        observation.get("release_runner_authority"),
+        "snapshot release runner authority",
+    )
+    installed_apps = _mapping(
+        authority.get("installed_apps"),
+        "snapshot installed App authority capture",
+    )
+    app_captured_at = installed_apps.get("captured_at")
+    if not isinstance(app_captured_at, str):
+        raise ValueError("installed App authority capture has no captured_at timestamp")
+    try:
+        app_captured = datetime.fromisoformat(app_captured_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "installed App authority captured_at is not an RFC 3339 timestamp"
+        ) from exc
+    if app_captured.tzinfo is None or app_captured.utcoffset() is None:
+        raise ValueError("installed App authority captured_at must include a timezone")
+    app_age_at_snapshot = observed.astimezone(timezone.utc) - app_captured.astimezone(timezone.utc)
+    if app_age_at_snapshot < -_MAX_CLOCK_SKEW:
+        raise ValueError("installed App authority captured_at is after the control snapshot")
+    if app_age_at_snapshot > _MAX_INSTALLED_APP_CAPTURE_AGE:
+        raise ValueError(
+            "installed App authority capture is stale at snapshot creation "
+            f"({app_age_at_snapshot}); recapture within {_MAX_INSTALLED_APP_CAPTURE_AGE}"
+        )
+    app_age_at_verification = current.astimezone(timezone.utc) - app_captured.astimezone(
+        timezone.utc
+    )
+    if app_age_at_verification < -_MAX_CLOCK_SKEW:
+        raise ValueError("installed App authority captured_at is in the future")
+    if app_age_at_verification > max_age:
+        raise ValueError(
+            "installed App authority capture is stale at verification "
+            f"({app_age_at_verification}); recapture within {max_age}"
+        )
+    for item in _sequence(installed_apps.get("evidence"), "installed App evidence"):
+        page = _mapping(item, "installed App evidence")
+        page_captured = _aware_utc_timestamp(
+            page.get("captured_at"), "installed App evidence captured_at"
+        )
+        page_age_at_verification = current.astimezone(timezone.utc) - page_captured
+        if page_age_at_verification < -_MAX_CLOCK_SKEW:
+            raise ValueError("installed App evidence captured_at is in the future")
+        if page_age_at_verification > max_age:
+            raise ValueError(
+                "installed App evidence page is stale at verification "
+                f"({page_age_at_verification}); recapture within {max_age}"
+            )
 
 
 def verify_snapshot(
@@ -726,6 +1604,17 @@ def _complete_jobs_response(jobs_response: Mapping[str, Any], name: str) -> list
         _mapping(value, f"{name} job")
         for value in _sequence(jobs_response.get("jobs"), f"{name} jobs")
     ]
+
+
+def _require_first_attempt(value: Any, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value != 1:
+        raise ValueError(f"{name} must be the integer 1; got {value!r}")
+
+
+def _require_positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer; got {value!r}")
+    return value
 
 
 def _cuda_required_runner_labels(
@@ -778,8 +1667,9 @@ def verify_cuda_evidence(
     """Verify and normalize an exact-commit, all-attempt CUDA hardware run."""
     cuda_policy = _mapping(policy.get("cuda_evidence"), "CUDA evidence policy")
     actual_repository = _mapping(run.get("repository"), "CUDA run repository").get("full_name")
+    source_run_id = _require_positive_integer(run.get("id"), "CUDA evidence run id")
     expected_fields = {
-        "id": (str(run.get("id")), str(run_id)),
+        "id": (str(source_run_id), str(run_id)),
         "repository": (actual_repository, repository),
         "workflow path": (run.get("path"), cuda_policy.get("workflow_path")),
         "event": (run.get("event"), cuda_policy.get("event")),
@@ -793,6 +1683,7 @@ def verify_cuda_evidence(
             raise ValueError(
                 f"CUDA evidence run {label} mismatch: expected {expected!r}, got {actual!r}"
             )
+    _require_first_attempt(run.get("run_attempt"), "CUDA evidence run attempt")
 
     jobs = _complete_jobs_response(jobs_response, "CUDA evidence")
     required_jobs = _canonical_names(
@@ -801,6 +1692,8 @@ def verify_cuda_evidence(
     )
     required_runner_labels = _cuda_required_runner_labels(cuda_policy, required_jobs)
     accepted_jobs: list[Mapping[str, Any]] = []
+    accepted_runner_ids: dict[int, str] = {}
+    accepted_runner_names: dict[str, str] = {}
     for job_name in required_jobs:
         matches = [job for job in jobs if job.get("name") == job_name]
         if len(matches) != 1:
@@ -809,31 +1702,90 @@ def verify_cuda_evidence(
                 f"got {len(matches)}"
             )
         job = matches[0]
+        _require_positive_integer(job.get("id"), f"CUDA evidence job {job_name!r} id")
+        job_run_id = _require_positive_integer(
+            job.get("run_id"), f"CUDA evidence job {job_name!r} run id"
+        )
+        if job_run_id != source_run_id:
+            raise ValueError(
+                f"CUDA evidence job {job_name!r} run id mismatch: "
+                f"expected {source_run_id!r}, got {job_run_id!r}"
+            )
+        _require_first_attempt(
+            job.get("run_attempt"), f"CUDA evidence job {job_name!r} run attempt"
+        )
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             raise ValueError(
                 f"CUDA evidence job {job_name!r} did not complete successfully: "
                 f"{job.get('status')!r}/{job.get('conclusion')!r}"
             )
         job_head_sha = job.get("head_sha")
-        if job_head_sha is not None and job_head_sha != release_commit:
+        if job_head_sha != release_commit:
             raise ValueError(
                 f"CUDA evidence job {job_name!r} head SHA mismatch: "
                 f"expected {release_commit!r}, got {job_head_sha!r}"
+            )
+        runner_id = _require_positive_integer(
+            job.get("runner_id"), f"CUDA evidence job {job_name!r} runner id"
+        )
+        previous_job = accepted_runner_ids.get(runner_id)
+        if previous_job is not None:
+            raise ValueError(
+                f"CUDA evidence runner id {runner_id!r} is reused by required jobs "
+                f"{previous_job!r} and {job_name!r}; each one-job JIT runner may execute "
+                "at most one required job"
+            )
+        accepted_runner_ids[runner_id] = job_name
+        runner_name = job.get("runner_name")
+        if not isinstance(runner_name, str) or not runner_name.strip():
+            raise ValueError(
+                f"CUDA evidence job {job_name!r} runner name must be a non-empty string; "
+                f"got {runner_name!r}"
+            )
+        required_runner_label = required_runner_labels[job_name]
+        expected_runner_name = re.compile(rf"{re.escape(required_runner_label)}-jit-[a-f0-9]{{16}}")
+        if expected_runner_name.fullmatch(runner_name) is None:
+            raise ValueError(
+                f"CUDA evidence job {job_name!r} runner name must identify the exact "
+                f"reviewed one-job JIT route {required_runner_label!r}; got {runner_name!r}"
+            )
+        previous_name_job = accepted_runner_names.get(runner_name)
+        if previous_name_job is not None:
+            raise ValueError(
+                f"CUDA evidence runner name {runner_name!r} is reused by required jobs "
+                f"{previous_name_job!r} and {job_name!r}; every one-job JIT runner must "
+                "have a distinct generated name"
+            )
+        accepted_runner_names[runner_name] = job_name
+        runner_group_id = _require_positive_integer(
+            job.get("runner_group_id"),
+            f"CUDA evidence job {job_name!r} runner group id",
+        )
+        if runner_group_id != 1:
+            raise ValueError(
+                f"CUDA evidence job {job_name!r} runner group id must be the reviewed "
+                f"default group 1; got {runner_group_id!r}"
+            )
+        runner_group_name = job.get("runner_group_name")
+        if runner_group_name != "Default":
+            raise ValueError(
+                f"CUDA evidence job {job_name!r} runner group name must be the reviewed "
+                f"default group 'Default'; got {runner_group_name!r}"
             )
         labels = _canonical_names(
             _sequence(job.get("labels"), f"CUDA evidence job {job_name!r} labels"),
             f"CUDA evidence job {job_name!r} labels",
         )
-        required_runner_label = required_runner_labels[job_name]
-        if required_runner_label not in labels:
+        if labels != [runner_name]:
             raise ValueError(
-                f"CUDA evidence job {job_name!r} labels must include expected custom "
-                f"runner label {required_runner_label!r}; got {labels!r}"
+                f"CUDA evidence job {job_name!r} labels must be exactly the one-use "
+                f"runner name {runner_name!r}; got {labels!r}"
             )
         accepted_job = {
             field: job.get(field)
             for field in (
                 "id",
+                "run_id",
                 "name",
                 "status",
                 "conclusion",
@@ -1041,6 +1993,7 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--repository", required=True)
     capture.add_argument("--tag", required=True)
     capture.add_argument("--commit", required=True)
+    capture.add_argument("--installed-app-authority", type=Path, required=True)
     verify = subparsers.add_parser("verify")
     verify.add_argument("--policy", type=Path, required=True)
     verify.add_argument("--snapshot", type=Path, required=True)
@@ -1062,12 +2015,54 @@ def _parser() -> argparse.ArgumentParser:
     bind.add_argument("--cuda-run-json", type=Path, required=True)
     bind.add_argument("--cuda-jobs-json", type=Path, required=True)
     bind.add_argument("--cuda-run-id", required=True)
+    restoration = subparsers.add_parser("verify-app-restoration")
+    restoration.add_argument("--before", type=Path, required=True)
+    restoration.add_argument("--restored", type=Path, required=True)
+    restoration.add_argument("--output", type=Path, required=True)
+    restoration.add_argument("--repository", required=True)
+    restoration.add_argument("--capture-principal", required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "verify-app-restoration":
+            before = _mapping(
+                json.loads(args.before.read_text(encoding="utf-8")),
+                "pre-window installed App capture",
+            )
+            restored = _mapping(
+                json.loads(args.restored.read_text(encoding="utf-8")),
+                "restored installed App capture",
+            )
+            _reject_output_aliases(
+                args.output,
+                [
+                    *_manifest_input_paths(args.before, before),
+                    *_manifest_input_paths(args.restored, restored),
+                ],
+            )
+            report = verify_installed_app_restoration(
+                before=before,
+                restored=restored,
+                repository=args.repository,
+                capture_principal=args.capture_principal,
+                before_evidence_reader=lambda filename: _read_installed_app_evidence_file(
+                    args.before.parent, filename
+                ),
+                restored_evidence_reader=lambda filename: _read_installed_app_evidence_file(
+                    args.restored.parent, filename
+                ),
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
+            args.output.write_text(encoded, encoding="utf-8")
+            args.output.with_suffix(args.output.suffix + ".sha256").write_text(
+                f"{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}  {args.output.name}\n",
+                encoding="utf-8",
+            )
+            return 0
         tag, commit = _validated_release_values(args.tag, args.commit)
         policy, policy_sha256 = load_policy(args.policy)
         if policy.get("repository") != args.repository:
@@ -1146,11 +2141,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         api = GitHubApi(
             token=token, api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com")
         )
+        installed_app_authority = _mapping(
+            json.loads(args.installed_app_authority.read_text(encoding="utf-8")),
+            "installed App authority capture",
+        )
+        _reject_output_aliases(
+            args.output,
+            _manifest_input_paths(args.installed_app_authority, installed_app_authority),
+        )
+        installed_app_evidence_directory = args.installed_app_authority.parent
         observation = capture_observation(
             policy=policy,
             release_tag=tag,
             release_commit=commit,
             get_json=api.get,
+            installed_app_authority=installed_app_authority,
+            installed_app_evidence_reader=lambda filename: _read_installed_app_evidence_file(
+                installed_app_evidence_directory, filename
+            ),
         )
         snapshot = make_snapshot(
             policy=policy,

@@ -66,10 +66,11 @@ jobs:
 
       - name: Build with the commit timestamp as the reproducibility epoch
         run: |
-          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
           export PYTHONHASHSEED=0
           poetry build --output dist
-          python -m twine check dist/*
+          python -m twine check ./dist/*
 
       - name: Upload independent build
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -121,6 +122,8 @@ jobs:
             --compare \
               independent/one/provenance/release-environment.json \
               independent/two/provenance/release-environment.json \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-run-attempt "$GITHUB_RUN_ATTEMPT" \
             --output provenance/release-environment-comparison.json
 
       - name: Require byte-identical wheel and source distribution

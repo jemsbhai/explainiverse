@@ -1,0 +1,9 @@
+# Explainiverse production operator environment
+# Target: CPython 3.13.15, Windows AMD64 only. Wheels only; no source builds.
+--require-hashes
+--only-binary=:all:
+
+cryptography==50.0.0 --hash=sha256:bd1c592e4d5974f0d08d4888e432157adba757c66da0246918e43677fafa2d30
+cffi==2.1.1 --hash=sha256:1aa5645c30469b09530c4ebca77ebf8f17618293c58f8549cb1a543a50236e7d
+pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+pywin32==311 --hash=sha256:718a38f7e5b058e76aee1c56ddd06908116d35147e133427e59a3983f703a20d

@@ -214,7 +214,7 @@ poetry run python -m pip check
 poetry run black --check src tests scripts
 poetry run isort --check-only src tests scripts
 poetry run mypy src scripts
-poetry run pytest --strict-config --strict-markers --cov=explainiverse --cov-branch
+poetry run python -m pytest --strict-config --strict-markers --cov=explainiverse --cov-branch
 poetry run python scripts/execute_tutorials.py
 poetry build
 ```

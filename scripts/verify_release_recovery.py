@@ -23,16 +23,17 @@ _TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 _DISTRIBUTION_SUFFIXES = (".whl", ".tar.gz")
 _POST_PYPI_RELEASE_STEPS = (
     "Check out the immutable release tag for final verification",
+    "Verify signed immutable release source before candidate code",
     "Set up Python 3.12 for provenance verification",
     "Pin the provenance verifier installer",
     "Install the hash-locked provenance verifier",
-    "Download attested distributions",
-    "Download hashes and SBOM",
-    "Verify release assets against reviewed hashes",
-    "Create and verify a draft from the already-published signed tag",
-    "Require and reverify the finalized immutable release",
-    "Archive normal-path release verification evidence",
+    "Download and hard-verify the exact release artifacts",
+    "Verify release assets against reviewed hashes and PyPI provenance",
+    "Prepare the exact fixed-command GitHub Release plan",
+    "Archive the fixed normal-release plan",
 )
+_RELEASE_PREP_JOB = "Create the immutable GitHub release"
+_RELEASE_FINALIZE_JOB = "Finalize the immutable GitHub release with fixed commands"
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -187,6 +188,12 @@ def _positive_integer(value: Any, name: str) -> int:
     return value
 
 
+def _first_attempt(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value != 1:
+        raise ValueError(f"{name} must be the integer 1")
+    return value
+
+
 def verify_recovery_governance_record(
     record: Mapping[str, Any],
     run: Mapping[str, Any],
@@ -209,7 +216,7 @@ def verify_recovery_governance_record(
 
     source_repository = _mapping(run.get("repository"), "source run repository").get("full_name")
     source_id = _positive_integer(run.get("id"), "source run id")
-    source_attempt = _positive_integer(run.get("run_attempt"), "source run attempt")
+    source_attempt = _first_attempt(run.get("run_attempt"), "source run attempt")
     source_actor = _mapping(run.get("actor"), "source run actor").get("login")
     source_triggering_actor = _mapping(
         run.get("triggering_actor"), "source run triggering actor"
@@ -248,6 +255,7 @@ def verify_recovery_governance_record(
             governance.get("release_triggering_actor"),
             source_triggering_actor,
         ),
+        "capture principal": (governance.get("capture_principal"), source_actor),
     }
     for field, (actual, expected) in record_fields.items():
         if actual != expected:
@@ -256,7 +264,7 @@ def verify_recovery_governance_record(
             )
 
 
-def verify_source_run(
+def verify_source_run_evidence(
     run: Mapping[str, Any],
     jobs_response: Mapping[str, Any],
     *,
@@ -264,13 +272,15 @@ def verify_source_run(
     workflow_path: str,
     release_tag: str,
     release_commit: str,
-) -> str:
-    """Prove recovery consumes a completed original publish run, not a rebuild."""
+) -> Mapping[str, Any]:
+    """Verify and normalize the exact trusted jobs from the original publish run."""
     if _TAG.fullmatch(release_tag) is None:
         raise ValueError("release tag must have the form vMAJOR.MINOR.PATCH")
     if _COMMIT.fullmatch(release_commit) is None:
         raise ValueError("release commit must be a complete lowercase commit SHA")
     actual_repository = _mapping(run.get("repository"), "source run repository").get("full_name")
+    source_id = _positive_integer(run.get("id"), "source run id")
+    source_attempt = _first_attempt(run.get("run_attempt"), "source run attempt")
     expected_fields = {
         "repository": (actual_repository, repository),
         "workflow path": (run.get("path"), workflow_path),
@@ -283,7 +293,6 @@ def verify_source_run(
     for label, (actual, expected) in expected_fields.items():
         if actual != expected:
             raise ValueError(f"source run {label} mismatch: expected {expected!r}, got {actual!r}")
-
     if jobs_response.get("query_filter") != "all":
         raise ValueError("source jobs must be queried with filter=all")
     if jobs_response.get("pagination_complete") is not True:
@@ -297,6 +306,41 @@ def verify_source_run(
         "Attest the immutable distributions",
         "Publish through PyPI Trusted Publishing",
     }
+    trusted_jobs: list[Mapping[str, Any]] = []
+    trusted_job_ids: dict[int, str] = {}
+
+    def verify_trusted_job(job: Mapping[str, Any], job_name: str) -> Mapping[str, Any]:
+        job_id = _positive_integer(job.get("id"), f"source job {job_name!r} id")
+        previous_job = trusted_job_ids.get(job_id)
+        if previous_job is not None:
+            raise ValueError(
+                f"source job id {job_id!r} is reused by trusted jobs "
+                f"{previous_job!r} and {job_name!r}"
+            )
+        trusted_job_ids[job_id] = job_name
+        job_run_id = _positive_integer(job.get("run_id"), f"source job {job_name!r} run id")
+        if job_run_id != source_id:
+            raise ValueError(
+                f"source job {job_name!r} run id mismatch: "
+                f"expected {source_id!r}, got {job_run_id!r}"
+            )
+        job_head_sha = job.get("head_sha")
+        if job_head_sha != release_commit:
+            raise ValueError(
+                f"source job {job_name!r} head SHA mismatch: "
+                f"expected {release_commit!r}, got {job_head_sha!r}"
+            )
+        job_attempt = _first_attempt(job.get("run_attempt"), f"source job {job_name!r} attempt")
+        return {
+            "id": job_id,
+            "run_id": job_run_id,
+            "name": job_name,
+            "head_sha": job_head_sha,
+            "status": job.get("status"),
+            "conclusion": job.get("conclusion"),
+            "run_attempt": job_attempt,
+        }
+
     for job_name in sorted(required_jobs):
         matches = [job for job in jobs if job.get("name") == job_name]
         if len(matches) != 1:
@@ -305,25 +349,28 @@ def verify_source_run(
                 f"got {len(matches)}"
             )
         job = matches[0]
+        normalized_job = verify_trusted_job(job, job_name)
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             raise ValueError(
                 f"source job {job_name!r} did not complete successfully: "
                 f"{job.get('status')!r}/{job.get('conclusion')!r}"
             )
+        trusted_jobs.append(normalized_job)
 
-    release_job_name = "Create the immutable GitHub release"
-    release_matches = [job for job in jobs if job.get("name") == release_job_name]
-    if len(release_matches) != 1:
-        raise ValueError(
-            f"source run must contain exactly one all-attempt {release_job_name!r} job; "
-            f"got {len(release_matches)}"
-        )
-    release_job = release_matches[0]
-    if release_job.get("status") != "completed" or release_job.get("conclusion") != "failure":
-        raise ValueError(
-            f"source job {release_job_name!r} must demonstrate a downstream failure: "
-            f"got {release_job.get('status')!r}/{release_job.get('conclusion')!r}"
-        )
+    downstream_jobs: dict[str, Mapping[str, Any]] = {}
+    normalized_downstream_jobs: dict[str, Mapping[str, Any]] = {}
+    for job_name in (_RELEASE_PREP_JOB, _RELEASE_FINALIZE_JOB):
+        matches = [job for job in jobs if job.get("name") == job_name]
+        if len(matches) != 1:
+            raise ValueError(
+                f"source run must contain exactly one all-attempt {job_name!r} job; "
+                f"got {len(matches)}"
+            )
+        downstream_jobs[job_name] = matches[0]
+        normalized_downstream_jobs[job_name] = verify_trusted_job(matches[0], job_name)
+
+    release_job = downstream_jobs[_RELEASE_PREP_JOB]
+    finalizer_job = downstream_jobs[_RELEASE_FINALIZE_JOB]
 
     steps = [
         _mapping(value, "GitHub Release job step")
@@ -340,6 +387,19 @@ def verify_source_run(
     if stage_step.get("status") != "completed":
         raise ValueError("recovery-drill staging step did not complete")
     if stage_step.get("conclusion") == "failure":
+        if release_job.get("status") != "completed" or release_job.get("conclusion") != "failure":
+            raise ValueError(
+                f"source job {_RELEASE_PREP_JOB!r} must fail for a staged drill: "
+                f"got {release_job.get('status')!r}/{release_job.get('conclusion')!r}"
+            )
+        if (
+            finalizer_job.get("status") != "completed"
+            or finalizer_job.get("conclusion") != "skipped"
+        ):
+            raise ValueError(
+                f"source job {_RELEASE_FINALIZE_JOB!r} must be skipped for a staged drill: "
+                f"got {finalizer_job.get('status')!r}/{finalizer_job.get('conclusion')!r}"
+            )
         for expected_name in _POST_PYPI_RELEASE_STEPS:
             matches = [step for step in later_steps if step.get("name") == expected_name]
             if len(matches) != 1:
@@ -363,15 +423,82 @@ def verify_source_run(
             raise ValueError(
                 f"staged recovery drill contains unexpected later steps: {unexpected!r}"
             )
-        return "staged_drill"
-    if stage_step.get("conclusion") != "skipped":
-        raise ValueError(
-            "recovery-drill staging step must be failed for a drill or skipped for an "
-            "unplanned downstream failure"
-        )
-    if not any(step.get("conclusion") == "failure" for step in later_steps):
-        raise ValueError("source job has no failed post-PyPI GitHub Release step")
-    return "unplanned_downstream_failure"
+        source_kind = "staged_drill"
+    else:
+        if stage_step.get("conclusion") != "skipped":
+            raise ValueError(
+                "recovery-drill staging step must be failed for a drill or skipped for an "
+                "unplanned downstream failure"
+            )
+        if release_job.get("status") != "completed" or release_job.get("conclusion") != "success":
+            raise ValueError(
+                f"source job {_RELEASE_PREP_JOB!r} must succeed before a finalizer failure: "
+                f"got {release_job.get('status')!r}/{release_job.get('conclusion')!r}"
+            )
+        if (
+            finalizer_job.get("status") != "completed"
+            or finalizer_job.get("conclusion") != "failure"
+        ):
+            raise ValueError(
+                f"source job {_RELEASE_FINALIZE_JOB!r} must demonstrate the downstream failure: "
+                f"got {finalizer_job.get('status')!r}/{finalizer_job.get('conclusion')!r}"
+            )
+        finalizer_steps = [
+            _mapping(value, "GitHub Release finalizer job step")
+            for value in _sequence(finalizer_job.get("steps"), "GitHub Release finalizer job steps")
+        ]
+        if not any(
+            step.get("status") == "completed" and step.get("conclusion") == "failure"
+            for step in finalizer_steps
+        ):
+            raise ValueError("source finalizer job has no completed failed step")
+        source_kind = "unplanned_downstream_failure"
+
+    trusted_jobs.extend(
+        [
+            normalized_downstream_jobs[_RELEASE_PREP_JOB],
+            normalized_downstream_jobs[_RELEASE_FINALIZE_JOB],
+        ]
+    )
+    return {
+        "schema_version": 1,
+        "source_kind": source_kind,
+        "query_filter": "all",
+        "pagination_complete": True,
+        "run": {
+            "id": source_id,
+            "repository": actual_repository,
+            "path": run.get("path"),
+            "event": run.get("event"),
+            "head_branch": run.get("head_branch"),
+            "head_sha": run.get("head_sha"),
+            "status": run.get("status"),
+            "conclusion": run.get("conclusion"),
+            "run_attempt": source_attempt,
+        },
+        "trusted_jobs": trusted_jobs,
+    }
+
+
+def verify_source_run(
+    run: Mapping[str, Any],
+    jobs_response: Mapping[str, Any],
+    *,
+    repository: str,
+    workflow_path: str,
+    release_tag: str,
+    release_commit: str,
+) -> str:
+    """Prove recovery consumes a completed original publish run, not a rebuild."""
+    evidence = verify_source_run_evidence(
+        run,
+        jobs_response,
+        repository=repository,
+        workflow_path=workflow_path,
+        release_tag=release_tag,
+        release_commit=release_commit,
+    )
+    return str(evidence["source_kind"])
 
 
 def _version_from_tag(tag: str) -> str:
@@ -392,6 +519,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--tag", required=True)
     source.add_argument("--commit", required=True)
     source.add_argument("--require-staged-drill", action="store_true")
+    source.add_argument("--normalized-output", type=Path)
     artifacts = subparsers.add_parser("artifacts")
     artifacts.add_argument("--sums", type=Path, required=True)
     artifacts.add_argument("--dist", type=Path, required=True)
@@ -419,7 +547,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "source-run":
             run = _mapping(json.loads(args.run_json.read_text(encoding="utf-8")), "run JSON")
             jobs = _mapping(json.loads(args.jobs_json.read_text(encoding="utf-8")), "jobs JSON")
-            source_kind = verify_source_run(
+            source_evidence = verify_source_run_evidence(
                 run,
                 jobs,
                 repository=args.repository,
@@ -427,9 +555,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 release_tag=args.tag,
                 release_commit=args.commit.strip().lower(),
             )
+            source_kind = str(source_evidence["source_kind"])
             if args.require_staged_drill and source_kind != "staged_drill":
                 raise ValueError(
                     "source run is an unplanned downstream failure, not the required staged drill"
+                )
+            if args.normalized_output is not None:
+                args.normalized_output.parent.mkdir(parents=True, exist_ok=True)
+                args.normalized_output.write_text(
+                    json.dumps(source_evidence, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
                 )
             print(f"verified recovery source kind: {source_kind}")
         elif args.command == "governance-record":
