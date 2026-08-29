@@ -277,8 +277,10 @@ def _windows_handle_path(fd: int) -> str:
     import msvcrt
     from ctypes import wintypes
 
-    handle = msvcrt.get_osfhandle(fd)
-    get_final_path = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+    handle = msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]
+    get_final_path = ctypes.WinDLL(  # type: ignore[attr-defined]
+        "kernel32", use_last_error=True
+    ).GetFinalPathNameByHandleW
     get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
     get_final_path.restype = wintypes.DWORD
     needed = get_final_path(handle, None, 0, 0)
@@ -1561,8 +1563,10 @@ def validate_anonymous_fd(fd: int, *, context: str) -> dict[str, Any]:
         import ctypes
         import msvcrt
 
-        handle = msvcrt.get_osfhandle(fd)
-        file_type = ctypes.WinDLL("kernel32", use_last_error=True).GetFileType(handle)
+        handle = msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]
+        file_type = ctypes.WinDLL(  # type: ignore[attr-defined]
+            "kernel32", use_last_error=True
+        ).GetFileType(handle)
         _require(file_type == 3, f"{context}_not_pipe")
         kind = "anonymous-pipe"
     else:
@@ -1695,7 +1699,9 @@ def _publish_no_replace(temporary: Path, destination: Path, payload: bytes) -> N
             import ctypes
             from ctypes import wintypes
 
-            move_file = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+            move_file = ctypes.WinDLL(  # type: ignore[attr-defined]
+                "kernel32", use_last_error=True
+            ).MoveFileExW
             move_file.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
             move_file.restype = wintypes.BOOL
             # MOVEFILE_WRITE_THROUGH without REPLACE_EXISTING is atomic and

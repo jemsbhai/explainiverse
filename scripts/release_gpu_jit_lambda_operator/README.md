@@ -281,9 +281,12 @@ no-replace ready marker last, then rereads the marker. A crash before the marker
 is abort/restart-only: retain the orphaned inbox as evidence and begin the whole
 phase with a new inbox. Never skip that missing generation. The consumer blocks
 on demand once per JIT job, rejects stale/replayed capture or page digests, and
-archives accepted pages content-addressably. Use ordinals/generations 1-2 for
-pull-request/publication and 1-4 for final-main. Successful phase settlement
-does not silently delete the source bundles: it archives a canonical final
+archives accepted pages content-addressably. For fresh captures, use exact
+`(ordinal, generation)` pairs `(1, 1), (2, 1)` for pull-request/publication and
+`(1, 1), (2, 1), (3, 1), (4, 1)` for final-main. Increment the generation only
+to replace a stale capture for the same ordinal; every accepted ordinal resets
+the next generation to 1. Successful phase settlement does not silently delete
+the source bundles: it archives a canonical final
 inventory proving that every consumed stale and accepted source generation is
 still present under the held owner-private inbox and that no unobserved residue
 exists. Retain that inbox until the release ledger binds the driver archive and

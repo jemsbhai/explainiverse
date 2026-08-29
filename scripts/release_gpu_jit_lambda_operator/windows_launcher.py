@@ -240,11 +240,11 @@ class _PipeInput:
     def __init__(self, descriptor: int) -> None:
         import msvcrt
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         get_file_type = kernel32.GetFileType
         get_file_type.argtypes = [wintypes.HANDLE]
         get_file_type.restype = wintypes.DWORD
-        handle = msvcrt.get_osfhandle(descriptor)
+        handle = msvcrt.get_osfhandle(descriptor)  # type: ignore[attr-defined]
         _require(get_file_type(handle) == 3, "launcher_stdin_not_pipe")
         self._descriptor = descriptor
 
@@ -266,7 +266,7 @@ class _WindowsConsoleApi:
     """Typed WinAPI surface used by the no-echo console reader."""
 
     def __init__(self) -> None:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         self.get_std_handle = kernel32.GetStdHandle
         self.get_std_handle.argtypes = [wintypes.DWORD]
         self.get_std_handle.restype = wintypes.HANDLE
@@ -482,14 +482,16 @@ def run(arguments: Sequence[str]) -> int:
             confirmation_read, confirmation_write = os.pipe()
         import msvcrt
 
-        lambda_handle = msvcrt.get_osfhandle(lambda_read)
-        os.set_handle_inheritable(lambda_handle, True)
+        lambda_handle = msvcrt.get_osfhandle(lambda_read)  # type: ignore[attr-defined]
+        os.set_handle_inheritable(lambda_handle, True)  # type: ignore[attr-defined]
         handles = [lambda_handle]
         if confirmation_read is not None:
-            confirmation_handle = msvcrt.get_osfhandle(confirmation_read)
-            os.set_handle_inheritable(confirmation_handle, True)
+            confirmation_handle = msvcrt.get_osfhandle(  # type: ignore[attr-defined]
+                confirmation_read
+            )
+            os.set_handle_inheritable(confirmation_handle, True)  # type: ignore[attr-defined]
             handles.append(confirmation_handle)
-        startup = subprocess.STARTUPINFO()
+        startup = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
         startup.lpAttributeList = {"handle_list": handles}
         command = [
             sys.executable,

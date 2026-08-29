@@ -60,7 +60,7 @@ SITE_FILE_INVENTORY_SHA256 = "2cf1cf52ad8d284fcc2e7790acaaa32f3e77a9f39fa717f8bc
 SOURCE_MANIFEST_RELATIVE = "scripts/release_gpu_jit_lambda_operator/source-worktree-manifest.json"
 PRELOADER_RELATIVE = "scripts/release_gpu_jit_lambda_operator/preloader.py"
 # Replaced from the staged-index builder receipt before the candidate commit.
-SOURCE_MANIFEST_SHA256 = "35c4891fc9cb74ddd0ca2ec43df97b588b53cf3caaf0b883dd142b5eb4044494"
+SOURCE_MANIFEST_SHA256 = "dc90282d4e5a7fe977422b4d71eb2fd118966acd5246ca961396c48feacd53a6"
 
 
 def _fail(code: str) -> NoReturn:
@@ -341,8 +341,8 @@ def _windows_current_user_sid() -> str:
     import ctypes
     from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     open_token = advapi32.OpenProcessToken
     open_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
     open_token.restype = wintypes.BOOL
@@ -406,8 +406,8 @@ def _windows_owner_private_acl(path: Path, *, context: str) -> dict[str, Any]:
     import ctypes
     from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     get_security = advapi32.GetNamedSecurityInfoW
     get_security.argtypes = [
         wintypes.LPWSTR,
@@ -545,7 +545,7 @@ class _HeldWindowsTrees:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         self._close_handle = kernel32.CloseHandle
         self._close_handle.argtypes = [wintypes.HANDLE]
         self._close_handle.restype = wintypes.BOOL

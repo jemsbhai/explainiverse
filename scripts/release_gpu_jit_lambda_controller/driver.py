@@ -945,7 +945,7 @@ class EvidenceJournal:
         import msvcrt
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         create_file = kernel32.CreateFileW
         create_file.argtypes = [
             wintypes.LPCWSTR,
@@ -970,11 +970,11 @@ class EvidenceJournal:
         invalid_handle = ctypes.c_void_p(-1).value
         if raw_handle in {None, invalid_handle}:
             raise OSError(
-                ctypes.get_last_error(),
+                ctypes.get_last_error(),  # type: ignore[attr-defined]
                 "exclusive Windows atomic file open failed",
             )
         try:
-            return msvcrt.open_osfhandle(
+            return msvcrt.open_osfhandle(  # type: ignore[attr-defined]
                 int(raw_handle),
                 os.O_RDWR | getattr(os, "O_BINARY", 0),
             )
@@ -1040,7 +1040,7 @@ class EvidenceJournal:
         rename.RootDirectory = None
         rename.FileNameLength = len(destination_text.encode("utf-16-le"))
         rename.FileName = destination_text
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         set_information = kernel32.SetFileInformationByHandle
         set_information.argtypes = [
             wintypes.HANDLE,
@@ -1050,14 +1050,14 @@ class EvidenceJournal:
         ]
         set_information.restype = wintypes.BOOL
         moved = set_information(
-            msvcrt.get_osfhandle(descriptor),
+            msvcrt.get_osfhandle(descriptor),  # type: ignore[attr-defined]
             3,  # FileRenameInfo; ReplaceIfExists is false.
             ctypes.byref(rename),
             ctypes.sizeof(rename),
         )
         if not moved:
             raise OSError(
-                ctypes.get_last_error(),
+                ctypes.get_last_error(),  # type: ignore[attr-defined]
                 "SetFileInformationByHandle(FileRenameInfo) failed",
             )
         os.fsync(descriptor)
@@ -1109,7 +1109,9 @@ class EvidenceJournal:
         import msvcrt
         from ctypes import wintypes
 
-        create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+        create_file = ctypes.WinDLL(  # type: ignore[attr-defined]
+            "kernel32", use_last_error=True
+        ).CreateFileW
         create_file.argtypes = [
             wintypes.LPCWSTR,
             wintypes.DWORD,
@@ -1131,14 +1133,19 @@ class EvidenceJournal:
         )
         invalid_handle = ctypes.c_void_p(-1).value
         if raw_handle in {None, invalid_handle}:
-            raise OSError(ctypes.get_last_error(), "exclusive recovery reserve open failed")
+            raise OSError(
+                ctypes.get_last_error(),  # type: ignore[attr-defined]
+                "exclusive recovery reserve open failed",
+            )
         try:
-            return msvcrt.open_osfhandle(
+            return msvcrt.open_osfhandle(  # type: ignore[attr-defined]
                 int(raw_handle),
                 os.O_RDWR | getattr(os, "O_BINARY", 0),
             )
         except BaseException:
-            close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+            close_handle = ctypes.WinDLL(  # type: ignore[attr-defined]
+                "kernel32", use_last_error=True
+            ).CloseHandle
             close_handle.argtypes = [wintypes.HANDLE]
             close_handle.restype = wintypes.BOOL
             close_handle(raw_handle)

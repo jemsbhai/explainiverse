@@ -328,6 +328,9 @@ def test_operator_readme_uses_only_pinned_cp313_byte_sealed_invocations() -> Non
     assert "us-midwest-1" in readme and "Illinois, USA" in readme
     assert "lambda-stack-22-04" in readme
     assert "us-east-1" not in readme
+    assert "`(ordinal, generation)` pairs `(1, 1), (2, 1)`" in readme
+    assert "`(1, 1), (2, 1), (3, 1), (4, 1)`" in readme
+    assert "every accepted ordinal resets\nthe next generation to 1" in readme
 
 
 def test_static_tools_exclude_only_the_exact_byte_sealed_preloader_shim() -> None:
@@ -2199,6 +2202,54 @@ def test_operator_preflight_rejects_incomplete_or_unbound_repository_security(
             final_acceptance=None,
             resources=_operator_resources(),
         )
+
+
+def test_publication_phase_accepts_exact_final_main_cuda_runner_nonces() -> None:
+    nonces = ("0" * 16, "1" * 16, "2" * 16, "3" * 16)
+    args = SimpleNamespace(
+        prior_accepted_cuda_runner_nonce=list(nonces),
+        preflight_run_id=600,
+        cuda_run_id=500,
+    )
+    acceptance = cast(Any, SimpleNamespace(accepted_cuda_runner_nonces=nonces))
+
+    assert operator._validate_phase_specific_inputs(args, "publication", acceptance) == (
+        nonces,
+        600,
+        500,
+    )
+
+
+@pytest.mark.parametrize(
+    "malformed_nonce",
+    ("a" * 15, "a" * 17, "a" * 32, "A" * 16, "g" * 16),
+)
+def test_publication_phase_rejects_malformed_prior_cuda_runner_nonce(
+    malformed_nonce: str,
+) -> None:
+    nonces = (malformed_nonce,)
+    args = SimpleNamespace(
+        prior_accepted_cuda_runner_nonce=list(nonces),
+        preflight_run_id=600,
+        cuda_run_id=500,
+    )
+    acceptance = cast(Any, SimpleNamespace(accepted_cuda_runner_nonces=nonces))
+
+    with pytest.raises(boundary.OperatorError, match="prior_cuda_nonce_rejected"):
+        operator._validate_phase_specific_inputs(args, "publication", acceptance)
+
+
+def test_publication_phase_rejects_duplicate_prior_cuda_runner_nonces() -> None:
+    nonces = ("a" * 16, "a" * 16)
+    args = SimpleNamespace(
+        prior_accepted_cuda_runner_nonce=list(nonces),
+        preflight_run_id=600,
+        cuda_run_id=500,
+    )
+    acceptance = cast(Any, SimpleNamespace(accepted_cuda_runner_nonces=nonces))
+
+    with pytest.raises(boundary.OperatorError, match="prior_cuda_nonce_rejected"):
+        operator._validate_phase_specific_inputs(args, "publication", acceptance)
 
 
 def test_recovery_preflight_reconstructs_full_inventory_and_security_binding(

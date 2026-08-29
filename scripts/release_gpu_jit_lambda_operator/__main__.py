@@ -367,7 +367,7 @@ def _convert_windows_handles(argv: Sequence[str]) -> tuple[list[str], dict[str, 
         _die("windows_handle_not_decimal")
     if any(value <= 0 for value in handles) or len(set(handles)) != len(handles):
         _die("windows_handle_identity_rejected")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     get_file_type = kernel32.GetFileType
     get_file_type.argtypes = [wintypes.HANDLE]
     get_file_type.restype = wintypes.DWORD
@@ -376,8 +376,10 @@ def _convert_windows_handles(argv: Sequence[str]) -> tuple[list[str], dict[str, 
         for handle in handles:
             if get_file_type(handle) != 3:
                 _die("windows_handle_not_pipe")
-            os.set_handle_inheritable(handle, False)
-            descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            os.set_handle_inheritable(handle, False)  # type: ignore[attr-defined]
+            descriptor = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
+                handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            )
             opened.append(descriptor)
     except BaseException:
         for descriptor in opened:

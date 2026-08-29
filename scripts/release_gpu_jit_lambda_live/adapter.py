@@ -459,7 +459,7 @@ def write_runtime_frame_and_close(
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.setmode(output_fd, os.O_BINARY)
+            msvcrt.setmode(output_fd, os.O_BINARY)  # type: ignore[attr-defined]
         os.set_blocking(output_fd, False)
         write_deadline = time.monotonic() + RUNTIME_FRAME_WRITE_SECONDS
 

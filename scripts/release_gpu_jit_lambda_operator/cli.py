@@ -76,6 +76,7 @@ from .boundary import (
 from .receipt_contract import validate_operator_preflight
 
 NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
+CUDA_RUNNER_NONCE_RE = re.compile(r"[0-9a-f]{16}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 RUNTIME_RELATIVE = Path("scripts/release_gpu_jit_lambda_runtime")
 PREFLIGHT_KIND = "explainiverse-lambda-operator-preflight"
@@ -552,7 +553,8 @@ def _validate_phase_specific_inputs(
 ) -> tuple[tuple[str, ...], int | None, int | None]:
     prior = tuple(args.prior_accepted_cuda_runner_nonce or ())
     _require(
-        len(set(prior)) == len(prior) and all(NONCE_RE.fullmatch(item) for item in prior),
+        len(set(prior)) == len(prior)
+        and all(CUDA_RUNNER_NONCE_RE.fullmatch(item) for item in prior),
         "prior_cuda_nonce_rejected",
     )
     preflight_run_id = args.preflight_run_id
