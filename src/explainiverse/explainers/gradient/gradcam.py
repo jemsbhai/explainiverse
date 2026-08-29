@@ -554,7 +554,8 @@ class GradCAMExplainer(BaseExplainer):
         if np.min(heatmap_array) < 0.0 or np.max(heatmap_array) > 1.0:
             raise ValueError("heatmap values must be in [0, 1]")
         if heatmap_array.shape != image_array.shape[:2]:
-            heatmap_array = _resize_2d(heatmap_array, image_array.shape[:2])
+            image_height, image_width = image_array.shape[:2]
+            heatmap_array = _resize_2d(heatmap_array, (image_height, image_width))
 
         red = np.clip(1.5 - np.abs(4.0 * heatmap_array - 3.0), 0.0, 1.0)
         green = np.clip(1.5 - np.abs(4.0 * heatmap_array - 2.0), 0.0, 1.0)

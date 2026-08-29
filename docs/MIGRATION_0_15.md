@@ -203,9 +203,51 @@ Python/JS/tutorial gates, attaches hashes, an SBOM, and provenance, publishes th
 `pypi` environment, and then creates the GitHub Release. Branch protection, immutable-tag
 rules, environment reviewers, and the PyPI Trusted Publisher are external repository/service
 settings; the release checklist must verify them rather than infer them from workflow YAML.
-Dispatch the workflow from the tag itself, with the same tag as its input—for example
-`gh workflow run publish-pypi.yml --ref v0.15.0 -f tag=v0.15.0`. The workflow rejects a branch
-dispatch even if its checkout was later pointed at the tag, because attestation provenance is
-bound to the workflow ref and SHA.
-If a post-publication GitHub Release step fails, rerun failed jobs while retained artifacts
-exist; do not rerun the PyPI job or add an unchecked `skip-existing` path.
+
+The assembled production entrypoint is `scripts/release_gpu_jit_lambda_operator`; use only its
+secure invocation documented in [`RELEASE_OPERATIONS.md`](RELEASE_OPERATIONS.md) and the operator
+package README. It reloads and action-time revalidates the accepted final-main journal, reconciles
+ambiguous mutation responses without replay, binds fresh one-use runners, and proves teardown.
+The entrypoint's existence does not clear the live release blockers or authorize a tag. Once every
+preflight gate is accepted, publication must dispatch from the tag itself with the same tag as its
+input and exactly this request contract:
+
+```text
+workflow: publish-pypi.yml
+ref: v0.15.0
+tag: v0.15.0
+preflight_run_id: <successful-release-preflight-run-id>
+cuda_run_id: <accepted-final-main-cuda-run-id>
+single_minimum_runner_nonce: <fresh-16-lowercase-hex-nonce>
+single_latest_runner_nonce: <different-fresh-16-lowercase-hex-nonce>
+stage_recovery_drill: true
+```
+
+The two publication nonces must be new, distinct from one another, and disjoint from the four
+accepted final-main CUDA nonces.
+
+The workflow rejects a branch dispatch even if its checkout was later pointed at the tag,
+because attestation provenance is bound to the workflow ref and SHA. The staged publication run
+must execute only once: it intentionally fails after the sole successful PyPI upload and before
+GitHub Release creation. Do not rerun that source run or any of its jobs. Recover only through the
+operator's explicit `--action dispatch-release-recovery` path from the same immutable tag and
+failed source run ID. That path journals exact inputs and pre-dispatch run IDs before one POST;
+it also requires the exact publication `lifecycle-restored` journal SHA and loader-proves that the
+same journal owns the source run, two accepted CUDA jobs, settlement, and zero live resources.
+After a lost response it permits only observation-only reconciliation of the pending intent. Never
+use GitHub CLI, the web UI, direct API dispatch, or a workflow rerun as a fallback.
+
+The recovery jobs hard-fail unless the run attempt is exactly one. Before checkout the read-only
+job archives the complete retained workflow API history without the filtered-search 1,000-result
+cap and locally validates its workflow-dispatch rows. The write-authorized job requeries that
+history and requires an exact normalized match as the last gate before every Release create,
+asset upload, or finalization mutation. The history gate
+cannot cryptographically distinguish a direct call by the same trusted repository owner with the
+same inputs. It enforces the declared attempt/actor/nonce/history contract as defense in depth and
+does not replace the operator's durable dispatch intent.
+
+The recovery workflow must prove the original, PyPI, and GitHub files byte-identical without a
+second upload and contains no PyPI publisher action, credential, or unchecked `skip-existing` path.
+Its dispatch-settled receipt is not completion evidence. Close B03 only after read-only terminal
+run/job observations, the retained recovery artifact and digest, immutable Release assets, and the
+PyPI inventory prove the recovery completed without another upload.

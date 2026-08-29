@@ -293,6 +293,21 @@ class TestGradCAMInputFormats:
 class TestGradCAMOverlay:
     """Tests for heatmap overlay functionality."""
 
+    def test_gradcam_overlay_resizes_to_exact_non_square_image_dimensions(self):
+        """A smaller heatmap is resized to the image's exact height and width."""
+        from explainiverse.explainers import GradCAMExplainer
+
+        explainer = object.__new__(GradCAMExplainer)
+        image = np.zeros((4, 5, 3), dtype=np.float64)
+        heatmap = np.array([[0.0, 0.25], [0.75, 1.0]], dtype=np.float64)
+
+        overlay = explainer.get_overlay(image, heatmap)
+
+        assert overlay.shape == (4, 5, 3)
+        assert np.all(np.isfinite(overlay))
+        assert np.min(overlay) >= 0.0
+        assert np.max(overlay) <= 1.0
+
     def test_gradcam_overlay(self, simple_cnn, sample_image, class_names):
         """GradCAM can create overlay images."""
         from explainiverse.adapters import PyTorchAdapter

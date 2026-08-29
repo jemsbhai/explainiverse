@@ -728,6 +728,24 @@ def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
     assert "pypi-attestations verify pypi" in workflow
     assert "pypi-attestations-version.txt" in workflow
     assert "--require-hashes" in workflow
+    assert workflow.count('"$GITHUB_RUN_ATTEMPT" != "1"') == 2
+    assert "    needs: verify\n    if: ${{ always() }}\n" in workflow
+    assert "VERIFY_RESULT: ${{ needs.verify.result }}" in workflow
+    assert workflow.count("gh api --paginate --slurp") == 5
+    assert workflow.count("actions/workflows/recover-github-release.yml/runs?per_page=100") == 5
+    assert re.search(r"runs\?[^\"\n]*\bevent=", workflow) is None
+    assert "recovery/recovery-workflow-history.json" in workflow
+    assert (
+        "cmp recovery/recovery-workflow-history.json \\\n"
+        '            "$RECOVERY_HISTORY_NORMALIZED"' in workflow
+    )
+    assert '"direct_owner_dispatch_cryptographically_distinguished": False' in workflow
+    assert '"declared_history_contract_enforced": True' in workflow
+    assert '"history_scope": "complete-retained-workflow-api-history"' in workflow
+    assert workflow.count("sha256sum --check recovery-history-normalizer.py.sha256") == 3
+    assert workflow.count("revalidate_recovery_history pre-create") == 1
+    assert workflow.count('revalidate_recovery_history "pre-upload-$name"') == 1
+    assert workflow.count("revalidate_recovery_history pre-finalize") == 1
 
     verify_job = workflow.split("  verify:", 1)[1].split("\n  recover:", 1)[0]
     recover_job = workflow.split("  recover:", 1)[1]
@@ -735,6 +753,7 @@ def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
     assert "verify_release_recovery.py" in verify_job
     assert "verify_pypi_provenance.py" in verify_job
     assert "needs: verify" in recover_job
+    assert "if: ${{ always() }}" in recover_job
     assert "contents: write" in recover_job
     assert "recovery/source-release-assets" in recover_job
     assert 'gh attestation verify "recovery/source-release-assets/$filename"' in recover_job
@@ -748,6 +767,33 @@ def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
         "verify_pypi_provenance.py",
     ):
         assert forbidden not in recover_job
+
+
+def test_recovery_runbook_requires_durable_operator_dispatch_and_terminal_proof():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    recovery = runbook.split("## Post-PyPI recovery drill", 1)[1].split(
+        "## Legacy 0.14.0 incident", 1
+    )[0]
+    assert "gh workflow run recover-github-release.yml" not in recovery
+    assert "`--action dispatch-release-recovery`" in recovery
+    assert "durable pending intent" in recovery
+    assert "observation-only run-history" in recovery
+    assert "never blindly retried" in recovery
+    assert "never use **Re-run failed jobs** or **Re-run all jobs**" in recovery
+    assert "dispatch-settled receipt is not a\nrecovery-success record" in recovery
+    assert "workflow completion and no-republish proof false" in recovery
+    assert "terminal recovery run and every job" in recovery
+    assert "PyPI file inventory proving no second upload" in recovery
+    assert "cannot cryptographically distinguish" in recovery
+    assert "same trusted repository owner" in recovery
+    assert "declared first-attempt, actor, nonce, and history contract" in recovery
+    migration = (ROOT / "docs" / "MIGRATION_0_15.md").read_text(encoding="utf-8")
+    assert "gh workflow run recover-github-release.yml" not in migration
+    assert "`--action dispatch-release-recovery`" in migration
+    assert "observation-only reconciliation" in migration
+    assert "dispatch-settled receipt is not completion evidence" in migration
+    assert "cannot cryptographically distinguish" in migration
+    assert "same trusted repository owner" in migration
 
 
 def test_privileged_release_jobs_reject_extra_or_missing_provenance_assets():
@@ -1563,9 +1609,48 @@ def test_release_runbook_records_legacy_incident_without_fabricating_recovery():
 
 def test_release_runbook_dispatches_recovery_from_the_tag_and_defers_to_assets():
     runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
-    assert "gh workflow run recover-github-release.yml --ref $releaseTag" in runbook
+    assert "gh workflow run recover-github-release.yml --ref $releaseTag" not in runbook
+    assert "`--action dispatch-release-recovery`" in runbook
+    assert "exact immutable publication plan,\ntag commit" in runbook
     assert "release notes remain mutable" in runbook
     assert "governance assets are authoritative" in runbook
+
+
+def test_operator_docs_forbid_direct_publish_dispatch_and_preserve_the_input_contract():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    migration = (ROOT / "docs" / "MIGRATION_0_15.md").read_text(encoding="utf-8")
+    for operator_doc in (runbook, migration):
+        assert "gh workflow run publish-pypi.yml" not in operator_doc
+        assert "workflow: publish-pypi.yml" in operator_doc
+        assert "ref: v0.15.0" in operator_doc
+        assert "tag: v0.15.0" in operator_doc
+        assert "preflight_run_id: <successful-release-preflight-run-id>" in operator_doc
+        assert "cuda_run_id: <accepted-final-main-cuda-run-id>" in operator_doc
+        assert "single_minimum_runner_nonce: <fresh-16-lowercase-hex-nonce>" in operator_doc
+        assert (
+            "single_latest_runner_nonce: <different-fresh-16-lowercase-hex-nonce>" in operator_doc
+        )
+        assert "stage_recovery_drill: true" in operator_doc
+    assert "does not make the current release a GO" in runbook
+    assert "does not clear the live release blockers or authorize a tag" in migration
+    assert "distinct, previously unused, and disjoint" in runbook
+
+
+def test_migration_guide_uses_exactly_once_staged_publication_and_recovery():
+    migration = (ROOT / "docs" / "MIGRATION_0_15.md").read_text(encoding="utf-8")
+    assert "preflight_run_id: <successful-release-preflight-run-id>" in migration
+    assert "cuda_run_id: <accepted-final-main-cuda-run-id>" in migration
+    assert "single_minimum_runner_nonce: <fresh-16-lowercase-hex-nonce>" in migration
+    assert "single_latest_runner_nonce: <different-fresh-16-lowercase-hex-nonce>" in migration
+    assert "stage_recovery_drill: true" in migration
+    assert "gh workflow run recover-github-release.yml --ref $releaseTag" not in migration
+    assert "`--action dispatch-release-recovery`" in migration
+    assert "journals exact inputs and pre-dispatch run IDs before one POST" in migration
+    assert "observation-only reconciliation of the pending intent" in migration
+    assert "Do not rerun that source run or any of its jobs" in migration
+    assert "rerun failed jobs" not in migration
+    assert "byte-identical without a\nsecond upload" in migration
+    assert "contains no PyPI publisher action, credential" in migration
 
 
 def test_release_runbook_requires_external_authority_for_mutable_workflows():
@@ -1579,5 +1664,86 @@ def test_release_runbook_requires_external_authority_for_mutable_workflows():
     assert "Only then directly generate each one-use JIT configuration" in runbook
     assert "administrator/provider controls" in runbook
     assert "disjoint from all four accepted CUDA-evidence nonces" in runbook
+    assert "repository JIT endpoint has no `no_default_labels` request field" in runbook
+    assert "exact JIT response must prove the sole returned" in runbook
+    assert "label before execution" in runbook
     assert "--installed-app-authority $installedAppAuthority" in runbook
     assert "no more than 10 minutes before the JSON snapshot" in runbook
+
+
+def test_release_docs_order_b01_before_the_fresh_b02_capture_and_keep_variables_empty():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    limitation = (ROOT / "docs" / "LIMITATION_MITIGATION_PLAN.md").read_text(encoding="utf-8")
+    matrix = (ROOT / "docs" / "RELEASE_BLOCKER_CLOSURE_MATRIX.md").read_text(encoding="utf-8")
+
+    assert runbook.index("Finish and settle the final-main automatic checks") < runbook.index(
+        "Administrator-authenticated pre-tag snapshot"
+    )
+    assert "Complete these B01 prerequisites before beginning" in runbook
+    for ledger in (limitation, matrix):
+        assert "publisher/signing" in ledger
+        assert re.search(r"before B02's\s+30-minute", ledger)
+        assert "Keep repository variables empty" in ledger
+        assert "Set exact variables" not in ledger
+    assert "rerun only failed downstream jobs" not in limitation
+    assert "fresh downstream-only recovery dispatch" in limitation
+    assert "Never use **Re-run failed jobs**" in limitation
+
+
+def test_release_runbook_refreshes_main_scopes_the_token_and_defines_the_signed_tag_boundary():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    assert "git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'" in runbook
+    assert 'gh api "repos/$expectedRepository/commits/main" --jq .sha' in runbook
+    assert "$liveMainCommit -ne $releaseCommit" in runbook
+    token_set = runbook.index("$env:GH_TOKEN = gh auth token")
+    token_finally = runbook.index("finally {", token_set)
+    token_remove = runbook.index(
+        "Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue", token_finally
+    )
+    assert token_set < token_finally < token_remove
+
+    tag_boundary = runbook.index("## Immutable signed-tag boundary")
+    boundary_fetch = runbook.index("git fetch --no-tags origin", tag_boundary)
+    boundary_local_main = runbook.index("$fetchedMainCommit", boundary_fetch)
+    boundary_live_main = runbook.index(
+        'gh api "repos/jemsbhai/explainiverse/commits/main" --jq .sha', boundary_local_main
+    )
+    remote_tag_absence = runbook.index(
+        '"repos/jemsbhai/explainiverse/git/ref/tags/$releaseTag" "remote release tag"',
+        boundary_live_main,
+    )
+    remote_release_absence = runbook.index(
+        '"repos/jemsbhai/explainiverse/releases/tags/$releaseTag" "GitHub Release"',
+        remote_tag_absence,
+    )
+    exact_404 = runbook.index("one exact HTTP 404", boundary_live_main)
+    tag_create = runbook.index("tag --sign `", remote_release_absence)
+    tag_type = runbook.index("git cat-file -t $releaseTag", tag_create)
+    tag_peel = runbook.index('git rev-parse "$($releaseTag)^{commit}"', tag_type)
+    tag_verify = runbook.index("verify-tag $releaseTag", tag_peel)
+    tag_push = runbook.index(
+        'git push origin "refs/tags/$releaseTag:refs/tags/$releaseTag"', tag_verify
+    )
+    ref_api = runbook.index("git/ref/tags/$releaseTag", tag_push)
+    object_api = runbook.index("git/tags/$($tagRef.object.sha)", ref_api)
+    verified = runbook.index("$tagObject.verification.verified", object_api)
+    assert boundary_fetch < boundary_local_main < boundary_live_main < exact_404
+    assert boundary_live_main < remote_tag_absence < remote_release_absence < tag_create
+    assert (
+        tag_create < tag_type < tag_peel < tag_verify < tag_push < ref_api < object_api < verified
+    )
+
+
+def test_release_runbook_marks_the_tag_no_return_and_ambiguous_upload_boundaries():
+    runbook = (ROOT / "docs" / "RELEASE_OPERATIONS.md").read_text(encoding="utf-8")
+    assert re.search(r"within the 30-minute publication\s+freshness limit", runbook)
+    assert "retained for only 14 days" in runbook
+    assert re.search(
+        r"not recoverable by\s+rerunning or rebinding evidence after the immutable tag",
+        runbook,
+    )
+    assert "reconcile a missing/ambiguous dispatch response by read-only discovery" in runbook
+    assert "never replay the POST" in runbook
+    assert "source publish job did not finish with one unambiguous" in runbook
+    assert "Treat a lost success response or a publish job that failed" in runbook
+    assert "do not rerun OIDC" in runbook

@@ -1,4 +1,5 @@
 name: Recover GitHub Release from an already-published PyPI release
+run-name: explainiverse-recovery-${{ inputs.tag }}-${{ inputs.source_run_id }}-${{ inputs.recovery_request_nonce }}
 
 on:
   workflow_dispatch:
@@ -9,6 +10,10 @@ on:
         type: string
       source_run_id:
         description: "Failed publish-pypi workflow run whose PyPI job succeeded"
+        required: true
+        type: string
+      recovery_request_nonce:
+        description: "Fresh controller-issued lowercase 16-hex recovery request nonce"
         required: true
         type: string
       require_staged_drill:
@@ -48,6 +53,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
           REQUIRE_STAGED_DRILL: ${{ inputs.require_staged_drill }}
           RECOVERY_REQUEST_TEMP: ${{ runner.temp }}/explainiverse-recovery-request-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: |
@@ -58,6 +64,10 @@ jobs:
           fi
           if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
             echo "recovery workflow requires workflow_dispatch" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+            echo "recovery workflow requires the first run attempt" >&2
             exit 1
           fi
           if [[ "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" || \
@@ -78,6 +88,10 @@ jobs:
             echo "source_run_id must be a positive integer" >&2
             exit 1
           fi
+          if [[ ! "$RECOVERY_REQUEST_NONCE" =~ ^[0-9a-f]{16}$ ]]; then
+            echo "recovery_request_nonce must be exactly 16 lowercase hex characters" >&2
+            exit 1
+          fi
           if [[ ! "$REQUIRE_STAGED_DRILL" =~ ^(true|false)$ ]]; then
             echo "require_staged_drill must be an exact boolean" >&2
             exit 1
@@ -87,13 +101,239 @@ jobs:
             exit 1
           fi
           jq -n --arg tag "$RELEASE_TAG" --arg source_run_id "$SOURCE_RUN_ID" \
+            --arg recovery_request_nonce "$RECOVERY_REQUEST_NONCE" \
             --arg recovery_run_id "$GITHUB_RUN_ID" \
             --arg recovery_run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg actor "$GITHUB_ACTOR" \
             --arg triggering_actor "$GITHUB_TRIGGERING_ACTOR" \
             --argjson require_staged_drill "$REQUIRE_STAGED_DRILL" \
-            '{tag:$tag,source_run_id:$source_run_id,require_staged_drill:$require_staged_drill,recovery_run_id:$recovery_run_id,recovery_run_attempt:$recovery_run_attempt,actor:$actor,triggering_actor:$triggering_actor}' \
+            '{tag:$tag,source_run_id:$source_run_id,recovery_request_nonce:$recovery_request_nonce,require_staged_drill:$require_staged_drill,recovery_run_id:$recovery_run_id,recovery_run_attempt:$recovery_run_attempt,actor:$actor,triggering_actor:$triggering_actor}' \
             > "$RECOVERY_REQUEST_TEMP"
+
+      - name: Validate the complete recovery workflow dispatch history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
+          RECOVERY_HISTORY_RAW: ${{ runner.temp }}/explainiverse-recovery-history-${{ github.run_id }}-${{ github.run_attempt }}.json
+          RECOVERY_HISTORY_NORMALIZED: ${{ runner.temp }}/explainiverse-recovery-history-normalized-${{ github.run_id }}-${{ github.run_attempt }}.json
+          RECOVERY_HISTORY_NORMALIZER: ${{ runner.temp }}/explainiverse-recovery-history-normalizer-${{ github.run_id }}-${{ github.run_attempt }}.py
+        run: |
+          gh api --paginate --slurp \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/recover-github-release.yml/runs?per_page=100" \
+            > "$RECOVERY_HISTORY_RAW"
+          cat > "$RECOVERY_HISTORY_NORMALIZER" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def reject(message):
+              raise SystemExit(message)
+
+          if len(sys.argv) != 3:
+              reject("recovery history normalizer arguments rejected")
+          raw_path = Path(sys.argv[1])
+          output_path = Path(sys.argv[2])
+          repository = os.environ.get("GITHUB_REPOSITORY", "")
+          owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
+          tag = os.environ.get("RELEASE_TAG", "")
+          source_text = os.environ.get("SOURCE_RUN_ID", "")
+          nonce = os.environ.get("RECOVERY_REQUEST_NONCE", "")
+          current_text = os.environ.get("GITHUB_RUN_ID", "")
+          attempt_text = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+          head_sha = os.environ.get("GITHUB_SHA", "")
+          if repository != "jemsbhai/explainiverse" or owner != "jemsbhai":
+              reject("recovery history repository authority rejected")
+          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is None:
+              reject("recovery history tag rejected")
+          if re.fullmatch(r"[1-9][0-9]*", source_text) is None:
+              reject("recovery history source run rejected")
+          if re.fullmatch(r"[0-9a-f]{16}", nonce) is None:
+              reject("recovery history nonce rejected")
+          if re.fullmatch(r"[1-9][0-9]*", current_text) is None:
+              reject("recovery history current run id rejected")
+          if attempt_text != "1":
+              reject("recovery history requires the first run attempt")
+          if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+              reject("recovery history head sha rejected")
+          source_run_id = int(source_text)
+          current_run_id = int(current_text)
+          try:
+              pages = json.loads(raw_path.read_text(encoding="utf-8"))
+          except (OSError, UnicodeError, json.JSONDecodeError) as error:
+              reject(f"recovery history JSON rejected: {error}")
+          if type(pages) is not list or not pages:
+              reject("recovery history pages rejected")
+          runs = []
+          reported_counts = []
+          for page in pages:
+              if type(page) is not dict:
+                  reject("recovery history page rejected")
+              page_runs = page.get("workflow_runs")
+              count = page.get("total_count")
+              if type(page_runs) is not list or type(count) is not int or count < 1:
+                  reject("recovery history page shape rejected")
+              runs.extend(page_runs)
+              reported_counts.append(count)
+          if not runs or any(count != len(runs) for count in reported_counts):
+              reject("recovery history pagination incomplete")
+
+          workflow_path = ".github/workflows/recover-github-release.yml"
+          title_prefix = f"explainiverse-recovery-{tag}-{source_run_id}-"
+          expected_title = f"{title_prefix}{nonce}"
+          title_pattern = re.compile(re.escape(title_prefix) + r"([0-9a-f]{16})\Z")
+          seen_ids = set()
+          matching_nonces = set()
+          all_runs = []
+          matching_runs = []
+          current_count = 0
+          required_fields = {
+              "id",
+              "display_title",
+              "path",
+              "head_sha",
+              "head_branch",
+              "event",
+              "run_attempt",
+              "status",
+              "conclusion",
+              "actor",
+              "triggering_actor",
+          }
+          for raw in runs:
+              if type(raw) is not dict or not required_fields.issubset(raw):
+                  reject("recovery history run shape rejected")
+              run_id = raw["id"]
+              run_attempt = raw["run_attempt"]
+              if type(run_id) is not int or run_id < 1 or run_id in seen_ids:
+                  reject("duplicate or invalid recovery run id")
+              if type(run_attempt) is not int or run_attempt < 1:
+                  reject("recovery history run attempt rejected")
+              seen_ids.add(run_id)
+              text_fields = ("display_title", "path", "head_sha", "head_branch", "event", "status")
+              if any(type(raw[field]) is not str or not raw[field] for field in text_fields):
+                  reject("recovery history run text rejected")
+              actor = raw["actor"]
+              triggering_actor = raw["triggering_actor"]
+              if (
+                  type(actor) is not dict
+                  or type(actor.get("login")) is not str
+                  or not actor["login"]
+                  or type(triggering_actor) is not dict
+                  or type(triggering_actor.get("login")) is not str
+                  or not triggering_actor["login"]
+              ):
+                  reject("recovery history actor shape rejected")
+              status = raw["status"]
+              conclusion = raw["conclusion"]
+              if status == "completed":
+                  if type(conclusion) is not str or not conclusion:
+                      reject("recovery history terminal conclusion rejected")
+              elif conclusion is not None:
+                  reject("recovery history active conclusion rejected")
+              same_context = (
+                  raw["path"] == workflow_path
+                  and raw["head_sha"] == head_sha
+                  and raw["head_branch"] == tag
+                  and raw["event"] == "workflow_dispatch"
+              )
+              claims_related_title = raw["display_title"].startswith(title_prefix)
+              title_match = title_pattern.fullmatch(raw["display_title"])
+              normalized_status = status
+              role = "unrelated-terminal"
+              recovery_nonce = None
+              if run_id == current_run_id:
+                  current_count += 1
+                  if (
+                      not same_context
+                      or raw["display_title"] != expected_title
+                      or run_attempt != 1
+                      or actor["login"] != owner
+                      or triggering_actor["login"] != owner
+                      or status not in {"queued", "in_progress"}
+                      or conclusion is not None
+                  ):
+                      reject("recovery history current run rejected")
+                  role = "current"
+                  recovery_nonce = nonce
+                  normalized_status = "active"
+              else:
+                  if status != "completed":
+                      reject("another recovery run is active")
+                  if claims_related_title and not same_context:
+                      reject("foreign matching recovery title rejected")
+                  if claims_related_title or same_context:
+                      if (
+                          not same_context
+                          or title_match is None
+                          or run_attempt != 1
+                          or actor["login"] != owner
+                          or triggering_actor["login"] != owner
+                          or conclusion != "failure"
+                          or run_id >= current_run_id
+                      ):
+                          reject("related prior recovery run rejected")
+                      role = "prior-failure"
+                      recovery_nonce = title_match.group(1)
+              row = {
+                  "actor": actor["login"],
+                  "conclusion": conclusion,
+                  "display_title": raw["display_title"],
+                  "event": raw["event"],
+                  "head_branch": raw["head_branch"],
+                  "head_sha": raw["head_sha"],
+                  "id": run_id,
+                  "path": raw["path"],
+                  "role": role,
+                  "run_attempt": run_attempt,
+                  "status": normalized_status,
+                  "triggering_actor": triggering_actor["login"],
+              }
+              all_runs.append(row)
+              if recovery_nonce is not None:
+                  if recovery_nonce in matching_nonces:
+                      reject("duplicate recovery request nonce")
+                  matching_nonces.add(recovery_nonce)
+                  matching = dict(row)
+                  matching["recovery_request_nonce"] = recovery_nonce
+                  matching_runs.append(matching)
+          if current_count != 1 or nonce not in matching_nonces:
+              reject("recovery history current run missing")
+          all_runs.sort(key=lambda item: item["id"])
+          matching_runs.sort(key=lambda item: item["id"])
+          normalized = {
+              "all_runs": all_runs,
+              "current_run_attempt": 1,
+              "current_run_id": current_run_id,
+              "declared_history_contract_enforced": True,
+              "direct_owner_dispatch_cryptographically_distinguished": False,
+              "event": "workflow_dispatch",
+              "head_sha": head_sha,
+              "history_scope": "complete-retained-workflow-api-history",
+              "kind": "explainiverse-recovery-workflow-history",
+              "matching_runs": matching_runs,
+              "owner": owner,
+              "pagination_complete": True,
+              "repository": repository,
+              "reported_total_count": len(runs),
+              "schema_version": 1,
+              "source_run_id": source_run_id,
+              "tag": tag,
+              "workflow": "recover-github-release.yml",
+              "workflow_path": workflow_path,
+          }
+          output_path.write_bytes(
+              (json.dumps(normalized, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                  "utf-8"
+              )
+          )
+          PY
+          python3 "$RECOVERY_HISTORY_NORMALIZER" \
+            "$RECOVERY_HISTORY_RAW" "$RECOVERY_HISTORY_NORMALIZED"
 
       - name: Check out the immutable release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -105,10 +345,20 @@ jobs:
       - name: Preserve the validated pre-checkout recovery request
         env:
           RECOVERY_REQUEST_TEMP: ${{ runner.temp }}/explainiverse-recovery-request-${{ github.run_id }}-${{ github.run_attempt }}.json
+          RECOVERY_HISTORY_NORMALIZED: ${{ runner.temp }}/explainiverse-recovery-history-normalized-${{ github.run_id }}-${{ github.run_attempt }}.json
+          RECOVERY_HISTORY_NORMALIZER: ${{ runner.temp }}/explainiverse-recovery-history-normalizer-${{ github.run_id }}-${{ github.run_attempt }}.py
         run: |
           test -f "$RECOVERY_REQUEST_TEMP"
+          test -f "$RECOVERY_HISTORY_NORMALIZED"
+          test -f "$RECOVERY_HISTORY_NORMALIZER"
           mkdir -p recovery
           install -m 0600 "$RECOVERY_REQUEST_TEMP" recovery/request.json
+          install -m 0600 "$RECOVERY_HISTORY_NORMALIZED" \
+            recovery/recovery-workflow-history.json
+          install -m 0600 "$RECOVERY_HISTORY_NORMALIZER" \
+            recovery/recovery-history-normalizer.py
+          (cd recovery && sha256sum recovery-history-normalizer.py) \
+            > recovery/recovery-history-normalizer.py.sha256
 
       - name: Verify the signed immutable recovery source before candidate code
         env:
@@ -191,6 +441,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
           REQUIRE_STAGED_DRILL: ${{ inputs.require_staged_drill }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > recovery/source-run.json
@@ -332,6 +583,7 @@ jobs:
   recover:
     name: Recover downstream release without republishing
     needs: verify
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -345,10 +597,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
           REQUIRE_STAGED_DRILL: ${{ inputs.require_staged_drill }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
           ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact-digest }}
         run: |
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" || "$VERIFY_RESULT" != "success" ]]; then
+            echo "fixed recovery mutation requires first attempt and successful verification" >&2
+            exit 1
+          fi
           if [[ "$GITHUB_REPOSITORY" != "jemsbhai/explainiverse" || \
                 "$GITHUB_REPOSITORY_OWNER" != "jemsbhai" || \
                 "$GITHUB_EVENT_NAME" != "workflow_dispatch" || \
@@ -360,8 +618,8 @@ jobs:
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || \
                 "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" || \
                 ! "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ || \
+                ! "$RECOVERY_REQUEST_NONCE" =~ ^[0-9a-f]{16}$ || \
                 ! "$REQUIRE_STAGED_DRILL" =~ ^(true|false)$ || \
-                ! "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ || \
                 ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || \
                 ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ || \
                 ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
@@ -412,14 +670,18 @@ jobs:
           install -m 0600 "$artifact_metadata" recovery/verified-artifact-metadata.json
 
           jq -e --arg tag "$RELEASE_TAG" --arg source "$SOURCE_RUN_ID" \
+            --arg nonce "$RECOVERY_REQUEST_NONCE" \
             --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
             --arg owner "$GITHUB_REPOSITORY_OWNER" \
             --argjson drill "$REQUIRE_STAGED_DRILL" \
             '.tag == $tag and .source_run_id == $source and \
+             .recovery_request_nonce == $nonce and \
              .require_staged_drill == $drill and \
              .recovery_run_id == $run and .recovery_run_attempt == $attempt and \
              .actor == $owner and .triggering_actor == $owner' \
             recovery/request.json > /dev/null
+          test -f recovery/recovery-workflow-history.json
+          test ! -L recovery/recovery-workflow-history.json
 
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
             > recovery/mutation-tag-ref.json
@@ -786,12 +1048,251 @@ jobs:
             recovery/pre-mutation-pypi.json | sort)
           test "$actual_pypi" = "$expected_pypi"
 
+      - name: Requery and bind exact recovery dispatch history before mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
+          RECOVERY_HISTORY_RAW: recovery/live-recovery-workflow-history-pages.json
+          RECOVERY_HISTORY_NORMALIZED: recovery/live-recovery-workflow-history.json
+        run: |
+          gh api --paginate --slurp \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/recover-github-release.yml/runs?per_page=100" \
+            > "$RECOVERY_HISTORY_RAW"
+          python3 - "$RECOVERY_HISTORY_RAW" "$RECOVERY_HISTORY_NORMALIZED" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def reject(message):
+              raise SystemExit(message)
+
+          if len(sys.argv) != 3:
+              reject("recovery history normalizer arguments rejected")
+          raw_path = Path(sys.argv[1])
+          output_path = Path(sys.argv[2])
+          repository = os.environ.get("GITHUB_REPOSITORY", "")
+          owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
+          tag = os.environ.get("RELEASE_TAG", "")
+          source_text = os.environ.get("SOURCE_RUN_ID", "")
+          nonce = os.environ.get("RECOVERY_REQUEST_NONCE", "")
+          current_text = os.environ.get("GITHUB_RUN_ID", "")
+          attempt_text = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+          head_sha = os.environ.get("GITHUB_SHA", "")
+          if repository != "jemsbhai/explainiverse" or owner != "jemsbhai":
+              reject("recovery history repository authority rejected")
+          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is None:
+              reject("recovery history tag rejected")
+          if re.fullmatch(r"[1-9][0-9]*", source_text) is None:
+              reject("recovery history source run rejected")
+          if re.fullmatch(r"[0-9a-f]{16}", nonce) is None:
+              reject("recovery history nonce rejected")
+          if re.fullmatch(r"[1-9][0-9]*", current_text) is None:
+              reject("recovery history current run id rejected")
+          if attempt_text != "1":
+              reject("recovery history requires the first run attempt")
+          if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+              reject("recovery history head sha rejected")
+          source_run_id = int(source_text)
+          current_run_id = int(current_text)
+          try:
+              pages = json.loads(raw_path.read_text(encoding="utf-8"))
+          except (OSError, UnicodeError, json.JSONDecodeError) as error:
+              reject(f"recovery history JSON rejected: {error}")
+          if type(pages) is not list or not pages:
+              reject("recovery history pages rejected")
+          runs = []
+          reported_counts = []
+          for page in pages:
+              if type(page) is not dict:
+                  reject("recovery history page rejected")
+              page_runs = page.get("workflow_runs")
+              count = page.get("total_count")
+              if type(page_runs) is not list or type(count) is not int or count < 1:
+                  reject("recovery history page shape rejected")
+              runs.extend(page_runs)
+              reported_counts.append(count)
+          if not runs or any(count != len(runs) for count in reported_counts):
+              reject("recovery history pagination incomplete")
+
+          workflow_path = ".github/workflows/recover-github-release.yml"
+          title_prefix = f"explainiverse-recovery-{tag}-{source_run_id}-"
+          expected_title = f"{title_prefix}{nonce}"
+          title_pattern = re.compile(re.escape(title_prefix) + r"([0-9a-f]{16})\Z")
+          seen_ids = set()
+          matching_nonces = set()
+          all_runs = []
+          matching_runs = []
+          current_count = 0
+          required_fields = {
+              "id",
+              "display_title",
+              "path",
+              "head_sha",
+              "head_branch",
+              "event",
+              "run_attempt",
+              "status",
+              "conclusion",
+              "actor",
+              "triggering_actor",
+          }
+          for raw in runs:
+              if type(raw) is not dict or not required_fields.issubset(raw):
+                  reject("recovery history run shape rejected")
+              run_id = raw["id"]
+              run_attempt = raw["run_attempt"]
+              if type(run_id) is not int or run_id < 1 or run_id in seen_ids:
+                  reject("duplicate or invalid recovery run id")
+              if type(run_attempt) is not int or run_attempt < 1:
+                  reject("recovery history run attempt rejected")
+              seen_ids.add(run_id)
+              text_fields = ("display_title", "path", "head_sha", "head_branch", "event", "status")
+              if any(type(raw[field]) is not str or not raw[field] for field in text_fields):
+                  reject("recovery history run text rejected")
+              actor = raw["actor"]
+              triggering_actor = raw["triggering_actor"]
+              if (
+                  type(actor) is not dict
+                  or type(actor.get("login")) is not str
+                  or not actor["login"]
+                  or type(triggering_actor) is not dict
+                  or type(triggering_actor.get("login")) is not str
+                  or not triggering_actor["login"]
+              ):
+                  reject("recovery history actor shape rejected")
+              status = raw["status"]
+              conclusion = raw["conclusion"]
+              if status == "completed":
+                  if type(conclusion) is not str or not conclusion:
+                      reject("recovery history terminal conclusion rejected")
+              elif conclusion is not None:
+                  reject("recovery history active conclusion rejected")
+              same_context = (
+                  raw["path"] == workflow_path
+                  and raw["head_sha"] == head_sha
+                  and raw["head_branch"] == tag
+                  and raw["event"] == "workflow_dispatch"
+              )
+              claims_related_title = raw["display_title"].startswith(title_prefix)
+              title_match = title_pattern.fullmatch(raw["display_title"])
+              normalized_status = status
+              role = "unrelated-terminal"
+              recovery_nonce = None
+              if run_id == current_run_id:
+                  current_count += 1
+                  if (
+                      not same_context
+                      or raw["display_title"] != expected_title
+                      or run_attempt != 1
+                      or actor["login"] != owner
+                      or triggering_actor["login"] != owner
+                      or status not in {"queued", "in_progress"}
+                      or conclusion is not None
+                  ):
+                      reject("recovery history current run rejected")
+                  role = "current"
+                  recovery_nonce = nonce
+                  normalized_status = "active"
+              else:
+                  if status != "completed":
+                      reject("another recovery run is active")
+                  if claims_related_title and not same_context:
+                      reject("foreign matching recovery title rejected")
+                  if claims_related_title or same_context:
+                      if (
+                          not same_context
+                          or title_match is None
+                          or run_attempt != 1
+                          or actor["login"] != owner
+                          or triggering_actor["login"] != owner
+                          or conclusion != "failure"
+                          or run_id >= current_run_id
+                      ):
+                          reject("related prior recovery run rejected")
+                      role = "prior-failure"
+                      recovery_nonce = title_match.group(1)
+              row = {
+                  "actor": actor["login"],
+                  "conclusion": conclusion,
+                  "display_title": raw["display_title"],
+                  "event": raw["event"],
+                  "head_branch": raw["head_branch"],
+                  "head_sha": raw["head_sha"],
+                  "id": run_id,
+                  "path": raw["path"],
+                  "role": role,
+                  "run_attempt": run_attempt,
+                  "status": normalized_status,
+                  "triggering_actor": triggering_actor["login"],
+              }
+              all_runs.append(row)
+              if recovery_nonce is not None:
+                  if recovery_nonce in matching_nonces:
+                      reject("duplicate recovery request nonce")
+                  matching_nonces.add(recovery_nonce)
+                  matching = dict(row)
+                  matching["recovery_request_nonce"] = recovery_nonce
+                  matching_runs.append(matching)
+          if current_count != 1 or nonce not in matching_nonces:
+              reject("recovery history current run missing")
+          all_runs.sort(key=lambda item: item["id"])
+          matching_runs.sort(key=lambda item: item["id"])
+          normalized = {
+              "all_runs": all_runs,
+              "current_run_attempt": 1,
+              "current_run_id": current_run_id,
+              "declared_history_contract_enforced": True,
+              "direct_owner_dispatch_cryptographically_distinguished": False,
+              "event": "workflow_dispatch",
+              "head_sha": head_sha,
+              "history_scope": "complete-retained-workflow-api-history",
+              "kind": "explainiverse-recovery-workflow-history",
+              "matching_runs": matching_runs,
+              "owner": owner,
+              "pagination_complete": True,
+              "repository": repository,
+              "reported_total_count": len(runs),
+              "schema_version": 1,
+              "source_run_id": source_run_id,
+              "tag": tag,
+              "workflow": "recover-github-release.yml",
+              "workflow_path": workflow_path,
+          }
+          output_path.write_bytes(
+              (json.dumps(normalized, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                  "utf-8"
+              )
+          )
+          PY
+          cmp recovery/recovery-workflow-history.json \
+            "$RECOVERY_HISTORY_NORMALIZED"
+
       - name: Create or inspect a recovery draft using fixed commands only
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
         run: |
+          revalidate_recovery_history() {
+            local label=$1
+            local raw="recovery/$label-recovery-workflow-history-pages.json"
+            local normalized="recovery/$label-recovery-workflow-history.json"
+            (cd recovery && \
+              sha256sum --check recovery-history-normalizer.py.sha256)
+            gh api --paginate --slurp \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/recover-github-release.yml/runs?per_page=100" \
+              > "$raw"
+            python3 recovery/recovery-history-normalizer.py "$raw" "$normalized"
+            cmp recovery/recovery-workflow-history.json "$normalized"
+          }
+
           disclosure=$(< recovery/source-release-assets/RELEASE_GOVERNANCE.md)
           test -n "$disclosure"
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -843,6 +1344,7 @@ jobs:
               echo "GitHub Release appeared during the recovery create audit" >&2
               exit 1
             fi
+            revalidate_recovery_history pre-create
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag --draft --generate-notes \
@@ -863,7 +1365,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
         run: |
+          revalidate_recovery_history() {
+            local label=$1
+            local raw="recovery/$label-recovery-workflow-history-pages.json"
+            local normalized="recovery/$label-recovery-workflow-history.json"
+            (cd recovery && \
+              sha256sum --check recovery-history-normalizer.py.sha256)
+            gh api --paginate --slurp \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/recover-github-release.yml/runs?per_page=100" \
+              > "$raw"
+            python3 recovery/recovery-history-normalizer.py "$raw" "$normalized"
+            cmp recovery/recovery-workflow-history.json "$normalized"
+          }
+
           download_release_asset() {
             local artifact_id=$1
             local destination=$2
@@ -879,9 +1396,10 @@ jobs:
               "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$artifact_id"
           }
 
-          audit_release_asset_subset() {
+          audit_release_asset_state() {
             local release_json=$1
-            jq -e '.draft == true and .prerelease == false and \
+            jq -e '.prerelease == false and \
+              ((.draft == true) or (.draft == false and .immutable == true)) and \
               ([.assets[].name] | length) == ([.assets[].name] | unique | length) and \
               all(.assets[]; .id > 0 and .state == "uploaded" and \
                 (.name | test("^[A-Za-z0-9][A-Za-z0-9._+-]*$")) and \
@@ -904,6 +1422,16 @@ jobs:
                 return 1
               fi
             done < <(jq -r '.assets[] | [.name,.digest] | @tsv' "$release_json")
+            if [[ "$(jq -r '.draft' "$release_json")" = false ]]; then
+              local expected_final_names actual_final_names
+              expected_final_names=$(sed -E 's/^[0-9a-f]{64}  \.\///' \
+                recovery/source-release-assets.sha256 | sort)
+              actual_final_names=$(jq -r '.assets[].name' "$release_json" | sort)
+              if [[ "$actual_final_names" != "$expected_final_names" ]]; then
+                echo "immutable final release differs from the complete approved asset bundle" >&2
+                return 1
+              fi
+            fi
           }
 
           for asset in recovery/source-release-assets/*; do
@@ -911,7 +1439,8 @@ jobs:
             release_json="recovery/pre-upload-$name-release.json"
             gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
               -H "X-GitHub-Api-Version: 2026-03-10" > "$release_json"
-            audit_release_asset_subset "$release_json"
+            audit_release_asset_state "$release_json"
+            release_is_draft=$(jq -r '.draft' "$release_json")
             matches=$(jq --arg name "$name" \
               '[.assets[] | select(.name == $name)] | length' "$release_json")
             if [[ "$matches" -eq 1 ]]; then
@@ -923,6 +1452,10 @@ jobs:
                 "$(sha256sum "$existing" | cut -d' ' -f1)"
               rm "$existing"
             elif [[ "$matches" -eq 0 ]]; then
+              if [[ "$release_is_draft" != true ]]; then
+                echo "immutable final release is missing approved asset: $name" >&2
+                exit 1
+              fi
               gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
                 > "recovery/pre-upload-$name-tag-ref.json"
               tag_object=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
@@ -971,17 +1504,19 @@ jobs:
               gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
                 -H "X-GitHub-Api-Version: 2026-03-10" \
                 > "$immediate_release_json"
-              audit_release_asset_subset "$immediate_release_json"
+              audit_release_asset_state "$immediate_release_json"
+              test "$(jq -r '.draft' "$immediate_release_json")" = true
               test "$(jq --arg name "$name" \
                 '[.assets[] | select(.name == $name)] | length' \
                 "$immediate_release_json")" -eq 0
 
+              revalidate_recovery_history "pre-upload-$name"
               gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
 
               gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
                 -H "X-GitHub-Api-Version: 2026-03-10" \
                 > "recovery/post-upload-$name-release.json"
-              audit_release_asset_subset "recovery/post-upload-$name-release.json"
+              audit_release_asset_state "recovery/post-upload-$name-release.json"
               test "$(jq --arg name "$name" \
                 '[.assets[] | select(.name == $name)] | length' \
                 "recovery/post-upload-$name-release.json")" -eq 1
@@ -999,7 +1534,7 @@ jobs:
             fi
           done
 
-      - name: Verify every draft asset before finalizing
+      - name: Verify every release asset before finalizing or reconciling
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -1020,7 +1555,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECOVERY_REQUEST_NONCE: ${{ inputs.recovery_request_nonce }}
         run: |
+          revalidate_recovery_history() {
+            local label=$1
+            local raw="recovery/$label-recovery-workflow-history-pages.json"
+            local normalized="recovery/$label-recovery-workflow-history.json"
+            (cd recovery && \
+              sha256sum --check recovery-history-normalizer.py.sha256)
+            gh api --paginate --slurp \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/recover-github-release.yml/runs?per_page=100" \
+              > "$raw"
+            python3 recovery/recovery-history-normalizer.py "$raw" "$normalized"
+            cmp recovery/recovery-workflow-history.json "$normalized"
+          }
+
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
             > recovery/pre-finalize-release.json
@@ -1177,6 +1727,7 @@ jobs:
               > recovery/immediate-pre-finalize-release.canonical.json
             cmp recovery/pre-finalize-release.canonical.json \
               recovery/immediate-pre-finalize-release.canonical.json
+            revalidate_recovery_history pre-finalize
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --draft=false --title "Explainiverse $RELEASE_TAG"
           fi

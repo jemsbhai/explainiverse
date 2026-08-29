@@ -91,13 +91,22 @@ show_missing = true
 [tool.black]
 line-length = 100
 target-version = ['py310', 'py311', 'py312']
+# This one-line external trust shim is byte-sealed at a reviewed SHA-256.
+extend-exclude = '^/scripts/release_gpu_jit_lambda_operator/preloader_shim\.py$'
 
 [tool.isort]
 profile = "black"
 line_length = 100
+skip_glob = ["scripts/release_gpu_jit_lambda_operator/preloader_shim.py"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["scripts/release_gpu_jit_lambda_operator/preloader_shim.py"]
 
 [tool.mypy]
 mypy_path = "src"
+exclude = ['^scripts[\\/]release_gpu_jit_lambda_operator[\\/]preloader_shim\.py$']
+explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = [

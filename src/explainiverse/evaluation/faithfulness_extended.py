@@ -37,7 +37,9 @@ from scipy import stats
 
 # NumPy 2.0 compatibility: np.trapz was renamed to np.trapezoid
 try:
-    _trapezoid = np.trapezoid
+    # Resolve dynamically so type checking remains compatible with NumPy
+    # stubs from releases that predate ``trapezoid``.
+    _trapezoid = getattr(np, "trapezoid")
 except AttributeError:
     _trapezoid = getattr(np, "trapz")
 
