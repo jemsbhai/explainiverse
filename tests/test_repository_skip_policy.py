@@ -15,6 +15,11 @@ assert POLICY_SPEC is not None and POLICY_SPEC.loader is not None
 skip_policy = importlib.util.module_from_spec(POLICY_SPEC)
 POLICY_SPEC.loader.exec_module(skip_policy)
 
+
+class _TupleSubclass(tuple):
+    """Adversarial tuple subclass that pytest does not emit for runtime skips."""
+
+
 EXPECTED_SKIP_REASONS: dict[str, str | tuple[str, ...]] = {
     "tests/test_bugfixes_v093.py::TestBug1DeviceMismatch::test_get_model_device_cuda": (
         "CUDA not available"
@@ -104,11 +109,25 @@ def test_unlisted_node_and_inexact_reasons_are_rejected() -> None:
 
 def test_malformed_skip_longrepr_is_rejected_even_with_an_approved_reason() -> None:
     nodeid = "tests/test_bugfixes_v093.py::TestBug1DeviceMismatch::test_get_model_device_cuda"
-    skip_policy._UNEXPECTED_SKIPS.clear()
-    report = SimpleNamespace(
-        skipped=True,
-        nodeid=nodeid,
-        longrepr="Skipped: CUDA not available",
+    path = str(POLICY_PATH)
+    approved = "Skipped: CUDA not available"
+    malformed_longreprs = (
+        approved,
+        [path, 1, approved],
+        _TupleSubclass((path, 1, approved)),
+        (None, 1, approved),
+        ("", 1, approved),
+        (path, "1", approved),
+        (path, True, approved),
+        (path, 0, approved),
+        (path, -1, approved),
+        (path, 1, None),
+        (path, 1, "CUDA not available"),
+        (path, 1, "Skipped: "),
+        (path, 1, approved, "extra"),
     )
-    skip_policy.pytest_runtest_logreport(report)
-    assert skip_policy._UNEXPECTED_SKIPS == [(nodeid, "Skipped: CUDA not available")]
+    for longrepr in malformed_longreprs:
+        skip_policy._UNEXPECTED_SKIPS.clear()
+        report = SimpleNamespace(skipped=True, nodeid=nodeid, longrepr=longrepr)
+        skip_policy.pytest_runtest_logreport(report)
+        assert skip_policy._UNEXPECTED_SKIPS == [(nodeid, str(longrepr))]

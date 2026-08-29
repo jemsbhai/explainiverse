@@ -66,9 +66,13 @@ _UNEXPECTED_SKIPS: list[tuple[str, str]] = []
 def _reported_skip_reason(longrepr: Any) -> str | None:
     """Extract only pytest's observed runtime-skip tuple representation."""
     if (
-        not isinstance(longrepr, tuple)
+        type(longrepr) is not tuple
         or len(longrepr) != 3
-        or not isinstance(longrepr[2], str)
+        or type(longrepr[0]) is not str
+        or not longrepr[0]
+        or type(longrepr[1]) is not int
+        or longrepr[1] <= 0
+        or type(longrepr[2]) is not str
         or not longrepr[2].startswith("Skipped: ")
     ):
         return None
