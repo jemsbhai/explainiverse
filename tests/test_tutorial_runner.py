@@ -171,6 +171,81 @@ def test_clean_execution_must_reproduce_published_outputs():
     runner._validate_reexecuted_outputs(path, published, executed)
 
 
+def test_clean_execution_ignores_adjacent_same_stream_chunk_boundaries():
+    path = Path("stream-chunks.ipynb")
+    published = _notebook_with_code("print('first'); print('second')")
+    published.cells[0].execution_count = 1
+    published.cells[0].outputs = [
+        nbformat.v4.new_output(
+            "stream",
+            name="stdout",
+            text="first\nsecond\n",
+        )
+    ]
+    executed = copy.deepcopy(published)
+    executed.cells[0].outputs = [
+        nbformat.v4.new_output("stream", name="stdout", text="first"),
+        nbformat.v4.new_output("stream", name="stdout", text="\nsecond\n"),
+    ]
+
+    runner._validate_reexecuted_outputs(path, published, executed)
+    assert len(executed.cells[0].outputs) == 2
+
+
+@pytest.mark.parametrize(
+    "executed_outputs",
+    [
+        [
+            nbformat.v4.new_output("stream", name="stdout", text="first"),
+            nbformat.v4.new_output("stream", name="stdout", text=" changed\n"),
+        ],
+        [
+            nbformat.v4.new_output("stream", name="stdout", text="first"),
+            nbformat.v4.new_output("stream", name="stderr", text="\nsecond\n"),
+        ],
+        [
+            nbformat.v4.new_output("stream", name="stdout", text="first\n"),
+            nbformat.v4.new_output(
+                "display_data",
+                data={"text/plain": "second\n"},
+                metadata={},
+            ),
+        ],
+        [
+            nbformat.v4.new_output("stream", name="stdout", text="first"),
+            nbformat.v4.new_output(
+                "display_data",
+                data={"text/plain": "intervening output"},
+                metadata={},
+            ),
+            nbformat.v4.new_output("stream", name="stdout", text="\nsecond\n"),
+        ],
+    ],
+    ids=[
+        "changed-text",
+        "different-stream-name",
+        "different-output-type",
+        "intervening-output",
+    ],
+)
+def test_stream_chunk_canonicalization_preserves_semantic_boundaries(executed_outputs):
+    path = Path("stream-boundaries.ipynb")
+    published = _notebook_with_code("print('first'); print('second')")
+    published.cells[0].execution_count = 1
+    published.cells[0].outputs = [
+        nbformat.v4.new_output(
+            "stream",
+            name="stdout",
+            text="first\nsecond\n",
+        )
+    ]
+    executed = copy.deepcopy(published)
+    executed.cells[0].outputs = executed_outputs
+
+    with pytest.raises(ValueError, match="no longer matches the published outputs"):
+        runner._validate_reexecuted_outputs(path, published, executed)
+
+
 def test_checkout_import_and_hashes_are_current_and_stable():
     assert runner._assert_checkout_import() == runner._declared_project_version()
     assert runner._lock_digest() == runner._lock_digest()

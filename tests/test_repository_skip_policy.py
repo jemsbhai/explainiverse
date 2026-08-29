@@ -1,17 +1,21 @@
-"""Repository-wide test-integrity hooks."""
+"""Exact integrity contract for repository-wide expected test skips."""
 
 from __future__ import annotations
 
-from typing import Any
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
 
-import pytest
+POLICY_PATH = Path(__file__).with_name("conftest.py")
+POLICY_SPEC = importlib.util.spec_from_file_location(
+    "explainiverse_repository_skip_policy",
+    POLICY_PATH,
+)
+assert POLICY_SPEC is not None and POLICY_SPEC.loader is not None
+skip_policy = importlib.util.module_from_spec(POLICY_SPEC)
+POLICY_SPEC.loader.exec_module(skip_policy)
 
-# Skips are part of the tested contract, not an unbounded escape hatch. CUDA
-# behavior is exercised only on GPU runners. The XGBoost case covers a feature
-# introduced in 3.1 while Python 3.10 intentionally supports XGBoost <3.1.
-# Native release-control tests remain required on their declared host OS; the
-# exact node/reason bindings below make those platform skips reviewable.
-_EXPECTED_SKIPS: dict[str, str | tuple[str, ...]] = {
+EXPECTED_SKIP_REASONS: dict[str, str | tuple[str, ...]] = {
     "tests/test_bugfixes_v093.py::TestBug1DeviceMismatch::test_get_model_device_cuda": (
         "CUDA not available"
     ),
@@ -60,33 +64,36 @@ _EXPECTED_SKIPS: dict[str, str | tuple[str, ...]] = {
     ),
 }
 
-_UNEXPECTED_SKIPS: list[tuple[str, str]] = []
+
+def _recorded_unexpected_skip(nodeid: str, reason: str) -> list[tuple[str, str]]:
+    skip_policy._UNEXPECTED_SKIPS.clear()
+    report = SimpleNamespace(
+        skipped=True,
+        nodeid=nodeid,
+        longrepr=f"Skipped: {reason}",
+    )
+    skip_policy.pytest_runtest_logreport(report)
+    return list(skip_policy._UNEXPECTED_SKIPS)
 
 
-def pytest_runtest_logreport(report: Any) -> None:
-    if not report.skipped:
-        return
-    reason = str(report.longrepr)
-    expected = _EXPECTED_SKIPS.get(report.nodeid)
-    expected_reasons = (expected,) if isinstance(expected, str) else expected
-    if expected_reasons is None or not any(item in reason for item in expected_reasons):
-        _UNEXPECTED_SKIPS.append((report.nodeid, reason))
+def test_expected_skip_inventory_and_reason_sets_are_exact() -> None:
+    assert skip_policy._EXPECTED_SKIPS == EXPECTED_SKIP_REASONS
 
 
-def pytest_collectreport(report: Any) -> None:
-    """Treat collection-time import skips as missing test coverage."""
-    if report.skipped:
-        _UNEXPECTED_SKIPS.append((report.nodeid, str(report.longrepr)))
+def test_every_exact_expected_skip_reason_is_accepted() -> None:
+    for nodeid, expected in EXPECTED_SKIP_REASONS.items():
+        reasons = (expected,) if isinstance(expected, str) else expected
+        for reason in reasons:
+            assert _recorded_unexpected_skip(nodeid, reason) == []
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    del exitstatus
-    if not _UNEXPECTED_SKIPS:
-        return
-    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-    if reporter is not None:
-        reporter.write_sep("=", "unexpected skips")
-        for nodeid, reason in _UNEXPECTED_SKIPS:
-            reporter.write_line(f"{nodeid}: {reason}")
-    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+def test_unlisted_node_and_near_miss_reason_are_rejected() -> None:
+    nodeid = (
+        "tests/test_lambda_operator_cli.py::"
+        "test_windows_launcher_delivers_secret_and_post_plan_confirmation_without_exposure"
+    )
+    assert _recorded_unexpected_skip(nodeid, "requires some clean-source fixture")
+    assert _recorded_unexpected_skip(
+        "tests/test_repository_skip_policy.py::test_unknown_skip",
+        "native inherited HANDLE contract is Windows-only",
+    )
