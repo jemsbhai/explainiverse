@@ -102,7 +102,7 @@ Captum explicitly before pytest and must report zero skips in these files.
 
 ```bash
 python -c "import captum; print(captum.__version__)"
-pytest --strict-config --strict-markers \
+python -m pytest --strict-config --strict-markers \
   tests/test_deeplift.py tests/test_lrp.py tests/test_lrp_accuracy.py \
   tests/reference/test_ref_deeplift.py \
   tests/test_gradient_approved_remediation.py

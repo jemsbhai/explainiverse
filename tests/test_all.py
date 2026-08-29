@@ -3,7 +3,7 @@
 Run all tests for Explainiverse.
 
 Usage:
-    poetry run pytest tests/ -v
+    poetry run python -m pytest tests/ -v
     
 Or run this file directly:
     poetry run python tests/test_all.py

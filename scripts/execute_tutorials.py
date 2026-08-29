@@ -389,8 +389,13 @@ def _validate_source(path: Path, notebook: NotebookNode) -> None:
 def _parse_utc_timestamp(value: Any, *, path: Path) -> None:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{path.name}: executed_at_utc must be a non-empty ISO-8601 string")
+    parseable = re.sub(
+        r"(?<=\.\d{6})\d(?=(?:Z|[+-]00:00)\Z)",
+        "",
+        value,
+    )
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(parseable.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{path.name}: executed_at_utc is not valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):

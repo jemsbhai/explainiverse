@@ -276,7 +276,7 @@ jobs:
 
       - name: Run branch-aware coverage gate
         run: >-
-          poetry run pytest --strict-config --strict-markers
+          poetry run python -m pytest --strict-config --strict-markers
           --cov=explainiverse --cov-branch --cov-report=term-missing
           --cov-report=xml --cov-fail-under=81
 

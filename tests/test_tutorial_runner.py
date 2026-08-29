@@ -85,6 +85,31 @@ def test_only_manifest_notebooks_can_be_selected():
 
 
 @pytest.mark.parametrize(
+    "value",
+    (
+        "2026-08-29T10:28:34.9530800+00:00",
+        "2026-08-29T10:28:34.9575216Z",
+    ),
+)
+def test_dotnet_seven_digit_utc_timestamps_are_python_310_compatible(value):
+    runner._parse_utc_timestamp(value, path=Path("dotnet.ipynb"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "2026-08-29T10:28:34.9530800",
+        "2026-08-29T10:28:34.9530800+01:00",
+        "2026-02-30T10:28:34.9530800Z",
+        "2026-08-29T10:28:34.9530800ZZ",
+    ),
+)
+def test_dotnet_timestamp_compatibility_does_not_weaken_validation(value):
+    with pytest.raises(ValueError):
+        runner._parse_utc_timestamp(value, path=Path("dotnet.ipynb"))
+
+
+@pytest.mark.parametrize(
     "filename",
     [spec.filename for spec in runner.TUTORIAL_SPECS],
 )

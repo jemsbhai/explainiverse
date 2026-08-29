@@ -1478,6 +1478,81 @@ def test_release_tool_test_prerequisites_are_exact_and_not_runtime_extras():
     assert "pywin32" not in runtime_surface
 
 
+def _assert_poetry_pytest_uses_the_repository_module_path(
+    workflow: str,
+    *,
+    step_name: str,
+    next_step_name: str,
+) -> None:
+    step = workflow.split(f"      - name: {step_name}", 1)[1].split(
+        f"\n      - name: {next_step_name}", 1
+    )[0]
+    assert "poetry run python -m pytest --strict-config --strict-markers" in step
+    assert "poetry run pytest" not in step
+
+
+def test_poetry_ci_and_publication_tests_preserve_the_repository_import_path():
+    _assert_poetry_pytest_uses_the_repository_module_path(
+        _read("python-ci.yml"),
+        step_name="Run branch-aware coverage gate",
+        next_step_name="Enforce changed-line coverage on pull requests",
+    )
+    _assert_poetry_pytest_uses_the_repository_module_path(
+        _read("publish-pypi.yml"),
+        step_name="Run the complete Python release gate",
+        next_step_name="Run the complete experimental JavaScript gate",
+    )
+
+
+def test_poetry_test_launcher_contract_rejects_the_console_script_near_match():
+    cases = (
+        (
+            _read("python-ci.yml"),
+            "Run branch-aware coverage gate",
+            "Enforce changed-line coverage on pull requests",
+        ),
+        (
+            _read("publish-pypi.yml"),
+            "Run the complete Python release gate",
+            "Run the complete experimental JavaScript gate",
+        ),
+    )
+    for workflow, step_name, next_step_name in cases:
+        mutated = workflow.replace(
+            "poetry run python -m pytest --strict-config --strict-markers",
+            "poetry run pytest --strict-config --strict-markers",
+            1,
+        )
+        with pytest.raises(AssertionError):
+            _assert_poetry_pytest_uses_the_repository_module_path(
+                mutated,
+                step_name=step_name,
+                next_step_name=next_step_name,
+            )
+
+
+def _assert_captum_guidance_uses_the_repository_module_path(matrix: str) -> None:
+    mandatory_gates = matrix.split("## Mandatory compatibility gates", 1)[1]
+    assert "python -m pytest --strict-config --strict-markers" in mandatory_gates
+    assert "\npytest --strict-config --strict-markers" not in mandatory_gates
+
+
+def test_active_captum_guidance_preserves_the_repository_import_path():
+    matrix = (ROOT / "docs" / "CAPTUM_SUPPORT_MATRIX.md").read_text(encoding="utf-8")
+    _assert_captum_guidance_uses_the_repository_module_path(matrix)
+
+
+def test_active_captum_guidance_rejects_the_console_script_near_match():
+    matrix = (ROOT / "docs" / "CAPTUM_SUPPORT_MATRIX.md").read_text(encoding="utf-8")
+    mutated = matrix.replace(
+        "python -m pytest --strict-config --strict-markers",
+        "pytest --strict-config --strict-markers",
+        1,
+    )
+    with pytest.raises(AssertionError):
+        _assert_captum_guidance_uses_the_repository_module_path(mutated)
+
+
 def _assert_macos_openmp_contract(workflow):
     compatibility_job = workflow.split("  test:", 1)[1].split(
         "\n  minimum-direct-dependencies:", 1
