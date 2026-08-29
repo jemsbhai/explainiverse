@@ -25,7 +25,7 @@ _EXPECTED_SKIPS: dict[str, str | tuple[str, ...]] = {
         "CUDA not available"
     ),
     "tests/test_treeshap_accuracy.py::test_xgboost_31_vector_intercept_is_preserved_and_additive": (
-        "vector-valued base_score was introduced in 3.1"
+        "XGBoost vector-valued base_score was introduced in 3.1"
     ),
     "tests/test_lambda_github_controller.py::test_provider_intent_late_destination_race_preserves_source_and_never_falls_back": (
         "Windows no-replace publication race"

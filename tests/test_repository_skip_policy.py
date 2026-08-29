@@ -34,7 +34,7 @@ EXPECTED_SKIP_REASONS: dict[str, str | tuple[str, ...]] = {
         "CUDA not available"
     ),
     "tests/test_treeshap_accuracy.py::test_xgboost_31_vector_intercept_is_preserved_and_additive": (
-        "vector-valued base_score was introduced in 3.1"
+        "XGBoost vector-valued base_score was introduced in 3.1"
     ),
     "tests/test_lambda_github_controller.py::test_provider_intent_late_destination_race_preserves_source_and_never_falls_back": (
         "Windows no-replace publication race"
@@ -104,6 +104,19 @@ def test_unlisted_node_and_inexact_reasons_are_rejected() -> None:
     assert _recorded_unexpected_skip(
         "tests/test_repository_skip_policy.py::test_unknown_skip",
         "native inherited HANDLE contract is Windows-only",
+    )
+
+
+def test_xgboost_skip_reason_matches_the_exact_runtime_message() -> None:
+    nodeid = (
+        "tests/test_treeshap_accuracy.py::"
+        "test_xgboost_31_vector_intercept_is_preserved_and_additive"
+    )
+    exact = "XGBoost vector-valued base_score was introduced in 3.1"
+    assert _recorded_unexpected_skip(nodeid, exact) == []
+    assert _recorded_unexpected_skip(
+        nodeid,
+        "vector-valued base_score was introduced in 3.1",
     )
 
 
