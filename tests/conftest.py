@@ -63,14 +63,27 @@ _EXPECTED_SKIPS: dict[str, str | tuple[str, ...]] = {
 _UNEXPECTED_SKIPS: list[tuple[str, str]] = []
 
 
+def _reported_skip_reason(longrepr: Any) -> str | None:
+    """Extract only pytest's observed runtime-skip tuple representation."""
+    if (
+        not isinstance(longrepr, tuple)
+        or len(longrepr) != 3
+        or not isinstance(longrepr[2], str)
+        or not longrepr[2].startswith("Skipped: ")
+    ):
+        return None
+    reason = longrepr[2].removeprefix("Skipped: ")
+    return reason or None
+
+
 def pytest_runtest_logreport(report: Any) -> None:
     if not report.skipped:
         return
-    reason = str(report.longrepr)
+    reported_reason = _reported_skip_reason(report.longrepr)
     expected = _EXPECTED_SKIPS.get(report.nodeid)
     expected_reasons = (expected,) if isinstance(expected, str) else expected
-    if expected_reasons is None or not any(item in reason for item in expected_reasons):
-        _UNEXPECTED_SKIPS.append((report.nodeid, reason))
+    if expected_reasons is None or reported_reason not in expected_reasons:
+        _UNEXPECTED_SKIPS.append((report.nodeid, str(report.longrepr)))
 
 
 def pytest_collectreport(report: Any) -> None:

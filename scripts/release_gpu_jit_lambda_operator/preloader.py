@@ -60,7 +60,7 @@ SITE_FILE_INVENTORY_SHA256 = "2cf1cf52ad8d284fcc2e7790acaaa32f3e77a9f39fa717f8bc
 SOURCE_MANIFEST_RELATIVE = "scripts/release_gpu_jit_lambda_operator/source-worktree-manifest.json"
 PRELOADER_RELATIVE = "scripts/release_gpu_jit_lambda_operator/preloader.py"
 # Replaced from the staged-index builder receipt before the candidate commit.
-SOURCE_MANIFEST_SHA256 = "14cb161062937375906c66370629dc096a7bcfb5a0485076b10358d2c791b013"
+SOURCE_MANIFEST_SHA256 = "1dce6edf031ab92e8d2099422fc8fe30dd7b33d0549ce4c33354d6a05dba318c"
 
 
 def _fail(code: str) -> NoReturn:

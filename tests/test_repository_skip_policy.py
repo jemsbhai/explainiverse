@@ -70,7 +70,7 @@ def _recorded_unexpected_skip(nodeid: str, reason: str) -> list[tuple[str, str]]
     report = SimpleNamespace(
         skipped=True,
         nodeid=nodeid,
-        longrepr=f"Skipped: {reason}",
+        longrepr=(str(POLICY_PATH), 1, f"Skipped: {reason}"),
     )
     skip_policy.pytest_runtest_logreport(report)
     return list(skip_policy._UNEXPECTED_SKIPS)
@@ -87,13 +87,28 @@ def test_every_exact_expected_skip_reason_is_accepted() -> None:
             assert _recorded_unexpected_skip(nodeid, reason) == []
 
 
-def test_unlisted_node_and_near_miss_reason_are_rejected() -> None:
+def test_unlisted_node_and_inexact_reasons_are_rejected() -> None:
     nodeid = (
         "tests/test_lambda_operator_cli.py::"
         "test_windows_launcher_delivers_secret_and_post_plan_confirmation_without_exposure"
     )
     assert _recorded_unexpected_skip(nodeid, "requires some clean-source fixture")
+    approved = "requires a freshly prepared pinned-runtime clean-source fixture"
+    assert _recorded_unexpected_skip(nodeid, f"{approved} with an alternate basis")
+    assert _recorded_unexpected_skip(nodeid, f"unexpected prefix: {approved}")
     assert _recorded_unexpected_skip(
         "tests/test_repository_skip_policy.py::test_unknown_skip",
         "native inherited HANDLE contract is Windows-only",
     )
+
+
+def test_malformed_skip_longrepr_is_rejected_even_with_an_approved_reason() -> None:
+    nodeid = "tests/test_bugfixes_v093.py::TestBug1DeviceMismatch::test_get_model_device_cuda"
+    skip_policy._UNEXPECTED_SKIPS.clear()
+    report = SimpleNamespace(
+        skipped=True,
+        nodeid=nodeid,
+        longrepr="Skipped: CUDA not available",
+    )
+    skip_policy.pytest_runtest_logreport(report)
+    assert skip_policy._UNEXPECTED_SKIPS == [(nodeid, "Skipped: CUDA not available")]
