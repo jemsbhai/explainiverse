@@ -12,15 +12,17 @@ The reviewed policy contains exactly one exception:
 `EXPLAINIVERSE-v0.15.0-CPU-ONLY`. It is bound to tag/package version `v0.15.0`/`0.15.0`, merge
 PR #5, maintainer `jemsbhai`, and the 2026-09-03 authorization. It records
 `hardware_evidence_collected=false` and `cuda_release_verified=false`. The exception omits only
-these branch checks:
+successful exact-commit evidence for these checks:
 
 - `CUDA single-GPU (Torch latest)`
 - `CUDA single-GPU (Torch minimum)`
 
-It also omits the minimum/latest one- and two-GPU jobs from the release workflow. The other 21
-provider-bound contexts, complete CPU test suite, Python/JavaScript/tutorial gates, distribution
-reproducibility, signed tag, artifact attestations, environment approval, Trusted Publishing,
-and immutable GitHub Release remain mandatory.
+It also omits the minimum/latest one- and two-GPU jobs from the release workflow. All 23
+provider-bound branch-protection contexts must already be restored when the administrator capture
+is made; the exception applies only to the two CUDA check-run results on the exact release commit.
+The other 21 successful check runs, complete CPU test suite, Python/JavaScript/tutorial gates,
+distribution reproducibility, signed tag, artifact attestations, environment approval, Trusted
+Publishing, and immutable GitHub Release remain mandatory.
 
 Use a narrow, reversible branch-protection window. Export the full current protection document
 first as rollback input. Change only `required_status_checks`, preserving `strict=true` and
@@ -30,20 +32,23 @@ names above, verify that the effective set is exactly the 21 names derived by th
 policy, and merge PR #5 through GitHub with its expected head SHA. Do not push directly to
 `main` and do not use a broad administrator bypass.
 
-Wait for all 21 required `push`/`main` checks on the resulting merge commit. Pull-request results
-do not qualify. Make the fresh administrator capture and complete the successful preflight while
-the exact 21-check exception state is still live. Immediately after preflight succeeds—and
-before creating or pushing `v0.15.0`—restore both CUDA checks with app ID `15368`, leaving all 23
-baseline checks strict and administrator-enforced. Re-read protection and compare the complete
-check/app bindings with `.github/release-control-policy.json`. If capture or preflight fails,
-restore the 23-check baseline before investigating or retrying.
+Immediately after GitHub merges PR #5, restore both CUDA checks with app ID `15368`, leaving all
+23 baseline checks strict and administrator-enforced. Re-read protection and compare the complete
+check/app bindings with `.github/release-control-policy.json`. Then wait for all 21 non-CUDA
+`push`/`main` checks on the resulting merge commit; pull-request results do not qualify. Make the
+fresh administrator capture and complete the successful preflight only while the restored
+23-context protection is live. The exception waives the two missing CUDA check-run results, not
+their branch-protection contexts. If the merge or restoration fails, restore or retain the
+23-check baseline before investigating or retrying.
 
 The preflight and publish dispatches must both name the exact same exception ID. A missing,
 different, mixed CUDA-run/exception, future-tag, altered-policy, or stale-snapshot request fails
 closed. The attested snapshot and immutable `RELEASE_GOVERNANCE.json`/`.md` record the exception,
-every omitted check/job, its authorization, and the absence of CUDA verification. After the
-release, the normal path still requires all 23 branch contexts and the complete one-/two-GPU
-evidence run; this exception cannot authorize any other tag.
+every omitted check/job, its authorization, the full restored 23-context protection, and the
+absence of CUDA verification. The capture also queries GitHub PR #5 and requires the release
+commit to equal its actual merge commit, with the reviewed repository, branch, and merger
+identity. After the release, the normal path still requires all 23 branch contexts and the
+complete one-/two-GPU evidence run; this exception cannot authorize any other tag.
 
 ## Administrator-authenticated pre-tag snapshot
 
@@ -129,8 +134,8 @@ preflighted `main` commit, and carry a signature GitHub reports as verified. The
 ruleset has no bypass actor and prevents tag update or deletion, so a bad pushed tag cannot be
 repaired in place.
 
-After preflight succeeds and all 23 baseline contexts have been restored, create and inspect the
-tag locally before its first push:
+After preflight succeeds from an attested administrator capture that already proves all 23
+baseline contexts are restored, create and inspect the tag locally before its first push:
 
 ```powershell
 git tag -s v0.15.0 $releaseCommit -m "Release v0.15.0"
@@ -147,11 +152,12 @@ Do not dispatch publication unless every check above succeeds and the PyPI proje
 confirmed the Trusted Publisher fields are owner `jemsbhai`, repository `explainiverse`, workflow
 `publish-pypi.yml`, and environment `pypi`.
 
-Record the successful preflight run ID. Restore all 23 baseline contexts. Only after separately
-authorized signed-tag creation, dispatch `publish-pypi.yml` from that tag and pass the same
-preflight run ID. The publish workflow re-verifies the attestation, source workflow, run ID,
-repository, commit, tag, policy digest, and all observed controls. It also re-verifies either the
-exact CUDA run or the exact attested `0.15.0` exception before any build. It accepts only PyPI's
+Record the successful preflight run ID and confirm its attested capture contains all 23 baseline
+contexts and exact app bindings. Only after separately authorized signed-tag creation, dispatch
+`publish-pypi.yml` from that tag and pass the same preflight run ID. The publish workflow
+re-verifies the attestation, source workflow, run ID, repository, commit, tag, policy digest, PR #5
+merge binding, and all observed controls. It also re-verifies either the exact CUDA run or the
+exact attested `0.15.0` exception before any build. It accepts only PyPI's
 HTTP 404 for the version before build and repeats that fail-closed check immediately before the
 sole OIDC publisher action. An existing version or an ambiguous API/network result never reaches
 the publisher; there is no `skip-existing` path. Normal hardware example:
@@ -198,10 +204,12 @@ full preflight evidence, then generates `RELEASE_GOVERNANCE.json` and
 `RELEASE_GOVERNANCE.md`. The record binds the release actor, environment reviewer and self-review
 setting, tag/commit, preflight, CUDA gate mode, and external-control policy/snapshot digests. The
 hardware path includes its CUDA run ID; the `0.15.0` exception instead includes its exact ID,
-authorization, reason, omitted checks/jobs, and explicit false hardware/verification fields. If
-the live project still uses one operator, the release notes also disclose the absence of
-segregation of duties. The draft and its assets must verify before it is published; recovery must
-preserve the identical governance disclosure. The normal and recovery paths both fetch PyPI's
+authorization, reason, PR #5 merge commit, omitted checks/jobs, and explicit false
+hardware/verification fields. If the live project still uses one operator, the release notes also
+disclose the absence of segregation of duties. The draft and its assets must verify before it is
+published; recovery rebuilds the record and canonical Markdown from the retained policy and
+attested external-control snapshot before preserving the identical governance disclosure. The
+normal and recovery paths both fetch PyPI's
 release JSON and per-file Integrity provenance, constrain the DSSE subjects and Trusted Publisher
 identity to the exact repository/workflow/environment, and cryptographically verify every file
 with the hash-locked `pypi-attestations` tool before finalizing. Both paths then re-read the final
@@ -243,11 +251,13 @@ is `refs/tags/$releaseTag` and its `GITHUB_SHA` equals the checked-out tag commi
    jobs to have completed successfully exactly once in the named `publish-pypi.yml` run on the
    same tag commit;
 2. download only that run's retained `release-distributions` and `release-provenance` artifacts;
-3. verify `SHA256SUMS`, exact-workflow GitHub artifact attestations, the exact filename/SHA-256
+3. rebuild the governance record and canonical Markdown from the exact tag policy and retained
+   external-control snapshot, including the reviewed CPU-only exception and PR merge binding;
+4. verify `SHA256SUMS`, exact-workflow GitHub artifact attestations, the exact filename/SHA-256
    inventory returned by PyPI, and every file's PyPI Integrity provenance and publisher identity;
-4. create or reuse a draft GitHub Release, reuse only byte-identical existing assets, and upload
+5. create or reuse a draft GitHub Release, reuse only byte-identical existing assets, and upload
    only missing downstream assets;
-5. download the draft assets and prove the GitHub distribution hashes equal PyPI before finalizing.
+6. download the draft assets and prove the GitHub distribution hashes equal PyPI before finalizing.
 
 The recovery workflow contains no PyPI publisher action, credential, `twine upload`, or
 `skip-existing` path. Its always-running evidence upload retains complete or partial source-run

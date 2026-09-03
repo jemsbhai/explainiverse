@@ -155,6 +155,7 @@ def test_publish_requires_verified_hardware_or_the_exact_cpu_only_exception():
     assert "continue-on-error" not in cuda_job
     build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
     assert "always() &&" in build_job
+    assert "always() && !cancelled() &&" in build_job
     assert "needs.preflight.result == 'success'" in build_job
     assert "needs.preflight.outputs.cuda_mode == 'hardware_evidence'" in build_job
     assert "needs.cuda-release.result == 'success'" in build_job

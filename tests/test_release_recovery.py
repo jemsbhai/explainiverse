@@ -19,6 +19,15 @@ recovery = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = recovery
 SPEC.loader.exec_module(recovery)
 
+GOVERNANCE_SCRIPT = ROOT / "scripts" / "create_release_governance_record.py"
+GOVERNANCE_SPEC = importlib.util.spec_from_file_location(
+    "recovery_governance_generator", GOVERNANCE_SCRIPT
+)
+assert GOVERNANCE_SPEC is not None and GOVERNANCE_SPEC.loader is not None
+governance_generator = importlib.util.module_from_spec(GOVERNANCE_SPEC)
+sys.modules[GOVERNANCE_SPEC.name] = governance_generator
+GOVERNANCE_SPEC.loader.exec_module(governance_generator)
+
 SHA = "a" * 40
 SOURCE_RUN_ID = "1234"
 FILENAMES = ("explainiverse-0.15.0-py3-none-any.whl", "explainiverse-0.15.0.tar.gz")
@@ -97,31 +106,36 @@ def _source_run():
     return run, jobs
 
 
-def _governance_record(*, hardware_evidence=False):
-    record = {
+def _governance_material(*, hardware_evidence=False):
+    policy_bytes = (ROOT / ".github" / "release-control-policy.json").read_bytes()
+    policy = json.loads(policy_bytes)
+    snapshot = {
         "schema_version": 1,
-        "release": {
-            "repository": "jemsbhai/explainiverse",
-            "tag": "v0.15.0",
-            "commit": SHA,
+        "observed_at": "2026-09-03T12:30:00+00:00",
+        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        "repository_controls_accepted": True,
+        "violations": [],
+        "observation": {
+            "repository": policy["repository"],
+            "release_tag": "v0.15.0",
+            "release_commit": SHA,
+            "capture_principal": "jemsbhai",
+            "pypi_environment": {
+                "name": "pypi",
+                "can_admins_bypass": False,
+                "protection_rules": [
+                    {
+                        "type": "required_reviewers",
+                        "prevent_self_review": False,
+                        "reviewers": [{"type": "User", "reviewer": {"login": "jemsbhai"}}],
+                    }
+                ],
+            },
         },
-        "governance": {
-            "release_dispatch_actor": "jemsbhai",
-            "release_triggering_actor": "jemsbhai",
-            "release_run_attempt": "1",
-            "cuda_release_mode": (
-                "hardware_evidence" if hardware_evidence else "cpu_only_exception"
-            ),
-        },
-        "evidence": {
-            "release_workflow_run_id": SOURCE_RUN_ID,
-            "release_workflow_run_url": (
-                f"https://github.com/jemsbhai/explainiverse/actions/runs/{SOURCE_RUN_ID}"
-            ),
-        },
+        "workflow_run": {"id": "123", "actor": "jemsbhai"},
     }
     if hardware_evidence:
-        record["cuda_release_gate"] = {
+        snapshot["cuda_release_gate"] = {
             "schema_version": 1,
             "mode": "hardware_evidence",
             "status": "verified",
@@ -132,46 +146,86 @@ def _governance_record(*, hardware_evidence=False):
             "cuda_release_verified": True,
             "cuda_run_id": "456",
         }
-        record["evidence"].update(
-            {
-                "cuda_run_id": "456",
-                "cuda_run_url": "https://github.com/jemsbhai/explainiverse/actions/runs/456",
-            }
-        )
+        snapshot["cuda_evidence"] = {"run": {"id": 456, "head_sha": SHA}}
+        cuda_arguments = {"cuda_run_id": "456", "cuda_exception_id": None}
     else:
-        record["cuda_release_gate"] = {
+        exception = policy["cuda_release_exception"]
+        snapshot["cuda_release_exception"] = exception
+        snapshot["observation"]["cuda_exception_merge_pull_request"] = {
+            "number": 5,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-09-03T12:00:00Z",
+            "merge_commit_sha": SHA,
+            "base_ref": "main",
+            "base_repository": policy["repository"],
+            "head_sha": "b" * 40,
+            "head_repository": policy["repository"],
+            "merged_by": "jemsbhai",
+        }
+        snapshot["cuda_release_gate"] = {
             "schema_version": 1,
             "mode": "cpu_only_exception",
             "status": "not_run",
-            "exception_id": "EXPLAINIVERSE-v0.15.0-CPU-ONLY",
+            "exception_id": exception["id"],
             "release_tag": "v0.15.0",
             "release_commit": SHA,
-            "package_version": "0.15.0",
-            "merge_pull_request": 5,
+            "package_version": exception["package_version"],
+            "merge_pull_request": exception["merge_pull_request"],
+            "merge_commit_sha": SHA,
             "hardware_evidence_collected": False,
             "cuda_release_verified": False,
-            "omitted_required_checks": [
-                "CUDA single-GPU (Torch latest)",
-                "CUDA single-GPU (Torch minimum)",
-            ],
-            "omitted_cuda_jobs": [
-                "CUDA single-GPU (Torch latest)",
-                "CUDA single-GPU (Torch minimum)",
-                "CUDA two-GPU scheduled (Torch latest)",
-                "CUDA two-GPU scheduled (Torch minimum)",
-            ],
-            "authorized_by": ["jemsbhai"],
-            "approved_at": "2026-09-03",
-            "reason": "Approved one-release CPU-only exception.",
-            "disclosure": "No CUDA hardware validation was performed.",
+            "omitted_required_checks": exception["omitted_required_checks"],
+            "omitted_cuda_jobs": exception["omitted_cuda_jobs"],
+            "authorized_by": exception["authorized_by"],
+            "approved_at": exception["approved_at"],
+            "reason": exception["reason"],
+            "disclosure": exception["disclosure"],
         }
-    return record
+        cuda_arguments = {
+            "cuda_run_id": None,
+            "cuda_exception_id": exception["id"],
+        }
+    snapshot_bytes = (json.dumps(snapshot, sort_keys=True) + "\n").encode()
+    record = governance_generator.build_record(
+        policy_bytes=policy_bytes,
+        snapshot_bytes=snapshot_bytes,
+        repository="jemsbhai/explainiverse",
+        release_tag="v0.15.0",
+        release_commit=SHA,
+        preflight_run_id="123",
+        **cuda_arguments,
+        release_run_id=SOURCE_RUN_ID,
+        release_run_attempt="1",
+        release_actor="jemsbhai",
+        release_triggering_actor="jemsbhai",
+    )
+    markdown = governance_generator.render_markdown(record)
+    return policy_bytes, snapshot_bytes, record, markdown
 
 
-def _verify_governance(record, run):
+def _governance_record(*, hardware_evidence=False):
+    return copy.deepcopy(_governance_material(hardware_evidence=hardware_evidence)[2])
+
+
+def _verify_governance(
+    record,
+    run,
+    *,
+    hardware_evidence=False,
+    policy_bytes=None,
+    snapshot_bytes=None,
+    markdown=None,
+):
+    default_policy, default_snapshot, _, canonical_markdown = _governance_material(
+        hardware_evidence=hardware_evidence
+    )
     recovery.verify_recovery_governance_record(
         record,
         run,
+        policy_bytes=default_policy if policy_bytes is None else policy_bytes,
+        snapshot_bytes=default_snapshot if snapshot_bytes is None else snapshot_bytes,
+        governance_markdown=canonical_markdown if markdown is None else markdown,
         repository="jemsbhai/explainiverse",
         release_tag="v0.15.0",
         release_commit=SHA,
@@ -186,7 +240,7 @@ def test_recovery_governance_record_is_bound_to_the_exact_source_run():
 
 def test_recovery_governance_record_accepts_verified_hardware_gate():
     run, _ = _source_run()
-    _verify_governance(_governance_record(hardware_evidence=True), run)
+    _verify_governance(_governance_record(hardware_evidence=True), run, hardware_evidence=True)
 
 
 @pytest.mark.parametrize(
@@ -212,9 +266,15 @@ def test_recovery_governance_record_accepts_verified_hardware_gate():
         ),
         (
             "record",
+            ("governance", "segregation_of_duties"),
+            True,
+            "exact retained policy",
+        ),
+        (
+            "record",
             ("cuda_release_gate", "hardware_evidence_collected"),
             True,
-            "falsely claims hardware evidence",
+            "differs from the reviewed exception",
         ),
         ("record", ("governance", "release_dispatch_actor"), "other", "source actor"),
         (
@@ -252,15 +312,27 @@ def test_recovery_governance_record_rejects_cross_run_or_identity_drift(
 
 def test_governance_record_cli_fails_closed_on_retained_record_substitution(tmp_path):
     record_path = tmp_path / "RELEASE_GOVERNANCE.json"
+    markdown_path = tmp_path / "RELEASE_GOVERNANCE.md"
+    policy_path = tmp_path / "release-control-policy.json"
+    snapshot_path = tmp_path / "external-controls.json"
     run_path = tmp_path / "source-run.json"
-    record = _governance_record()
+    policy_bytes, snapshot_bytes, record, markdown = _governance_material()
     run, _ = _source_run()
     record_path.write_text(json.dumps(record), encoding="utf-8")
+    markdown_path.write_text(markdown, encoding="utf-8")
+    policy_path.write_bytes(policy_bytes)
+    snapshot_path.write_bytes(snapshot_bytes)
     run_path.write_text(json.dumps(run), encoding="utf-8")
     arguments = [
         "governance-record",
         "--record-json",
         str(record_path),
+        "--record-markdown",
+        str(markdown_path),
+        "--policy",
+        str(policy_path),
+        "--snapshot",
+        str(snapshot_path),
         "--run-json",
         str(run_path),
         "--repository",
@@ -276,6 +348,60 @@ def test_governance_record_cli_fails_closed_on_retained_record_substitution(tmp_
     record["evidence"]["release_workflow_run_id"] = "999"
     record_path.write_text(json.dumps(record), encoding="utf-8")
     assert recovery.main(arguments) == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("exception_id", "EXPLAINIVERSE-v0.15.0-CPU-ONLY-forged"),
+        ("merge_pull_request", 5.0),
+        ("merge_commit_sha", "b" * 40),
+        ("hardware_evidence_collected", 0),
+        ("cuda_release_verified", 0),
+        ("reason", "Approved one-release CPU-only exception."),
+        ("disclosure", "CUDA is certified."),
+    ],
+)
+def test_recovery_rejects_arbitrary_cpu_waiver_fields(field, replacement):
+    record = _governance_record()
+    record["cuda_release_gate"][field] = replacement
+    run, _ = _source_run()
+
+    with pytest.raises(ValueError, match="differs from the reviewed exception"):
+        _verify_governance(record, run)
+
+
+def test_recovery_rebuilds_against_exact_policy_and_snapshot_bytes():
+    policy_bytes, snapshot_bytes, record, _ = _governance_material()
+    policy = json.loads(policy_bytes)
+    snapshot = json.loads(snapshot_bytes)
+    policy["cuda_release_exception"]["reason"] = "Approved by an arbitrary recovery record."
+    modified_policy_bytes = (json.dumps(policy, sort_keys=True) + "\n").encode()
+    snapshot["policy_sha256"] = hashlib.sha256(modified_policy_bytes).hexdigest()
+    snapshot["cuda_release_exception"]["reason"] = policy["cuda_release_exception"]["reason"]
+    modified_snapshot_bytes = (json.dumps(snapshot, sort_keys=True) + "\n").encode()
+    run, _ = _source_run()
+
+    with pytest.raises(ValueError, match="differs from the reviewed exception"):
+        _verify_governance(
+            record,
+            run,
+            policy_bytes=modified_policy_bytes,
+            snapshot_bytes=modified_snapshot_bytes,
+        )
+
+
+def test_recovery_rejects_snapshot_gate_substitution_and_noncanonical_markdown():
+    _, snapshot_bytes, record, markdown = _governance_material()
+    snapshot = json.loads(snapshot_bytes)
+    snapshot["cuda_release_gate"]["disclosure"] = "CUDA is certified."
+    modified_snapshot_bytes = (json.dumps(snapshot, sort_keys=True) + "\n").encode()
+    run, _ = _source_run()
+
+    with pytest.raises(ValueError, match="differs from reviewed policy"):
+        _verify_governance(record, run, snapshot_bytes=modified_snapshot_bytes)
+    with pytest.raises(ValueError, match="not the canonical record rendering"):
+        _verify_governance(record, run, markdown=markdown + "CUDA is certified.\n")
 
 
 def test_original_dist_pypi_and_github_assets_must_have_identical_hashes(tmp_path):
@@ -624,6 +750,9 @@ def test_recovery_binds_governance_record_before_any_draft_mutation():
     assert binding < draft_mutation
     for argument in (
         "--record-json provenance/RELEASE_GOVERNANCE.json",
+        "--record-markdown provenance/RELEASE_GOVERNANCE.md",
+        "--policy .github/release-control-policy.json",
+        "--snapshot provenance/external-controls.json",
         "--run-json recovery/source-run.json",
         '--repository "$GITHUB_REPOSITORY"',
         '--tag "$RELEASE_TAG"',

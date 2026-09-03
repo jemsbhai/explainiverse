@@ -53,6 +53,18 @@ def _evidence(*, cpu_only=False):
     if cpu_only:
         exception = policy["cuda_release_exception"]
         snapshot["cuda_release_exception"] = exception
+        snapshot["observation"]["cuda_exception_merge_pull_request"] = {
+            "number": 5,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-09-03T12:00:00Z",
+            "merge_commit_sha": SHA,
+            "base_ref": "main",
+            "base_repository": policy["repository"],
+            "head_sha": "b" * 40,
+            "head_repository": policy["repository"],
+            "merged_by": "jemsbhai",
+        }
         snapshot["cuda_release_gate"] = {
             "schema_version": 1,
             "mode": "cpu_only_exception",
@@ -62,6 +74,7 @@ def _evidence(*, cpu_only=False):
             "release_commit": SHA,
             "package_version": exception["package_version"],
             "merge_pull_request": exception["merge_pull_request"],
+            "merge_commit_sha": SHA,
             "hardware_evidence_collected": False,
             "cuda_release_verified": False,
             "omitted_required_checks": exception["omitted_required_checks"],
@@ -143,6 +156,7 @@ def test_cpu_only_record_discloses_the_exact_exception_without_cuda_evidence():
     markdown = governance.render_markdown(record)
     assert "CPU-only CUDA release exception" in markdown
     assert "EXPLAINIVERSE-v0.15.0-CPU-ONLY" in markdown
+    assert f"Verified PR merge commit: `{SHA}`" in markdown
     assert "No CUDA hardware evidence was collected" in markdown
     assert "CUDA release verification: `false`" in markdown
     assert snapshot["cuda_release_gate"]["disclosure"] in markdown
@@ -154,11 +168,14 @@ def test_cpu_only_record_discloses_the_exact_exception_without_cuda_evidence():
     [
         (lambda _policy, snapshot: snapshot.update(repository_controls_accepted=False), "accepted"),
         (lambda _policy, snapshot: snapshot.update(violations=["ignored"]), "accepted"),
+        (lambda policy, _snapshot: policy.update(schema_version=True), "schema_version"),
+        (lambda _policy, snapshot: snapshot.update(schema_version=1.0), "schema_version"),
         (
             lambda _policy, snapshot: snapshot["observation"].update(release_commit="b" * 40),
             "commit mismatch",
         ),
         (lambda _policy, snapshot: snapshot["workflow_run"].update(id="999"), "preflight run id"),
+        (lambda _policy, snapshot: snapshot["workflow_run"].update(id=123), "preflight run id"),
         (
             lambda _policy, snapshot: snapshot["workflow_run"].update(actor="other"),
             "preflight actor",
@@ -267,7 +284,51 @@ def test_governance_record_rejects_a_different_rerun_triggering_actor():
             lambda policy, _snapshot: policy["cuda_release_exception"].update(
                 cuda_release_verified=True
             ),
+            "differs from the reviewed exception",
+        ),
+        (
+            lambda policy, _snapshot: policy["cuda_release_exception"].update(
+                merge_pull_request=5.0
+            ),
+            "differs from the reviewed exception",
+        ),
+        (
+            lambda policy, _snapshot: policy["cuda_release_exception"].update(
+                hardware_evidence_collected=0
+            ),
+            "differs from the reviewed exception",
+        ),
+        (
+            lambda policy, _snapshot: policy["cuda_release_exception"].update(
+                reason="Approved one-release CPU-only exception."
+            ),
+            "differs from the reviewed exception",
+        ),
+        (
+            lambda policy, _snapshot: policy["cuda_release_exception"].update(
+                disclosure="CUDA is certified."
+            ),
+            "differs from the reviewed exception",
+        ),
+        (
+            lambda _policy, snapshot: snapshot["cuda_release_gate"].update(
+                merge_commit_sha="b" * 40
+            ),
             "differs from reviewed policy",
+        ),
+        (
+            lambda _policy, snapshot: snapshot["cuda_release_gate"].update(merge_pull_request=5.0),
+            "differs from reviewed policy",
+        ),
+        (
+            lambda _policy, snapshot: snapshot["cuda_release_gate"].update(cuda_release_verified=0),
+            "differs from reviewed policy",
+        ),
+        (
+            lambda _policy, snapshot: snapshot["observation"][
+                "cuda_exception_merge_pull_request"
+            ].update(merge_commit_sha="b" * 40),
+            "merge_commit_sha mismatch",
         ),
     ],
 )
@@ -303,3 +364,24 @@ def test_governance_record_requires_exactly_one_cuda_gate_credential():
             cuda_run_id="456",
             cuda_exception_id="EXPLAINIVERSE-v0.15.0-CPU-ONLY",
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("exception_id", "EXPLAINIVERSE-v0.15.0-CPU-ONLY-forged"),
+        ("merge_pull_request", 5.0),
+        ("hardware_evidence_collected", 0),
+        ("cuda_release_verified", 0),
+        ("reason", "Approved one-release CPU-only exception."),
+        ("disclosure", "CUDA is certified."),
+        ("merge_commit_sha", "b" * 40),
+    ],
+)
+def test_markdown_renderer_rejects_noncanonical_cpu_only_fields(field, replacement):
+    policy_bytes, snapshot = _evidence(cpu_only=True)
+    record = _record(policy_bytes, snapshot)
+    record["cuda_release_gate"][field] = replacement
+
+    with pytest.raises(ValueError, match="differs from the reviewed exception"):
+        governance.render_markdown(record)

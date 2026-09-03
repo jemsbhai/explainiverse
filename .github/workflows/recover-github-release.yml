@@ -162,6 +162,9 @@ jobs:
         run: |
           python scripts/verify_release_recovery.py governance-record \
             --record-json provenance/RELEASE_GOVERNANCE.json \
+            --record-markdown provenance/RELEASE_GOVERNANCE.md \
+            --policy .github/release-control-policy.json \
+            --snapshot provenance/external-controls.json \
             --run-json recovery/source-run.json \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \

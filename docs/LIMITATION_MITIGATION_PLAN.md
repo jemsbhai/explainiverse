@@ -34,13 +34,15 @@ contexts. Conversely, typing and physical assistive-technology evidence remain g
 specific support claims: a stable Python release may remain explicitly untyped, and the private
 demo may remain explicitly AT-uncertified.
 
-For `v0.15.0` only, authorization `EXPLAINIVERSE-v0.15.0-CPU-ONLY` removes the two single-GPU
-contexts from the effective merge/preflight set and skips all four release CUDA jobs. The
-attested gate and immutable release governance files must record
+For `v0.15.0` only, authorization `EXPLAINIVERSE-v0.15.0-CPU-ONLY` permits the two single-GPU
+contexts to be removed only long enough to merge PR #5 and skips all four release CUDA jobs. The
+contexts are restored immediately after merge, before administrator capture and preflight. The
+exception omits only their exact-commit check-run evidence: the attested snapshot must still prove
+all 23 branch contexts and app bindings are live and bind the release SHA to GitHub PR #5's actual
+merge commit. The attested gate and immutable release governance files must record
 `hardware_evidence_collected=false` and `cuda_release_verified=false`; they may not describe the
-omitted work as successful. All other checks and publication controls remain mandatory. The
-baseline 23-context branch protection is restored immediately after preflight and before the tag
-is created, and every later release still requires real one-/two-GPU evidence.
+omitted work as successful. All other checks and publication controls remain mandatory, and every
+later release still requires real one-/two-GPU evidence.
 
 ## Execution evidence matrix
 
@@ -248,8 +250,9 @@ the new recovery workflow could truthfully reconstruct provenance.
 ## Execution order
 
 1. Close every P0 row and every policy-selected stable gate before a normal stable tag. For the
-   one authorized `v0.15.0` CPU-only release, require all non-CUDA gates, attest the exact
-   exception, and restore the CUDA branch contexts before tagging.
+   one authorized `v0.15.0` CPU-only release, use the 21-context state only to merge PR #5,
+   immediately restore all 23 contexts, wait for the 21 non-CUDA `push`/`main` results, then
+   capture/preflight and attest the exact exception while the restored protection is live.
 2. Land P1 work as independent evidence-bearing changes; do not bundle platform claims with
    algorithm additions.
 3. Keep P2 APIs quarantined/absent until their retirement criteria exist before implementation.

@@ -23,6 +23,30 @@ _RUN_ID = re.compile(r"[1-9][0-9]*")
 _SENTINEL = "<!-- explainiverse-release-governance-v1 -->"
 _HARDWARE_MODE = "hardware_evidence"
 _EXCEPTION_MODE = "cpu_only_exception"
+_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
+_CUDA_EXCEPTION_TAG = "v0.15.0"
+_CUDA_EXCEPTION_VERSION = "0.15.0"
+_CUDA_EXCEPTION_PULL_REQUEST = 5
+_CUDA_EXCEPTION_APPROVED_AT = "2026-09-03"
+_CUDA_EXCEPTION_AUTHORIZED_BY = ["jemsbhai"]
+_CUDA_EXCEPTION_OMITTED_CHECKS = [
+    "CUDA single-GPU (Torch latest)",
+    "CUDA single-GPU (Torch minimum)",
+]
+_CUDA_EXCEPTION_OMITTED_JOBS = [
+    "CUDA single-GPU (Torch latest)",
+    "CUDA single-GPU (Torch minimum)",
+    "CUDA two-GPU scheduled (Torch latest)",
+    "CUDA two-GPU scheduled (Torch minimum)",
+]
+_CUDA_EXCEPTION_REASON = (
+    "Approved one-release CPU-only exception because isolated one- and two-GPU "
+    "release runners are unavailable."
+)
+_CUDA_EXCEPTION_DISCLOSURE = (
+    "Explainiverse 0.15.0 is CPU-verified; CUDA hardware validation was not performed "
+    "and this release makes no CUDA release-verification claim."
+)
 _HARDWARE_GATE_FIELDS = {
     "schema_version",
     "mode",
@@ -57,6 +81,7 @@ _EXCEPTION_GATE_FIELDS = {
     "release_commit",
     "package_version",
     "merge_pull_request",
+    "merge_commit_sha",
     "hardware_evidence_collected",
     "cuda_release_verified",
     "omitted_required_checks",
@@ -74,25 +99,26 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _strict_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON-shaped values without Python's bool/int or int/float coercion."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _strict_equal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _strict_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return bool(actual == expected)
+
+
 def _run_id(value: str, name: str) -> str:
     if _RUN_ID.fullmatch(value) is None:
         raise ValueError(f"{name} must be a positive integer")
     return value
-
-
-def _nonempty_string(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must be a non-empty string")
-    return value
-
-
-def _string_list(value: Any, name: str) -> list[str]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{name} must be a non-empty array")
-    normalized = [_nonempty_string(item, f"{name} entry") for item in value]
-    if normalized != sorted(set(normalized)):
-        raise ValueError(f"{name} must contain unique strings in sorted order")
-    return normalized
 
 
 def _validated_cuda_release_gate(
@@ -110,7 +136,7 @@ def _validated_cuda_release_gate(
 
     gate = _mapping(snapshot.get("cuda_release_gate"), "snapshot CUDA release gate")
     schema_version = gate.get("schema_version")
-    if isinstance(schema_version, bool) or schema_version != 1:
+    if type(schema_version) is not int or schema_version != 1:
         raise ValueError("snapshot CUDA release gate schema_version must be the integer 1")
     if gate.get("release_tag") != release_tag:
         raise ValueError("snapshot CUDA release gate tag mismatch")
@@ -132,7 +158,7 @@ def _validated_cuda_release_gate(
             "cuda_run_id": normalized_run_id,
         }
         for field, expected_value in expected.items():
-            if gate.get(field) != expected_value:
+            if not _strict_equal(gate.get(field), expected_value):
                 raise ValueError(
                     f"snapshot hardware CUDA release gate {field} mismatch: "
                     f"expected {expected_value!r}, got {gate.get(field)!r}"
@@ -155,66 +181,78 @@ def _validated_cuda_release_gate(
         raise ValueError("CPU-only CUDA release gate must not contain CUDA hardware evidence")
 
     exception = _mapping(policy.get("cuda_release_exception"), "CUDA release exception policy")
-    if set(exception) != _EXCEPTION_POLICY_FIELDS:
-        raise ValueError("CUDA release exception policy fields differ from schema")
+    expected_exception = {
+        "id": _CUDA_EXCEPTION_ID,
+        "release_tag": _CUDA_EXCEPTION_TAG,
+        "package_version": _CUDA_EXCEPTION_VERSION,
+        "merge_pull_request": _CUDA_EXCEPTION_PULL_REQUEST,
+        "omitted_required_checks": _CUDA_EXCEPTION_OMITTED_CHECKS,
+        "omitted_cuda_jobs": _CUDA_EXCEPTION_OMITTED_JOBS,
+        "hardware_evidence_collected": False,
+        "cuda_release_verified": False,
+        "authorized_by": _CUDA_EXCEPTION_AUTHORIZED_BY,
+        "approved_at": _CUDA_EXCEPTION_APPROVED_AT,
+        "reason": _CUDA_EXCEPTION_REASON,
+        "disclosure": _CUDA_EXCEPTION_DISCLOSURE,
+    }
+    if set(exception) != _EXCEPTION_POLICY_FIELDS or not _strict_equal(
+        dict(exception), expected_exception
+    ):
+        raise ValueError("CUDA release exception policy differs from the reviewed exception")
     snapshot_exception = _mapping(
         snapshot.get("cuda_release_exception"), "snapshot CUDA release exception"
     )
-    if dict(snapshot_exception) != dict(exception):
+    if not _strict_equal(dict(snapshot_exception), expected_exception):
         raise ValueError("snapshot CUDA release exception differs from reviewed policy")
-    exception_id = _nonempty_string(exception.get("id"), "CUDA release exception policy id")
-    if cuda_exception_id != exception_id:
+    if cuda_exception_id != _CUDA_EXCEPTION_ID:
         raise ValueError("CUDA exception id differs from reviewed policy")
-    if exception.get("release_tag") != release_tag:
+    if release_tag != _CUDA_EXCEPTION_TAG:
         raise ValueError("CUDA release exception policy tag mismatch")
-    if exception.get("package_version") != release_tag.removeprefix("v"):
+    if release_tag.removeprefix("v") != _CUDA_EXCEPTION_VERSION:
         raise ValueError("CUDA release exception package version mismatch")
-    merge_pull_request = exception.get("merge_pull_request")
-    if isinstance(merge_pull_request, bool) or not isinstance(merge_pull_request, int):
-        raise ValueError("CUDA release exception merge pull request must be an integer")
-    if merge_pull_request < 1:
-        raise ValueError("CUDA release exception merge pull request must be positive")
-    omitted_checks = _string_list(
-        exception.get("omitted_required_checks"),
-        "CUDA release exception omitted required checks",
+
+    observation = _mapping(snapshot.get("observation"), "snapshot observation")
+    merge_pull_request = _mapping(
+        observation.get("cuda_exception_merge_pull_request"),
+        "snapshot CUDA exception merge pull request",
     )
-    omitted_jobs = _string_list(
-        exception.get("omitted_cuda_jobs"),
-        "CUDA release exception omitted CUDA jobs",
-    )
-    authorized_by = _string_list(
-        exception.get("authorized_by"), "CUDA release exception authorized principals"
-    )
-    approved_at = _nonempty_string(
-        exception.get("approved_at"), "CUDA release exception approval date"
-    )
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", approved_at) is None:
-        raise ValueError("CUDA release exception approval date must have the form YYYY-MM-DD")
-    reason = _nonempty_string(exception.get("reason"), "CUDA release exception reason")
-    disclosure = _nonempty_string(exception.get("disclosure"), "CUDA release exception disclosure")
+    expected_pull_request_fields = {
+        "number": _CUDA_EXCEPTION_PULL_REQUEST,
+        "state": "closed",
+        "merged": True,
+        "merge_commit_sha": release_commit,
+        "base_ref": "main",
+        "base_repository": policy.get("repository"),
+        "head_repository": policy.get("repository"),
+        "merged_by": _CUDA_EXCEPTION_AUTHORIZED_BY[0],
+    }
+    for field, expected_pull_value in expected_pull_request_fields.items():
+        if not _strict_equal(merge_pull_request.get(field), expected_pull_value):
+            raise ValueError(
+                f"snapshot CUDA exception merge pull request {field} mismatch: "
+                f"expected {expected_pull_value!r}, got {merge_pull_request.get(field)!r}"
+            )
+
     expected_gate = {
         "schema_version": 1,
         "mode": _EXCEPTION_MODE,
         "status": "not_run",
-        "exception_id": exception_id,
+        "exception_id": _CUDA_EXCEPTION_ID,
         "release_tag": release_tag,
         "release_commit": release_commit,
-        "package_version": exception.get("package_version"),
-        "merge_pull_request": merge_pull_request,
+        "package_version": _CUDA_EXCEPTION_VERSION,
+        "merge_pull_request": _CUDA_EXCEPTION_PULL_REQUEST,
+        "merge_commit_sha": release_commit,
         "hardware_evidence_collected": False,
         "cuda_release_verified": False,
-        "omitted_required_checks": omitted_checks,
-        "omitted_cuda_jobs": omitted_jobs,
-        "authorized_by": authorized_by,
-        "approved_at": approved_at,
-        "reason": reason,
-        "disclosure": disclosure,
+        "omitted_required_checks": _CUDA_EXCEPTION_OMITTED_CHECKS,
+        "omitted_cuda_jobs": _CUDA_EXCEPTION_OMITTED_JOBS,
+        "authorized_by": _CUDA_EXCEPTION_AUTHORIZED_BY,
+        "approved_at": _CUDA_EXCEPTION_APPROVED_AT,
+        "reason": _CUDA_EXCEPTION_REASON,
+        "disclosure": _CUDA_EXCEPTION_DISCLOSURE,
     }
-    if exception.get("hardware_evidence_collected") is not False:
-        raise ValueError("CUDA release exception must record no hardware evidence")
-    if exception.get("cuda_release_verified") is not False:
-        raise ValueError("CUDA release exception must record CUDA as unverified")
-    if dict(gate) != expected_gate:
+    if not _strict_equal(dict(gate), expected_gate):
         raise ValueError("snapshot CPU-only CUDA release gate differs from reviewed policy")
     return expected_gate
 
@@ -242,7 +280,7 @@ def build_record(
     preflight_run_id = _run_id(preflight_run_id, "preflight run id")
     release_run_id = _run_id(release_run_id, "release run id")
     release_run_attempt = _run_id(release_run_attempt, "release run attempt")
-    if not release_actor:
+    if not isinstance(release_actor, str) or not release_actor:
         raise ValueError("release actor must be non-empty")
     if release_triggering_actor != release_actor:
         raise ValueError(
@@ -251,7 +289,12 @@ def build_record(
 
     policy = _mapping(json.loads(policy_bytes), "release policy")
     snapshot = _mapping(json.loads(snapshot_bytes), "external-control snapshot")
-    if policy.get("schema_version") != 1 or snapshot.get("schema_version") != 1:
+    if (
+        type(policy.get("schema_version")) is not int
+        or policy.get("schema_version") != 1
+        or type(snapshot.get("schema_version")) is not int
+        or snapshot.get("schema_version") != 1
+    ):
         raise ValueError("policy and external-control snapshot schema_version must be 1")
     policy_sha256 = hashlib.sha256(policy_bytes).hexdigest()
     if snapshot.get("policy_sha256") != policy_sha256:
@@ -276,7 +319,7 @@ def build_record(
 
     capture_principal = observation.get("capture_principal")
     workflow_run = _mapping(snapshot.get("workflow_run"), "preflight workflow run")
-    if str(workflow_run.get("id")) != preflight_run_id:
+    if not _strict_equal(workflow_run.get("id"), preflight_run_id):
         raise ValueError("snapshot preflight run id mismatch")
     if workflow_run.get("actor") != capture_principal:
         raise ValueError("preflight actor differs from authenticated capture principal")
@@ -379,6 +422,32 @@ def render_markdown(record: Mapping[str, Any]) -> str:
     governance = _mapping(record.get("governance"), "record governance")
     evidence = _mapping(record.get("evidence"), "record evidence")
     gate = _mapping(record.get("cuda_release_gate"), "record CUDA release gate")
+    if gate.get("mode") == _EXCEPTION_MODE:
+        expected_exception_gate = {
+            "schema_version": 1,
+            "mode": _EXCEPTION_MODE,
+            "status": "not_run",
+            "exception_id": _CUDA_EXCEPTION_ID,
+            "release_tag": _CUDA_EXCEPTION_TAG,
+            "release_commit": release.get("commit"),
+            "package_version": _CUDA_EXCEPTION_VERSION,
+            "merge_pull_request": _CUDA_EXCEPTION_PULL_REQUEST,
+            "merge_commit_sha": release.get("commit"),
+            "hardware_evidence_collected": False,
+            "cuda_release_verified": False,
+            "omitted_required_checks": _CUDA_EXCEPTION_OMITTED_CHECKS,
+            "omitted_cuda_jobs": _CUDA_EXCEPTION_OMITTED_JOBS,
+            "authorized_by": _CUDA_EXCEPTION_AUTHORIZED_BY,
+            "approved_at": _CUDA_EXCEPTION_APPROVED_AT,
+            "reason": _CUDA_EXCEPTION_REASON,
+            "disclosure": _CUDA_EXCEPTION_DISCLOSURE,
+        }
+        if release.get("tag") != _CUDA_EXCEPTION_TAG or not _strict_equal(
+            dict(gate), expected_exception_gate
+        ):
+            raise ValueError(
+                "record CPU-only CUDA release gate differs from the reviewed exception"
+            )
     lines = [
         _SENTINEL,
         "# Release governance disclosure",
@@ -419,7 +488,7 @@ def render_markdown(record: Mapping[str, Any]) -> str:
             [
                 "## CPU-only CUDA release exception",
                 "",
-                str(gate["disclosure"]),
+                _CUDA_EXCEPTION_DISCLOSURE,
                 "",
                 "No CUDA hardware evidence was collected, the CUDA release jobs were not run, "
                 "and this release does not claim CUDA release verification.",
@@ -428,6 +497,7 @@ def render_markdown(record: Mapping[str, Any]) -> str:
                 f"- Approved at: `{gate['approved_at']}`",
                 f"- Authorized by: {authorized_by}",
                 f"- Merge pull request: `#{gate['merge_pull_request']}`",
+                f"- Verified PR merge commit: `{gate['merge_commit_sha']}`",
                 f"- Omitted required checks: {omitted_checks}",
                 f"- Omitted CUDA jobs: {omitted_jobs}",
                 f"- Reason: {gate['reason']}",

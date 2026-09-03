@@ -255,7 +255,7 @@ jobs:
     needs: [preflight, cuda-release]
     if: >-
       ${{
-        always() &&
+        always() && !cancelled() &&
         needs.preflight.result == 'success' &&
         (
           (
