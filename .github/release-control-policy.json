@@ -169,6 +169,28 @@
       "CUDA two-GPU scheduled (Torch minimum)": "explainiverse-cuda-two"
     }
   },
+  "cuda_release_exception": {
+    "id": "EXPLAINIVERSE-v0.15.0-CPU-ONLY",
+    "release_tag": "v0.15.0",
+    "package_version": "0.15.0",
+    "merge_pull_request": 5,
+    "omitted_required_checks": [
+      "CUDA single-GPU (Torch latest)",
+      "CUDA single-GPU (Torch minimum)"
+    ],
+    "omitted_cuda_jobs": [
+      "CUDA single-GPU (Torch latest)",
+      "CUDA single-GPU (Torch minimum)",
+      "CUDA two-GPU scheduled (Torch latest)",
+      "CUDA two-GPU scheduled (Torch minimum)"
+    ],
+    "hardware_evidence_collected": false,
+    "cuda_release_verified": false,
+    "authorized_by": ["jemsbhai"],
+    "approved_at": "2026-09-03",
+    "reason": "Approved one-release CPU-only exception because isolated one- and two-GPU release runners are unavailable.",
+    "disclosure": "Explainiverse 0.15.0 is CPU-verified; CUDA hardware validation was not performed and this release makes no CUDA release-verification claim."
+  },
   "branch_protection": {
     "admin_enforcement": true,
     "strict_required_checks": true,

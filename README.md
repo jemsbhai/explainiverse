@@ -5,11 +5,13 @@ explanations. Its public registry records what each explainer has actually been 
 it does not rank methods by quality or claim that one method is appropriate for a particular
 deployment.
 
-The latest version published on PyPI is `0.14.0`. Its distributions were uploaded with Twine,
-without Trusted Publishing or published provenance. The matching annotated Git tag is unsigned
-and no GitHub Release exists, so the cross-service release record is incomplete. This checkout
-is the `0.15.0` stable-release candidate and still declares Python 3.10 through
-3.13. It has not been tagged or published.
+Version `0.14.0` is the last legacy release: its distributions were uploaded with Twine, without
+Trusted Publishing or published provenance. The matching annotated Git tag is unsigned and no
+GitHub Release exists, so that cross-service release record is incomplete. The `0.15.0` release
+line declares Python 3.10 through 3.13 and has an explicitly authorized, one-release CPU-only
+exception, `EXPLAINIVERSE-v0.15.0-CPU-ONLY`. Its CPU, packaging, and hosted compatibility gates
+remain mandatory, but CUDA hardware validation was not performed and `0.15.0` makes no CUDA
+release-verification claim.
 
 ## Accuracy status
 
@@ -163,9 +165,11 @@ the concrete class and registry scope before use.
 `ExplanationSuite.run(...)` executes only local explainers, checks both constructor and method
 arguments, and leaves exact array shape to each concrete contract. Required method arguments
 such as ProtoDash reference data must be supplied through `explainer_call_kwargs` or
-`call_kwargs_by_explainer`. `ExplanationSuite.compare()` requires the same ordered feature
-identity, explained target, and explicit caller-asserted `metadata["comparison_contract"]`
-across multiple outputs. Built-in explainers do not currently emit that contract. The
+`call_kwargs_by_explainer`. The returned mapping is detached from `suite.explanations`, so
+changing its keys does not alter the suite's stored results; both mappings contain the same
+`Explanation` objects. `ExplanationSuite.compare()` requires the same ordered feature identity,
+explained target, and explicit caller-asserted `metadata["comparison_contract"]` across multiple
+outputs. Built-in explainers do not currently emit that contract. The
 `allow_incommensurate=True` escape hatch is a warned descriptive display, not a mathematical
 comparison.
 
@@ -221,9 +225,10 @@ poetry build
 
 CPU CI permits the four explicitly allowlisted CUDA skips plus the conditional Python 3.10 /
 XGBoost-before-3.1 vector-intercept skip; any other skipped test fails the corresponding pytest
-job. CUDA execution is outside the verified device scope until a GPU runner is part of the
-release gate. Reference packages are imported explicitly before tests, and the built wheel and
-source distribution are each exercised in isolated consumer environments.
+job. The exact `0.15.0` exception records those CUDA release jobs as not run, not passed. CUDA
+execution remains outside the verified device scope until approved GPU runners satisfy the
+normal release gate. Reference packages are imported explicitly before tests, and the built
+wheel and source distribution are each exercised in isolated consumer environments.
 
 See the [0.15 migration notes](docs/MIGRATION_0_15.md), the
 [residual-limitations mitigation plan](docs/LIMITATION_MITIGATION_PLAN.md), and the

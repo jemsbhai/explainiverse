@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import re
 import sys
@@ -33,12 +34,84 @@ _POST_PYPI_RELEASE_STEPS = (
     "Require and reverify the finalized immutable release",
     "Archive normal-path release verification evidence",
 )
+_HARDWARE_MODE = "hardware_evidence"
+_EXCEPTION_MODE = "cpu_only_exception"
+_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
+_CUDA_EXCEPTION_TAG = "v0.15.0"
+_CUDA_EXCEPTION_VERSION = "0.15.0"
+_CUDA_EXCEPTION_PULL_REQUEST = 5
+_CUDA_EXCEPTION_APPROVED_AT = "2026-09-03"
+_CUDA_EXCEPTION_AUTHORIZED_BY = ["jemsbhai"]
+_CUDA_EXCEPTION_OMITTED_CHECKS = [
+    "CUDA single-GPU (Torch latest)",
+    "CUDA single-GPU (Torch minimum)",
+]
+_CUDA_EXCEPTION_OMITTED_JOBS = [
+    "CUDA single-GPU (Torch latest)",
+    "CUDA single-GPU (Torch minimum)",
+    "CUDA two-GPU scheduled (Torch latest)",
+    "CUDA two-GPU scheduled (Torch minimum)",
+]
+_CUDA_EXCEPTION_REASON = (
+    "Approved one-release CPU-only exception because isolated one- and two-GPU "
+    "release runners are unavailable."
+)
+_CUDA_EXCEPTION_DISCLOSURE = (
+    "Explainiverse 0.15.0 is CPU-verified; CUDA hardware validation was not performed "
+    "and this release makes no CUDA release-verification claim."
+)
+_HARDWARE_GATE_FIELDS = {
+    "schema_version",
+    "mode",
+    "status",
+    "exception_id",
+    "release_tag",
+    "release_commit",
+    "hardware_evidence_collected",
+    "cuda_release_verified",
+    "cuda_run_id",
+}
+_EXCEPTION_GATE_FIELDS = {
+    "schema_version",
+    "mode",
+    "status",
+    "exception_id",
+    "release_tag",
+    "release_commit",
+    "package_version",
+    "merge_pull_request",
+    "merge_commit_sha",
+    "hardware_evidence_collected",
+    "cuda_release_verified",
+    "omitted_required_checks",
+    "omitted_cuda_jobs",
+    "authorized_by",
+    "approved_at",
+    "reason",
+    "disclosure",
+}
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be a JSON object")
     return value
+
+
+def _strict_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON-shaped values without Python's bool/int or int/float coercion."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _strict_equal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _strict_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return bool(actual == expected)
 
 
 def _sequence(value: Any, name: str) -> Sequence[Any]:
@@ -187,10 +260,142 @@ def _positive_integer(value: Any, name: str) -> int:
     return value
 
 
+def _verify_recovery_cuda_release_gate(
+    record: Mapping[str, Any],
+    *,
+    repository: str,
+    release_tag: str,
+    release_commit: str,
+    governance: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> None:
+    """Preserve the exact hardware/CPU-only disclosure during recovery."""
+    gate = _mapping(record.get("cuda_release_gate"), "governance record CUDA release gate")
+    schema_version = gate.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        raise ValueError("governance record CUDA release gate schema_version must be the integer 1")
+    mode = gate.get("mode")
+    if governance.get("cuda_release_mode") != mode:
+        raise ValueError("governance record CUDA release mode differs from its gate")
+    if gate.get("release_tag") != release_tag:
+        raise ValueError("governance record CUDA release gate tag mismatch")
+    if gate.get("release_commit") != release_commit:
+        raise ValueError("governance record CUDA release gate commit mismatch")
+
+    if mode == _HARDWARE_MODE:
+        if set(gate) != _HARDWARE_GATE_FIELDS:
+            raise ValueError("governance record hardware CUDA release gate fields differ")
+        if gate.get("status") != "verified":
+            raise ValueError("governance record hardware CUDA release gate is not verified")
+        if gate.get("exception_id") is not None:
+            raise ValueError("governance record hardware CUDA release gate has an exception id")
+        if gate.get("hardware_evidence_collected") is not True:
+            raise ValueError("governance record falsely denies CUDA hardware evidence")
+        if gate.get("cuda_release_verified") is not True:
+            raise ValueError("governance record hardware CUDA release gate is unverified")
+        cuda_run_id = gate.get("cuda_run_id")
+        if not isinstance(cuda_run_id, str) or re.fullmatch(r"[1-9][0-9]*", cuda_run_id) is None:
+            raise ValueError("CUDA run id must be a positive integer string")
+        expected_url = f"https://github.com/{repository}/actions/runs/{cuda_run_id}"
+        if str(evidence.get("cuda_run_id")) != cuda_run_id:
+            raise ValueError("governance record CUDA evidence run id mismatch")
+        if evidence.get("cuda_run_url") != expected_url:
+            raise ValueError("governance record CUDA evidence run URL mismatch")
+        return
+
+    if mode != _EXCEPTION_MODE:
+        raise ValueError(f"unsupported governance record CUDA release mode: {mode!r}")
+    if set(gate) != _EXCEPTION_GATE_FIELDS:
+        raise ValueError("governance record CPU-only CUDA release gate fields differ")
+    expected_gate = {
+        "schema_version": 1,
+        "mode": _EXCEPTION_MODE,
+        "status": "not_run",
+        "exception_id": _CUDA_EXCEPTION_ID,
+        "release_tag": _CUDA_EXCEPTION_TAG,
+        "release_commit": release_commit,
+        "package_version": _CUDA_EXCEPTION_VERSION,
+        "merge_pull_request": _CUDA_EXCEPTION_PULL_REQUEST,
+        "merge_commit_sha": release_commit,
+        "hardware_evidence_collected": False,
+        "cuda_release_verified": False,
+        "omitted_required_checks": _CUDA_EXCEPTION_OMITTED_CHECKS,
+        "omitted_cuda_jobs": _CUDA_EXCEPTION_OMITTED_JOBS,
+        "authorized_by": _CUDA_EXCEPTION_AUTHORIZED_BY,
+        "approved_at": _CUDA_EXCEPTION_APPROVED_AT,
+        "reason": _CUDA_EXCEPTION_REASON,
+        "disclosure": _CUDA_EXCEPTION_DISCLOSURE,
+    }
+    if release_tag != _CUDA_EXCEPTION_TAG or not _strict_equal(dict(gate), expected_gate):
+        raise ValueError(
+            "governance record CPU-only CUDA release gate differs from the reviewed exception"
+        )
+    if "cuda_run_id" in evidence or "cuda_run_url" in evidence:
+        raise ValueError("CPU-only governance record must not claim a CUDA evidence run")
+
+
+def _rebuild_canonical_governance(
+    record: Mapping[str, Any],
+    *,
+    policy_bytes: bytes,
+    snapshot_bytes: bytes,
+    governance_markdown: str,
+    repository: str,
+    release_tag: str,
+    release_commit: str,
+    source_run_id: str,
+    source_run_attempt: int,
+    source_actor: str,
+    source_triggering_actor: str,
+) -> None:
+    """Rebuild the record from retained policy/snapshot bytes and exact source identity."""
+    try:
+        generator = importlib.import_module("scripts.create_release_governance_record")
+    except ModuleNotFoundError:
+        generator = importlib.import_module("create_release_governance_record")
+
+    evidence = _mapping(record.get("evidence"), "governance record evidence")
+    gate = _mapping(record.get("cuda_release_gate"), "governance record CUDA release gate")
+    mode = gate.get("mode")
+    cuda_run_id = None
+    cuda_exception_id = None
+    if mode == _HARDWARE_MODE:
+        value = gate.get("cuda_run_id")
+        cuda_run_id = value if isinstance(value, str) else None
+    elif mode == _EXCEPTION_MODE:
+        value = gate.get("exception_id")
+        cuda_exception_id = value if isinstance(value, str) else None
+
+    expected_record = generator.build_record(
+        policy_bytes=policy_bytes,
+        snapshot_bytes=snapshot_bytes,
+        repository=repository,
+        release_tag=release_tag,
+        release_commit=release_commit,
+        preflight_run_id=str(evidence.get("preflight_run_id")),
+        cuda_run_id=cuda_run_id,
+        cuda_exception_id=cuda_exception_id,
+        release_run_id=source_run_id,
+        release_run_attempt=str(source_run_attempt),
+        release_actor=source_actor,
+        release_triggering_actor=source_triggering_actor,
+    )
+    if not _strict_equal(dict(record), dict(expected_record)):
+        raise ValueError(
+            "governance record differs from the exact retained policy and external-control snapshot"
+        )
+    expected_markdown = generator.render_markdown(expected_record)
+    if governance_markdown != expected_markdown:
+        raise ValueError("retained governance Markdown is not the canonical record rendering")
+
+
 def verify_recovery_governance_record(
     record: Mapping[str, Any],
     run: Mapping[str, Any],
     *,
+    policy_bytes: bytes,
+    snapshot_bytes: bytes,
+    governance_markdown: str,
     repository: str,
     release_tag: str,
     release_commit: str,
@@ -204,7 +409,7 @@ def verify_recovery_governance_record(
     if re.fullmatch(r"[1-9][0-9]*", source_run_id) is None:
         raise ValueError("source run id must be a positive integer")
     schema_version = record.get("schema_version")
-    if isinstance(schema_version, bool) or schema_version != 1:
+    if type(schema_version) is not int or schema_version != 1:
         raise ValueError("release governance record schema_version must be the integer 1")
 
     source_repository = _mapping(run.get("repository"), "source run repository").get("full_name")
@@ -235,6 +440,14 @@ def verify_recovery_governance_record(
     release = _mapping(record.get("release"), "governance record release")
     governance = _mapping(record.get("governance"), "governance record governance")
     evidence = _mapping(record.get("evidence"), "governance record evidence")
+    _verify_recovery_cuda_release_gate(
+        record,
+        repository=repository,
+        release_tag=release_tag,
+        release_commit=release_commit,
+        governance=governance,
+        evidence=evidence,
+    )
     expected_url = f"https://github.com/{repository}/actions/runs/{source_run_id}"
     record_fields = {
         "repository": (release.get("repository"), repository),
@@ -254,6 +467,20 @@ def verify_recovery_governance_record(
             raise ValueError(
                 f"governance record {field} mismatch: expected {expected!r}, got {actual!r}"
             )
+
+    _rebuild_canonical_governance(
+        record,
+        policy_bytes=policy_bytes,
+        snapshot_bytes=snapshot_bytes,
+        governance_markdown=governance_markdown,
+        repository=repository,
+        release_tag=release_tag,
+        release_commit=release_commit,
+        source_run_id=source_run_id,
+        source_run_attempt=source_attempt,
+        source_actor=source_actor,
+        source_triggering_actor=source_triggering_actor,
+    )
 
 
 def verify_source_run(
@@ -402,6 +629,9 @@ def _parser() -> argparse.ArgumentParser:
     artifacts.add_argument("--provenance", type=Path)
     governance = subparsers.add_parser("governance-record")
     governance.add_argument("--record-json", type=Path, required=True)
+    governance.add_argument("--record-markdown", type=Path, required=True)
+    governance.add_argument("--policy", type=Path, required=True)
+    governance.add_argument("--snapshot", type=Path, required=True)
     governance.add_argument("--run-json", type=Path, required=True)
     governance.add_argument("--repository", required=True)
     governance.add_argument("--tag", required=True)
@@ -444,6 +674,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_recovery_governance_record(
                 record,
                 run,
+                policy_bytes=args.policy.read_bytes(),
+                snapshot_bytes=args.snapshot.read_bytes(),
+                governance_markdown=args.record_markdown.read_text(encoding="utf-8"),
                 repository=args.repository,
                 release_tag=args.tag,
                 release_commit=args.commit.strip().lower(),

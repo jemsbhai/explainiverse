@@ -30,6 +30,29 @@ from typing import Any, Callable, Mapping, Sequence
 _SHA = re.compile(r"[0-9a-f]{40}")
 _TAG = re.compile(r"v\d+\.\d+\.\d+")
 _MAX_SNAPSHOT_AGE = timedelta(minutes=30)
+_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
+_CUDA_EXCEPTION_TAG = "v0.15.0"
+_CUDA_EXCEPTION_VERSION = "0.15.0"
+_CUDA_EXCEPTION_PULL_REQUEST = 5
+_CUDA_EXCEPTION_APPROVED_AT = "2026-09-03"
+_CUDA_EXCEPTION_REASON = (
+    "Approved one-release CPU-only exception because isolated one- and two-GPU "
+    "release runners are unavailable."
+)
+_CUDA_EXCEPTION_DISCLOSURE = (
+    "Explainiverse 0.15.0 is CPU-verified; CUDA hardware validation was not performed "
+    "and this release makes no CUDA release-verification claim."
+)
+_CUDA_EXCEPTION_OMITTED_CHECKS = (
+    "CUDA single-GPU (Torch latest)",
+    "CUDA single-GPU (Torch minimum)",
+)
+_CUDA_EXCEPTION_OMITTED_JOBS = (
+    "CUDA single-GPU (Torch latest)",
+    "CUDA single-GPU (Torch minimum)",
+    "CUDA two-GPU scheduled (Torch latest)",
+    "CUDA two-GPU scheduled (Torch minimum)",
+)
 
 
 class ApiNotFoundError(RuntimeError):
@@ -55,6 +78,22 @@ def _nested(mapping: Mapping[str, Any], *keys: str) -> Any:
     return value
 
 
+def _strict_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON-shaped values without Python's bool/int or int/float coercion."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _strict_equal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _strict_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return bool(actual == expected)
+
+
 def _canonical_names(values: Sequence[Any], name: str) -> list[str]:
     names: list[str] = []
     for value in values:
@@ -66,18 +105,236 @@ def _canonical_names(values: Sequence[Any], name: str) -> list[str]:
     return sorted(names)
 
 
+def _validated_cuda_release_exception(policy: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the single reviewed exception after rejecting any scope drift."""
+    exception = _mapping(policy.get("cuda_release_exception"), "CUDA release exception policy")
+    expected_keys = {
+        "id",
+        "release_tag",
+        "package_version",
+        "merge_pull_request",
+        "omitted_required_checks",
+        "omitted_cuda_jobs",
+        "hardware_evidence_collected",
+        "cuda_release_verified",
+        "authorized_by",
+        "approved_at",
+        "reason",
+        "disclosure",
+    }
+    if set(exception) != expected_keys:
+        raise ValueError(
+            "CUDA release exception policy fields differ from the reviewed schema: "
+            f"expected {sorted(expected_keys)!r}, got {sorted(exception, key=str)!r}"
+        )
+
+    exact_fields = {
+        "id": _CUDA_EXCEPTION_ID,
+        "release_tag": _CUDA_EXCEPTION_TAG,
+        "package_version": _CUDA_EXCEPTION_VERSION,
+        "merge_pull_request": _CUDA_EXCEPTION_PULL_REQUEST,
+        "approved_at": _CUDA_EXCEPTION_APPROVED_AT,
+        "hardware_evidence_collected": False,
+        "cuda_release_verified": False,
+        "reason": _CUDA_EXCEPTION_REASON,
+        "disclosure": _CUDA_EXCEPTION_DISCLOSURE,
+    }
+    for field, expected in exact_fields.items():
+        actual = exception.get(field)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError(
+                f"CUDA release exception {field} must be exactly {expected!r}, " f"got {actual!r}"
+            )
+
+    omitted_checks = _canonical_names(
+        _sequence(
+            exception.get("omitted_required_checks"),
+            "CUDA release exception omitted required checks",
+        ),
+        "CUDA release exception omitted required checks",
+    )
+    if omitted_checks != sorted(_CUDA_EXCEPTION_OMITTED_CHECKS):
+        raise ValueError(
+            "CUDA release exception may omit exactly the two reviewed CUDA check contexts"
+        )
+    baseline_checks = _canonical_names(
+        _sequence(policy.get("required_checks"), "required checks policy"),
+        "required checks policy",
+    )
+    if not set(omitted_checks) <= set(baseline_checks):
+        raise ValueError("CUDA release exception checks are absent from required_checks")
+
+    omitted_jobs = _canonical_names(
+        _sequence(
+            exception.get("omitted_cuda_jobs"),
+            "CUDA release exception omitted CUDA jobs",
+        ),
+        "CUDA release exception omitted CUDA jobs",
+    )
+    if omitted_jobs != sorted(_CUDA_EXCEPTION_OMITTED_JOBS):
+        raise ValueError("CUDA release exception must omit exactly the four reviewed CUDA jobs")
+    cuda_policy = _mapping(policy.get("cuda_evidence"), "CUDA evidence policy")
+    required_jobs = _canonical_names(
+        _sequence(cuda_policy.get("required_jobs"), "CUDA evidence required jobs"),
+        "CUDA evidence required jobs",
+    )
+    if omitted_jobs != required_jobs:
+        raise ValueError(
+            "CUDA release exception omitted jobs must exactly match CUDA evidence required jobs"
+        )
+
+    authorized_by = _canonical_names(
+        _sequence(exception.get("authorized_by"), "CUDA release exception authorized_by"),
+        "CUDA release exception authorized_by",
+    )
+    principals = _canonical_names(
+        _sequence(policy.get("admin_snapshot_principals"), "admin_snapshot_principals"),
+        "admin_snapshot_principals",
+    )
+    if authorized_by != principals or authorized_by != ["jemsbhai"]:
+        raise ValueError(
+            "CUDA release exception authorization must exactly match the reviewed principal"
+        )
+
+    normalized = dict(exception)
+    normalized["omitted_required_checks"] = omitted_checks
+    normalized["omitted_cuda_jobs"] = omitted_jobs
+    normalized["authorized_by"] = authorized_by
+    return normalized
+
+
+def _resolve_cuda_release_exception(
+    policy: Mapping[str, Any], *, release_tag: Any, requested_exception_id: Any
+) -> Mapping[str, Any] | None:
+    """Resolve only an explicit request for the one exact, reviewed exception."""
+    exception = _validated_cuda_release_exception(policy)
+    if requested_exception_id in (None, ""):
+        return None
+    if not isinstance(requested_exception_id, str):
+        raise ValueError("CUDA release exception id must be a string")
+    if requested_exception_id != exception["id"]:
+        raise ValueError(
+            f"CUDA release exception id must be exactly {exception['id']!r}, "
+            f"got {requested_exception_id!r}"
+        )
+    if release_tag != exception["release_tag"]:
+        raise ValueError(
+            "CUDA release exception is restricted to "
+            f"{exception['release_tag']!r}, got {release_tag!r}"
+        )
+    return exception
+
+
+def _normalize_exception_pull_request(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Keep the immutable PR-to-merge fields used by the one-release exception."""
+    base = _mapping(raw.get("base"), "exception pull request base")
+    head = _mapping(raw.get("head"), "exception pull request head")
+    base_repository = _mapping(base.get("repo"), "exception pull request base repository")
+    head_repository = _mapping(head.get("repo"), "exception pull request head repository")
+    merged_by = _mapping(raw.get("merged_by"), "exception pull request merged_by")
+    return {
+        "number": raw.get("number"),
+        "state": raw.get("state"),
+        "merged": raw.get("merged"),
+        "merged_at": raw.get("merged_at"),
+        "merge_commit_sha": raw.get("merge_commit_sha"),
+        "base_ref": base.get("ref"),
+        "base_repository": base_repository.get("full_name"),
+        "head_sha": head.get("sha"),
+        "head_repository": head_repository.get("full_name"),
+        "merged_by": merged_by.get("login"),
+    }
+
+
+def _evaluate_exception_pull_request(
+    *,
+    policy: Mapping[str, Any],
+    exception: Mapping[str, Any],
+    observation: Mapping[str, Any],
+) -> list[str]:
+    """Require the release SHA to be PR #5's actual GitHub merge commit."""
+    violations: list[str] = []
+    pull_request = _mapping(
+        observation.get("cuda_exception_merge_pull_request"),
+        "CUDA exception merge pull request",
+    )
+    expected_keys = {
+        "number",
+        "state",
+        "merged",
+        "merged_at",
+        "merge_commit_sha",
+        "base_ref",
+        "base_repository",
+        "head_sha",
+        "head_repository",
+        "merged_by",
+    }
+    if set(pull_request) != expected_keys:
+        violations.append(
+            "CUDA exception merge pull request fields differ from the reviewed schema: "
+            f"expected {sorted(expected_keys)!r}, got {sorted(pull_request, key=str)!r}"
+        )
+
+    exact_fields = {
+        "number": exception["merge_pull_request"],
+        "state": "closed",
+        "merged": True,
+        "merge_commit_sha": observation.get("release_commit"),
+        "base_ref": policy.get("default_branch"),
+        "base_repository": policy.get("repository"),
+        "head_repository": policy.get("repository"),
+        "merged_by": exception["authorized_by"][0],
+    }
+    for field, expected in exact_fields.items():
+        actual = pull_request.get(field)
+        if type(actual) is not type(expected) or actual != expected:
+            violations.append(
+                f"CUDA exception merge pull request {field}: expected exactly "
+                f"{expected!r}, got {actual!r}"
+            )
+
+    merged_at = pull_request.get("merged_at")
+    if not isinstance(merged_at, str):
+        violations.append("CUDA exception merge pull request merged_at must be an ISO-8601 string")
+    else:
+        try:
+            parsed_merged_at = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+        except ValueError:
+            violations.append(
+                "CUDA exception merge pull request merged_at must be an ISO-8601 string"
+            )
+        else:
+            if parsed_merged_at.tzinfo is None or parsed_merged_at.utcoffset() is None:
+                violations.append(
+                    "CUDA exception merge pull request merged_at must include a timezone"
+                )
+    head_sha = pull_request.get("head_sha")
+    if not isinstance(head_sha, str) or _SHA.fullmatch(head_sha) is None:
+        violations.append(
+            "CUDA exception merge pull request head_sha must be a complete lowercase commit SHA"
+        )
+    return violations
+
+
 def load_policy(path: Path) -> tuple[Mapping[str, Any], str]:
     """Load a policy and return it with its exact-file SHA-256 digest."""
     raw = path.read_bytes()
     policy = _mapping(json.loads(raw), "release control policy")
-    if policy.get("schema_version") != 1:
+    if type(policy.get("schema_version")) is not int or policy.get("schema_version") != 1:
         raise ValueError("release control policy schema_version must be 1")
+    _validated_cuda_release_exception(policy)
     return policy, hashlib.sha256(raw).hexdigest()
 
 
 def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any]) -> list[str]:
     """Return every policy difference in deterministic order."""
     violations: list[str] = []
+    selected_exception = _resolve_cuda_release_exception(
+        policy,
+        release_tag=observation.get("release_tag"),
+        requested_exception_id=observation.get("cuda_exception_id"),
+    )
     expected_repository = policy.get("repository")
     if observation.get("repository") != expected_repository:
         violations.append(
@@ -99,6 +356,19 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
             f"capture_principal: expected one of {expected_principals!r}, "
             f"got {observation.get('capture_principal')!r}"
         )
+    if selected_exception is None:
+        if observation.get("cuda_exception_merge_pull_request") is not None:
+            violations.append(
+                "CUDA exception merge pull request must be absent without an explicit exception"
+            )
+    else:
+        violations.extend(
+            _evaluate_exception_pull_request(
+                policy=policy,
+                exception=selected_exception,
+                observation=observation,
+            )
+        )
 
     branch = _mapping(observation.get("branch_protection"), "branch_protection")
     branch_policy = _mapping(policy.get("branch_protection"), "branch_protection policy")
@@ -118,9 +388,13 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
         if actual is not expected:
             violations.append(f"main.{policy_name}: expected {expected!r}, got {actual!r}")
 
-    expected_checks = _canonical_names(
+    baseline_checks = _canonical_names(
         _sequence(policy.get("required_checks"), "required_checks"), "required_checks"
     )
+    omitted_checks = (
+        set(selected_exception["omitted_required_checks"]) if selected_exception else set()
+    )
+    evidence_checks = [name for name in baseline_checks if name not in omitted_checks]
     try:
         actual_checks = _canonical_names(
             _sequence(
@@ -132,9 +406,9 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
     except (KeyError, ValueError) as exc:
         violations.append(f"main.required_checks: invalid or missing ({exc})")
         actual_checks = []
-    if actual_checks != expected_checks:
+    if actual_checks != baseline_checks:
         violations.append(
-            f"main.required_checks: expected {expected_checks!r}, got {actual_checks!r}"
+            f"main.required_checks: expected {baseline_checks!r}, got {actual_checks!r}"
         )
 
     provider_policy = _mapping(
@@ -160,7 +434,7 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
     except (KeyError, ValueError) as exc:
         violations.append(f"main.required_check_bindings: invalid or missing ({exc})")
         actual_bindings = []
-    expected_bindings = sorted((name, expected_app_id) for name in expected_checks)
+    expected_bindings = sorted((name, expected_app_id) for name in baseline_checks)
     if actual_bindings != expected_bindings:
         violations.append(
             f"main.required_check_bindings: expected {expected_bindings!r}, "
@@ -170,10 +444,10 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
     workflow_policy = _mapping(
         policy.get("required_check_workflows"), "required check workflows policy"
     )
-    if set(workflow_policy) != set(expected_checks):
+    if set(workflow_policy) != set(baseline_checks):
         violations.append(
             "required_check_workflows: keys must exactly match required_checks; "
-            f"expected {sorted(expected_checks)!r}, got {sorted(workflow_policy)!r}"
+            f"expected {sorted(baseline_checks)!r}, got {sorted(workflow_policy)!r}"
         )
 
     immutable_policy = _mapping(policy.get("immutable_releases"), "immutable releases policy")
@@ -197,7 +471,7 @@ def evaluate_controls(policy: Mapping[str, Any], observation: Mapping[str, Any])
         name = check.get("name")
         if isinstance(name, str) and name not in latest_checks:
             latest_checks[name] = check
-    for name in expected_checks:
+    for name in evidence_checks:
         latest_check = latest_checks.get(name)
         if latest_check is None:
             violations.append(f"release commit check {name!r}: missing")
@@ -411,12 +685,26 @@ def capture_observation(
     release_tag: str,
     release_commit: str,
     get_json: Callable[[str], Any],
+    cuda_exception_id: str | None = None,
 ) -> Mapping[str, Any]:
     """Capture all policy-controlled GitHub state through an injected client."""
+    selected_exception = _resolve_cuda_release_exception(
+        policy,
+        release_tag=release_tag,
+        requested_exception_id=cuda_exception_id,
+    )
     repository = str(policy["repository"])
     branch = str(policy["default_branch"])
     environment_name = str(_mapping(policy["pypi_environment"], "environment")["name"])
     root = f"repos/{repository}"
+    exception_pull_request = None
+    if selected_exception is not None:
+        pull_number = selected_exception["merge_pull_request"]
+        raw_pull_request = _mapping(
+            get_json(f"{root}/pulls/{pull_number}"),
+            "exception pull request response",
+        )
+        exception_pull_request = _normalize_exception_pull_request(raw_pull_request)
 
     try:
         immutable_releases = _mapping(
@@ -615,6 +903,8 @@ def capture_observation(
         "capture_principal": principal,
         "release_tag": release_tag,
         "release_commit": release_commit,
+        "cuda_exception_id": cuda_exception_id,
+        "cuda_exception_merge_pull_request": exception_pull_request,
         "tag_exists": tag_exists,
         "immutable_releases": {
             "enabled": immutable_releases.get("enabled"),
@@ -637,6 +927,11 @@ def make_snapshot(
     observation: Mapping[str, Any],
     workflow_run: Mapping[str, Any],
 ) -> Mapping[str, Any]:
+    selected_exception = _resolve_cuda_release_exception(
+        policy,
+        release_tag=observation.get("release_tag"),
+        requested_exception_id=observation.get("cuda_exception_id"),
+    )
     violations = evaluate_controls(policy, observation)
     return {
         "schema_version": 1,
@@ -646,6 +941,9 @@ def make_snapshot(
         "observation": dict(observation),
         "repository_controls_accepted": not violations,
         "violations": violations,
+        "cuda_release_exception": (
+            dict(selected_exception) if selected_exception is not None else None
+        ),
         "pypi_trusted_publisher": {
             "expected": dict(
                 _mapping(policy.get("pypi_trusted_publisher"), "trusted publisher policy")
@@ -687,11 +985,12 @@ def verify_snapshot(
     repository: str,
     release_tag: str,
     release_commit: str,
+    cuda_exception_id: str | None = None,
     now: datetime | None = None,
     max_age: timedelta = _MAX_SNAPSHOT_AGE,
 ) -> None:
     """Verify a preflight artifact before a tag workflow may build or publish."""
-    if snapshot.get("schema_version") != 1:
+    if type(snapshot.get("schema_version")) is not int or snapshot.get("schema_version") != 1:
         raise ValueError("external-control snapshot schema_version must be 1")
     if snapshot.get("policy_sha256") != policy_sha256:
         raise ValueError("external-control snapshot was produced from a different policy file")
@@ -708,6 +1007,20 @@ def verify_snapshot(
                 f"external-control snapshot {field} mismatch: expected "
                 f"{expected_value!r}, got {observation.get(field)!r}"
             )
+    observed_exception_id = observation.get("cuda_exception_id")
+    if observed_exception_id != cuda_exception_id:
+        raise ValueError(
+            "external-control snapshot CUDA exception id mismatch: expected "
+            f"{cuda_exception_id!r}, got {observed_exception_id!r}"
+        )
+    selected_exception = _resolve_cuda_release_exception(
+        policy,
+        release_tag=release_tag,
+        requested_exception_id=cuda_exception_id,
+    )
+    expected_exception = dict(selected_exception) if selected_exception is not None else None
+    if not _strict_equal(snapshot.get("cuda_release_exception"), expected_exception):
+        raise ValueError("external-control snapshot CUDA release exception differs from policy")
     violations = evaluate_controls(policy, observation)
     if violations:
         raise ValueError("external-control snapshot fails policy: " + "; ".join(violations))
@@ -871,6 +1184,83 @@ def verify_cuda_evidence(
     }
 
 
+def resolve_cuda_release_gate(
+    *,
+    policy: Mapping[str, Any],
+    release_tag: str,
+    release_commit: str,
+    cuda_run: Mapping[str, Any] | None,
+    cuda_jobs: Mapping[str, Any] | None,
+    cuda_run_id: str | None,
+    cuda_exception_id: str | None,
+    repository: str,
+) -> tuple[Mapping[str, Any], Mapping[str, Any] | None]:
+    """Resolve the normal hardware path or the one exact CPU-only exception."""
+    selected_exception = _resolve_cuda_release_exception(
+        policy,
+        release_tag=release_tag,
+        requested_exception_id=cuda_exception_id,
+    )
+    cuda_values = (cuda_run, cuda_jobs, cuda_run_id)
+    supplied_cuda_values = tuple(value not in (None, "") for value in cuda_values)
+
+    if selected_exception is not None:
+        if any(supplied_cuda_values):
+            raise ValueError(
+                "CUDA hardware evidence inputs must be absent when the CPU-only exception is used"
+            )
+        gate = {
+            "schema_version": 1,
+            "mode": "cpu_only_exception",
+            "status": "not_run",
+            "exception_id": selected_exception["id"],
+            "release_tag": release_tag,
+            "release_commit": release_commit,
+            "package_version": selected_exception["package_version"],
+            "merge_pull_request": selected_exception["merge_pull_request"],
+            "merge_commit_sha": release_commit,
+            "hardware_evidence_collected": False,
+            "cuda_release_verified": False,
+            "omitted_required_checks": list(selected_exception["omitted_required_checks"]),
+            "omitted_cuda_jobs": list(selected_exception["omitted_cuda_jobs"]),
+            "authorized_by": list(selected_exception["authorized_by"]),
+            "approved_at": selected_exception["approved_at"],
+            "reason": selected_exception["reason"],
+            "disclosure": selected_exception["disclosure"],
+        }
+        return gate, None
+
+    if not all(supplied_cuda_values):
+        raise ValueError(
+            "CUDA hardware mode requires --cuda-run-id, --cuda-run-json, and "
+            "--cuda-jobs-json together"
+        )
+    assert cuda_run is not None
+    assert cuda_jobs is not None
+    assert cuda_run_id is not None
+    validated_run_id = _validated_run_id(cuda_run_id, "cuda-run-id")
+    evidence = verify_cuda_evidence(
+        policy,
+        cuda_run,
+        cuda_jobs,
+        run_id=validated_run_id,
+        repository=repository,
+        release_commit=release_commit,
+    )
+    gate = {
+        "schema_version": 1,
+        "mode": "hardware_evidence",
+        "status": "verified",
+        "exception_id": None,
+        "release_tag": release_tag,
+        "release_commit": release_commit,
+        "hardware_evidence_collected": True,
+        "cuda_release_verified": True,
+        "cuda_run_id": validated_run_id,
+    }
+    return gate, evidence
+
+
 def verify_preflight_source_run(
     run: Mapping[str, Any],
     snapshot: Mapping[str, Any],
@@ -939,9 +1329,10 @@ def bind_snapshot_to_workflow(
     release_tag: str,
     release_commit: str,
     workflow_run: Mapping[str, Any],
-    cuda_run: Mapping[str, Any],
-    cuda_jobs: Mapping[str, Any],
-    cuda_run_id: str,
+    cuda_run: Mapping[str, Any] | None = None,
+    cuda_jobs: Mapping[str, Any] | None = None,
+    cuda_run_id: str | None = None,
+    cuda_exception_id: str | None = None,
     now: datetime | None = None,
     max_age: timedelta = _MAX_SNAPSHOT_AGE,
 ) -> Mapping[str, Any]:
@@ -953,6 +1344,7 @@ def bind_snapshot_to_workflow(
         repository=repository,
         release_tag=release_tag,
         release_commit=release_commit,
+        cuda_exception_id=cuda_exception_id,
         now=now,
         max_age=max_age,
     )
@@ -970,15 +1362,58 @@ def bind_snapshot_to_workflow(
     _validated_run_id(workflow_run.get("run_attempt"), "preflight workflow run attempt")
     bound = dict(snapshot)
     bound["workflow_run"] = dict(workflow_run)
-    bound["cuda_evidence"] = verify_cuda_evidence(
-        policy,
-        cuda_run,
-        cuda_jobs,
-        run_id=cuda_run_id,
-        repository=repository,
+    gate, evidence = resolve_cuda_release_gate(
+        policy=policy,
+        release_tag=release_tag,
         release_commit=release_commit,
+        cuda_run=cuda_run,
+        cuda_jobs=cuda_jobs,
+        cuda_run_id=cuda_run_id,
+        cuda_exception_id=cuda_exception_id,
+        repository=repository,
     )
+    bound["cuda_release_gate"] = gate
+    if evidence is None:
+        bound.pop("cuda_evidence", None)
+    else:
+        bound["cuda_evidence"] = evidence
     return bound
+
+
+def verify_bound_cuda_release_gate(
+    *,
+    policy: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    release_tag: str,
+    release_commit: str,
+    repository: str,
+    cuda_run: Mapping[str, Any] | None = None,
+    cuda_jobs: Mapping[str, Any] | None = None,
+    cuda_run_id: str | None = None,
+    cuda_exception_id: str | None = None,
+) -> Mapping[str, Any]:
+    """Re-resolve and exactly match the bound release-gate decision."""
+    expected_gate, live_evidence = resolve_cuda_release_gate(
+        policy=policy,
+        release_tag=release_tag,
+        release_commit=release_commit,
+        cuda_run=cuda_run,
+        cuda_jobs=cuda_jobs,
+        cuda_run_id=cuda_run_id,
+        cuda_exception_id=cuda_exception_id,
+        repository=repository,
+    )
+    embedded_gate = _mapping(snapshot.get("cuda_release_gate"), "snapshot CUDA release gate")
+    if not _strict_equal(dict(embedded_gate), dict(expected_gate)):
+        raise ValueError("live CUDA release gate differs from the attested preflight gate")
+    if live_evidence is None:
+        if "cuda_evidence" in snapshot:
+            raise ValueError("CPU-only exception snapshot must not contain CUDA hardware evidence")
+    else:
+        embedded_evidence = _mapping(snapshot.get("cuda_evidence"), "snapshot CUDA evidence")
+        if not _strict_equal(dict(embedded_evidence), dict(live_evidence)):
+            raise ValueError("live CUDA evidence differs from the attested preflight evidence")
+    return embedded_gate
 
 
 def verify_bound_cuda_evidence(
@@ -992,17 +1427,19 @@ def verify_bound_cuda_evidence(
     release_commit: str,
 ) -> None:
     """Re-query and require byte-equivalent normalized CUDA evidence at publish time."""
-    embedded = _mapping(snapshot.get("cuda_evidence"), "snapshot CUDA evidence")
-    live = verify_cuda_evidence(
-        policy,
-        cuda_run,
-        cuda_jobs,
-        run_id=cuda_run_id,
-        repository=repository,
+    verify_bound_cuda_release_gate(
+        policy=policy,
+        snapshot=snapshot,
+        release_tag=str(
+            _mapping(snapshot.get("observation"), "snapshot observation").get("release_tag")
+        ),
         release_commit=release_commit,
+        repository=repository,
+        cuda_run=cuda_run,
+        cuda_jobs=cuda_jobs,
+        cuda_run_id=cuda_run_id,
+        cuda_exception_id=None,
     )
-    if dict(embedded) != dict(live):
-        raise ValueError("live CUDA evidence differs from the attested preflight evidence")
 
 
 def _validated_release_values(tag: str, commit: str) -> tuple[str, str]:
@@ -1032,6 +1469,39 @@ def _current_workflow_run() -> Mapping[str, Any]:
     }
 
 
+def _write_json_with_sha256(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    path.write_text(encoded, encoding="utf-8")
+    path.with_suffix(path.suffix + ".sha256").write_text(
+        f"{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}  {path.name}\n",
+        encoding="utf-8",
+    )
+
+
+def _write_github_outputs(path: Path | None, gate: Mapping[str, Any]) -> None:
+    if path is None:
+        return
+    mode = gate.get("mode")
+    if mode not in {"hardware_evidence", "cpu_only_exception"}:
+        raise ValueError(f"cannot emit unsupported CUDA release mode {mode!r}")
+    run_id = gate.get("cuda_run_id", "")
+    exception_id = gate.get("exception_id") or ""
+    values = {
+        "cuda_mode": mode,
+        "cuda_run_id": run_id,
+        "cuda_exception_id": exception_id,
+    }
+    if any(
+        not isinstance(value, str) or "\n" in value or "\r" in value for value in values.values()
+    ):
+        raise ValueError("CUDA release GitHub output values must be single-line strings")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        for name, value in values.items():
+            stream.write(f"{name}={value}\n")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1041,6 +1511,7 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--repository", required=True)
     capture.add_argument("--tag", required=True)
     capture.add_argument("--commit", required=True)
+    capture.add_argument("--cuda-exception-id")
     verify = subparsers.add_parser("verify")
     verify.add_argument("--policy", type=Path, required=True)
     verify.add_argument("--snapshot", type=Path, required=True)
@@ -1049,9 +1520,11 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--commit", required=True)
     verify.add_argument("--run-json", type=Path)
     verify.add_argument("--run-id")
-    verify.add_argument("--cuda-run-json", type=Path, required=True)
-    verify.add_argument("--cuda-jobs-json", type=Path, required=True)
-    verify.add_argument("--cuda-run-id", required=True)
+    verify.add_argument("--cuda-run-json", type=Path)
+    verify.add_argument("--cuda-jobs-json", type=Path)
+    verify.add_argument("--cuda-run-id")
+    verify.add_argument("--cuda-exception-id")
+    verify.add_argument("--github-output", type=Path)
     bind = subparsers.add_parser("bind")
     bind.add_argument("--policy", type=Path, required=True)
     bind.add_argument("--snapshot", type=Path, required=True)
@@ -1059,9 +1532,12 @@ def _parser() -> argparse.ArgumentParser:
     bind.add_argument("--repository", required=True)
     bind.add_argument("--tag", required=True)
     bind.add_argument("--commit", required=True)
-    bind.add_argument("--cuda-run-json", type=Path, required=True)
-    bind.add_argument("--cuda-jobs-json", type=Path, required=True)
-    bind.add_argument("--cuda-run-id", required=True)
+    bind.add_argument("--cuda-run-json", type=Path)
+    bind.add_argument("--cuda-jobs-json", type=Path)
+    bind.add_argument("--cuda-run-id")
+    bind.add_argument("--cuda-exception-id")
+    bind.add_argument("--github-output", type=Path)
+    bind.add_argument("--cuda-gate-output", type=Path)
     return parser
 
 
@@ -1077,14 +1553,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command in {"verify", "bind"}:
             snapshot = _mapping(json.loads(args.snapshot.read_text(encoding="utf-8")), "snapshot")
-            cuda_run_id = _validated_run_id(args.cuda_run_id, "cuda-run-id")
-            cuda_run = _mapping(
-                json.loads(args.cuda_run_json.read_text(encoding="utf-8")),
-                "CUDA run JSON",
+            cuda_run_id = args.cuda_run_id or None
+            cuda_run = (
+                _mapping(
+                    json.loads(args.cuda_run_json.read_text(encoding="utf-8")),
+                    "CUDA run JSON",
+                )
+                if args.cuda_run_json is not None
+                else None
             )
-            cuda_jobs = _mapping(
-                json.loads(args.cuda_jobs_json.read_text(encoding="utf-8")),
-                "CUDA jobs JSON",
+            cuda_jobs = (
+                _mapping(
+                    json.loads(args.cuda_jobs_json.read_text(encoding="utf-8")),
+                    "CUDA jobs JSON",
+                )
+                if args.cuda_jobs_json is not None
+                else None
             )
         if args.command == "bind":
             bound = bind_snapshot_to_workflow(
@@ -1098,14 +1582,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cuda_run=cuda_run,
                 cuda_jobs=cuda_jobs,
                 cuda_run_id=cuda_run_id,
+                cuda_exception_id=args.cuda_exception_id,
             )
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            encoded = json.dumps(bound, indent=2, sort_keys=True) + "\n"
-            args.output.write_text(encoded, encoding="utf-8")
-            args.output.with_suffix(args.output.suffix + ".sha256").write_text(
-                f"{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}  {args.output.name}\n",
-                encoding="utf-8",
-            )
+            _write_json_with_sha256(args.output, bound)
+            gate = _mapping(bound.get("cuda_release_gate"), "bound CUDA release gate")
+            if args.cuda_gate_output is not None:
+                _write_json_with_sha256(args.cuda_gate_output, gate)
+            _write_github_outputs(args.github_output, gate)
             return 0
         if args.command == "verify":
             verify_snapshot(
@@ -1115,6 +1598,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repository=args.repository,
                 release_tag=tag,
                 release_commit=commit,
+                cuda_exception_id=args.cuda_exception_id,
             )
             if (args.run_json is None) != (args.run_id is None):
                 raise ValueError("--run-json and --run-id must be supplied together")
@@ -1131,15 +1615,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     repository=args.repository,
                     release_commit=commit,
                 )
-            verify_bound_cuda_evidence(
+            gate = verify_bound_cuda_release_gate(
                 policy=policy,
                 snapshot=snapshot,
+                release_tag=tag,
+                release_commit=commit,
+                repository=args.repository,
                 cuda_run=cuda_run,
                 cuda_jobs=cuda_jobs,
                 cuda_run_id=cuda_run_id,
-                repository=args.repository,
-                release_commit=commit,
+                cuda_exception_id=args.cuda_exception_id,
             )
+            _write_github_outputs(args.github_output, gate)
             return 0
 
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
@@ -1151,6 +1638,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             release_tag=tag,
             release_commit=commit,
             get_json=api.get,
+            cuda_exception_id=args.cuda_exception_id,
         )
         snapshot = make_snapshot(
             policy=policy,

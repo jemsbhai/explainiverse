@@ -124,6 +124,9 @@ unrepresentable objective raises `ValueError` instead of placing `NaN` or infini
 - Consistency defaults to stable feature order at a top-k cutoff tie. Detail mode records tie
   incidence; `tie_policy="reject"` refuses a tie spanning the cutoff and
   `tie_policy="include_all"` includes the complete tied set. Comparisons reject mixed policies.
+- `ExplanationSuite.run()` returns a detached mapping, so clearing or changing the returned
+  dictionary no longer changes `suite.explanations`. The contained `Explanation` objects remain
+  shared.
 - `ExplanationSuite.compare()` uses semantic target equality, not `repr` identity.
 - Metric registry entries now expose reviewed `stochasticity` values (`deterministic`,
   `conditional`, or `stochastic`). The legacy `stochastic` boolean remains a derived view.
@@ -203,6 +206,26 @@ Python/JS/tutorial gates, attaches hashes, an SBOM, and provenance, publishes th
 `pypi` environment, and then creates the GitHub Release. Branch protection, immutable-tag
 rules, environment reviewers, and the PyPI Trusted Publisher are external repository/service
 settings; the release checklist must verify them rather than infer them from workflow YAML.
+Release `0.15.0` has one explicit CPU-only exception,
+`EXPLAINIVERSE-v0.15.0-CPU-ONLY`. The two required single-GPU contexts may be removed only long
+enough to merge PR #5 and must be restored immediately afterward; all four one-/two-GPU release
+jobs remain not run. The exception does not convert a missing GPU run into successful evidence:
+the attested release gate records `hardware_evidence_collected=false`,
+`cuda_release_verified=false`, and the immutable governance disclosure lists every omitted check
+and job. All 23 branch-protection contexts and app bindings, all 21 successful non-CUDA
+exact-commit results, the complete CPU release suite, reproducible artifacts, tag verification,
+attestations, and Trusted Publishing remain mandatory. The exception ID is bound to this tag and
+package version and cannot authorize a later release.
+
+For that exception, capture and dispatch preflight with
+`--cuda-exception-id EXPLAINIVERSE-v0.15.0-CPU-ONLY` /
+`cuda_exception_id=EXPLAINIVERSE-v0.15.0-CPU-ONLY`, omitting `cuda_run_id`. Restore both CUDA
+contexts to `main` protection immediately after PR #5 merges, wait for the 21 non-CUDA
+`push`/`main` results on that merge commit, and capture/dispatch preflight only after the full
+23-context protection is live again. The capture binds the candidate to GitHub PR #5's actual
+`merge_commit_sha`; its attested snapshot is the restoration proof retained with release
+governance. Normal and future releases omit `cuda_exception_id` and supply the verified CUDA run
+ID.
 Dispatch the workflow from the tag itself, with the same tag as its input—for example
 `gh workflow run publish-pypi.yml --ref v0.15.0 -f tag=v0.15.0`. The workflow rejects a branch
 dispatch even if its checkout was later pointed at the tag, because attestation provenance is

@@ -21,6 +21,7 @@ SPEC.loader.exec_module(controls)
 
 POLICY_PATH = ROOT / ".github" / "release-control-policy.json"
 SHA = "a" * 40
+CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
 
 
 def _policy():
@@ -80,9 +81,26 @@ def test_current_workflow_run_records_attempt_and_triggering_actor(monkeypatch):
     }
 
 
-def _matching_observation():
+def _matching_observation(cuda_exception_id=None):
     policy, _ = _policy()
     checks = list(policy["required_checks"])
+    evidence_checks = checks
+    exception_pull_request = None
+    if cuda_exception_id is not None:
+        omitted = set(policy["cuda_release_exception"]["omitted_required_checks"])
+        evidence_checks = [name for name in checks if name not in omitted]
+        exception_pull_request = {
+            "number": 5,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-09-03T12:00:00Z",
+            "merge_commit_sha": SHA,
+            "base_ref": "main",
+            "base_repository": policy["repository"],
+            "head_sha": "b" * 40,
+            "head_repository": policy["repository"],
+            "merged_by": "jemsbhai",
+        }
     tag_policy = policy["tag_ruleset"]
     environment_policy = policy["pypi_environment"]
     provider = policy["required_check_provider"]
@@ -92,6 +110,8 @@ def _matching_observation():
         "capture_principal": "jemsbhai",
         "release_tag": "v0.15.0",
         "release_commit": SHA,
+        "cuda_exception_id": cuda_exception_id,
+        "cuda_exception_merge_pull_request": exception_pull_request,
         "tag_exists": False,
         "immutable_releases": {"enabled": True, "enforced_by_owner": False},
         "branch_protection": {
@@ -126,7 +146,7 @@ def _matching_observation():
                     "run_attempt": 1,
                 },
             }
-            for index, name in enumerate(checks)
+            for index, name in enumerate(evidence_checks)
         ],
         "rulesets": [
             {
@@ -212,6 +232,136 @@ def _cuda_jobs(commit=SHA):
 def test_reviewed_control_policy_has_a_falsifiably_green_fixture():
     policy, _ = _policy()
     assert controls.evaluate_controls(policy, _matching_observation()) == []
+
+
+def test_explicit_v0150_exception_requires_23_branch_controls_and_21_check_results():
+    policy, _ = _policy()
+    observation = _matching_observation(CUDA_EXCEPTION_ID)
+
+    assert len(policy["required_checks"]) == 23
+    assert len(observation["branch_protection"]["required_status_checks"]["contexts"]) == 23
+    assert len(observation["check_runs"]) == 21
+    assert controls.evaluate_controls(policy, observation) == []
+
+
+def test_21_check_result_set_is_rejected_without_the_explicit_exception():
+    policy, _ = _policy()
+    observation = _matching_observation(CUDA_EXCEPTION_ID)
+    observation["cuda_exception_id"] = None
+    observation["cuda_exception_merge_pull_request"] = None
+
+    violations = controls.evaluate_controls(policy, observation)
+
+    for name in policy["cuda_release_exception"]["omitted_required_checks"]:
+        assert any(f"release commit check {name!r}: missing" in value for value in violations)
+
+
+def test_exception_rejects_a_21_check_branch_protection_snapshot():
+    policy, _ = _policy()
+    observation = _matching_observation(CUDA_EXCEPTION_ID)
+    omitted = set(policy["cuda_release_exception"]["omitted_required_checks"])
+    required_status = observation["branch_protection"]["required_status_checks"]
+    required_status["contexts"] = [
+        name for name in required_status["contexts"] if name not in omitted
+    ]
+    required_status["checks"] = [
+        binding for binding in required_status["checks"] if binding["context"] not in omitted
+    ]
+
+    violations = controls.evaluate_controls(policy, observation)
+
+    assert any("main.required_checks" in violation for violation in violations)
+    assert any("main.required_check_bindings" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "match"),
+    [
+        ("id", "CUDA-ANY-RELEASE", "id must be exactly"),
+        ("release_tag", "v0.15.1", "release_tag must be exactly"),
+        ("package_version", "0.15.1", "package_version must be exactly"),
+        ("merge_pull_request", 6, "merge_pull_request must be exactly"),
+        ("merge_pull_request", 5.0, "merge_pull_request must be exactly"),
+        ("merge_pull_request", True, "merge_pull_request must be exactly"),
+        ("hardware_evidence_collected", True, "must be exactly False"),
+        ("hardware_evidence_collected", 0, "must be exactly False"),
+        ("cuda_release_verified", True, "must be exactly False"),
+        ("cuda_release_verified", 0, "must be exactly False"),
+        (
+            "reason",
+            "Approved one-release CPU-only exception.",
+            "reason must be exactly",
+        ),
+        (
+            "disclosure",
+            "CUDA was not tested.",
+            "disclosure must be exactly",
+        ),
+        (
+            "omitted_required_checks",
+            ["Full extras, quality, and package"],
+            "exactly the two reviewed CUDA check contexts",
+        ),
+        (
+            "omitted_cuda_jobs",
+            ["CUDA single-GPU (Torch latest)"],
+            "exactly the four reviewed CUDA jobs",
+        ),
+    ],
+)
+def test_exception_policy_rejects_scope_or_identity_drift(field, replacement, match):
+    policy, _ = _policy()
+    policy = copy.deepcopy(policy)
+    policy["cuda_release_exception"][field] = replacement
+
+    with pytest.raises(ValueError, match=match):
+        controls.evaluate_controls(policy, _matching_observation(CUDA_EXCEPTION_ID))
+
+
+@pytest.mark.parametrize(
+    ("tag", "exception_id", "match"),
+    [
+        ("v0.15.0", "wrong-exception", "id must be exactly"),
+        ("v0.15.1", CUDA_EXCEPTION_ID, "restricted to 'v0.15.0'"),
+    ],
+)
+def test_exception_resolution_rejects_wrong_id_or_any_other_tag(tag, exception_id, match):
+    policy, _ = _policy()
+
+    with pytest.raises(ValueError, match=match):
+        controls._resolve_cuda_release_exception(
+            policy,
+            release_tag=tag,
+            requested_exception_id=exception_id,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "match"),
+    [
+        ("number", 5.0, "number"),
+        ("number", False, "number"),
+        ("number", 6, "number"),
+        ("state", "open", "state"),
+        ("merged", 1, "merged"),
+        ("merged", False, "merged"),
+        ("merge_commit_sha", "c" * 40, "merge_commit_sha"),
+        ("base_ref", "develop", "base_ref"),
+        ("base_repository", "attacker/fork", "base_repository"),
+        ("head_repository", "attacker/fork", "head_repository"),
+        ("merged_by", "someone-else", "merged_by"),
+        ("merged_at", "not-a-time", "merged_at"),
+        ("head_sha", "short", "head_sha"),
+    ],
+)
+def test_exception_is_hard_bound_to_pr5_actual_merge_commit(field, replacement, match):
+    policy, _ = _policy()
+    observation = _matching_observation(CUDA_EXCEPTION_ID)
+    observation["cuda_exception_merge_pull_request"][field] = replacement
+
+    violations = controls.evaluate_controls(policy, observation)
+
+    assert any(match in violation for violation in violations)
 
 
 @pytest.mark.parametrize("replacement", [None, False, 1, "true"])
@@ -367,6 +517,71 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
     if immutable_not_found:
         violations = controls.evaluate_controls(policy, captured)
         assert any("immutable_releases.enabled" in value for value in violations)
+
+
+def test_exception_capture_reads_and_binds_pr5_merge_metadata():
+    policy, _ = _policy()
+    observation = _matching_observation(CUDA_EXCEPTION_ID)
+    root = f"repos/{policy['repository']}"
+    pull_request = observation["cuda_exception_merge_pull_request"]
+    responses = {
+        f"{root}/pulls/5": {
+            "number": pull_request["number"],
+            "state": pull_request["state"],
+            "merged": pull_request["merged"],
+            "merged_at": pull_request["merged_at"],
+            "merge_commit_sha": pull_request["merge_commit_sha"],
+            "base": {
+                "ref": pull_request["base_ref"],
+                "repo": {"full_name": pull_request["base_repository"]},
+            },
+            "head": {
+                "sha": pull_request["head_sha"],
+                "repo": {"full_name": pull_request["head_repository"]},
+            },
+            "merged_by": {"login": pull_request["merged_by"]},
+        },
+        f"{root}/immutable-releases": observation["immutable_releases"],
+        f"{root}/rulesets": [{"id": 7, "name": policy["tag_ruleset"]["name"]}],
+        f"{root}/rulesets/7": observation["rulesets"][0],
+        f"{root}/environments/pypi/deployment-branch-policies": {
+            "branch_policies": observation["deployment_policies"]
+        },
+        f"{root}/actions/secrets": {"secrets": []},
+        f"{root}/environments/pypi/secrets": {"secrets": []},
+        f"{root}/commits/{SHA}/check-runs?per_page=100": {
+            "total_count": len(observation["check_runs"]),
+            "check_runs": observation["check_runs"],
+        },
+        f"{root}/branches/main/protection": observation["branch_protection"],
+        f"{root}/environments/pypi": observation["pypi_environment"],
+        "user": {"login": "jemsbhai"},
+    }
+    for check in observation["check_runs"]:
+        run = check["workflow_run"]
+        responses[f"{root}/actions/runs/{run['id']}"] = {
+            **run,
+            "repository": {"full_name": run["repository"]},
+        }
+    requested = []
+
+    def get_json(path):
+        requested.append(path)
+        if path == f"{root}/git/ref/tags/v0.15.0":
+            raise controls.ApiNotFoundError(path)
+        return responses[path]
+
+    captured = controls.capture_observation(
+        policy=policy,
+        release_tag="v0.15.0",
+        release_commit=SHA,
+        get_json=get_json,
+        cuda_exception_id=CUDA_EXCEPTION_ID,
+    )
+
+    assert f"{root}/pulls/5" in requested
+    assert captured == observation
+    assert controls.evaluate_controls(policy, captured) == []
 
 
 def test_snapshot_is_bound_to_exact_policy_repository_tag_and_commit():
@@ -557,6 +772,187 @@ def test_admin_snapshot_binding_requires_freshness_and_same_dispatch_actor():
             cuda_jobs=_cuda_jobs(),
             cuda_run_id="456",
             now=now + timedelta(hours=1),
+        )
+
+
+def test_exception_snapshot_binds_an_explicit_cpu_only_gate_without_cuda_evidence():
+    policy, digest = _policy()
+    now = datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc)
+    snapshot = controls.make_snapshot(
+        policy=policy,
+        policy_sha256=digest,
+        observation=_matching_observation(CUDA_EXCEPTION_ID),
+        workflow_run={},
+    )
+    snapshot["observed_at"] = (now - timedelta(minutes=1)).isoformat()
+
+    bound = controls.bind_snapshot_to_workflow(
+        policy=policy,
+        policy_sha256=digest,
+        snapshot=snapshot,
+        repository=policy["repository"],
+        release_tag="v0.15.0",
+        release_commit=SHA,
+        workflow_run=_preflight_workflow_run(),
+        cuda_exception_id=CUDA_EXCEPTION_ID,
+        now=now,
+    )
+
+    gate = bound["cuda_release_gate"]
+    assert gate == {
+        "schema_version": 1,
+        "mode": "cpu_only_exception",
+        "status": "not_run",
+        "exception_id": CUDA_EXCEPTION_ID,
+        "release_tag": "v0.15.0",
+        "release_commit": SHA,
+        "package_version": "0.15.0",
+        "merge_pull_request": 5,
+        "merge_commit_sha": SHA,
+        "hardware_evidence_collected": False,
+        "cuda_release_verified": False,
+        "omitted_required_checks": sorted(
+            policy["cuda_release_exception"]["omitted_required_checks"]
+        ),
+        "omitted_cuda_jobs": sorted(policy["cuda_evidence"]["required_jobs"]),
+        "authorized_by": ["jemsbhai"],
+        "approved_at": "2026-09-03",
+        "reason": policy["cuda_release_exception"]["reason"],
+        "disclosure": policy["cuda_release_exception"]["disclosure"],
+    }
+    assert "cuda_evidence" not in bound
+    assert bound["cuda_release_exception"] == policy["cuda_release_exception"] | {
+        "omitted_required_checks": sorted(
+            policy["cuda_release_exception"]["omitted_required_checks"]
+        ),
+        "omitted_cuda_jobs": sorted(policy["cuda_release_exception"]["omitted_cuda_jobs"]),
+    }
+    assert (
+        controls.verify_bound_cuda_release_gate(
+            policy=policy,
+            snapshot=bound,
+            release_tag="v0.15.0",
+            release_commit=SHA,
+            repository=policy["repository"],
+            cuda_exception_id=CUDA_EXCEPTION_ID,
+        )["mode"]
+        == "cpu_only_exception"
+    )
+
+
+@pytest.mark.parametrize(
+    ("cuda_run", "cuda_jobs", "cuda_run_id"),
+    [
+        ({}, None, None),
+        (None, {}, None),
+        (None, None, "456"),
+        ({}, {}, "456"),
+    ],
+)
+def test_exception_rejects_any_cuda_hardware_evidence_input(cuda_run, cuda_jobs, cuda_run_id):
+    policy, _ = _policy()
+
+    with pytest.raises(ValueError, match="must be absent"):
+        controls.resolve_cuda_release_gate(
+            policy=policy,
+            release_tag="v0.15.0",
+            release_commit=SHA,
+            cuda_run=cuda_run,
+            cuda_jobs=cuda_jobs,
+            cuda_run_id=cuda_run_id,
+            cuda_exception_id=CUDA_EXCEPTION_ID,
+            repository=policy["repository"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("cuda_run", "cuda_jobs", "cuda_run_id"),
+    [
+        (None, None, None),
+        (_cuda_run(), None, "456"),
+        (None, _cuda_jobs(), "456"),
+        (_cuda_run(), _cuda_jobs(), None),
+    ],
+)
+def test_normal_mode_requires_the_complete_cuda_evidence_trio(cuda_run, cuda_jobs, cuda_run_id):
+    policy, _ = _policy()
+
+    with pytest.raises(ValueError, match="requires --cuda-run-id"):
+        controls.resolve_cuda_release_gate(
+            policy=policy,
+            release_tag="v0.15.0",
+            release_commit=SHA,
+            cuda_run=cuda_run,
+            cuda_jobs=cuda_jobs,
+            cuda_run_id=cuda_run_id,
+            cuda_exception_id=None,
+            repository=policy["repository"],
+        )
+
+
+def test_exception_publish_verification_rejects_gate_or_evidence_tampering():
+    policy, digest = _policy()
+    now = datetime.now(timezone.utc)
+    snapshot = controls.make_snapshot(
+        policy=policy,
+        policy_sha256=digest,
+        observation=_matching_observation(CUDA_EXCEPTION_ID),
+        workflow_run={},
+    )
+    bound = controls.bind_snapshot_to_workflow(
+        policy=policy,
+        policy_sha256=digest,
+        snapshot=snapshot,
+        repository=policy["repository"],
+        release_tag="v0.15.0",
+        release_commit=SHA,
+        workflow_run=_preflight_workflow_run(),
+        cuda_exception_id=CUDA_EXCEPTION_ID,
+        now=now,
+    )
+
+    tampered_gate = copy.deepcopy(bound)
+    tampered_gate["cuda_release_gate"]["omitted_required_checks"].append(
+        "Full extras, quality, and package"
+    )
+    with pytest.raises(ValueError, match="differs from the attested preflight gate"):
+        controls.verify_bound_cuda_release_gate(
+            policy=policy,
+            snapshot=tampered_gate,
+            release_tag="v0.15.0",
+            release_commit=SHA,
+            repository=policy["repository"],
+            cuda_exception_id=CUDA_EXCEPTION_ID,
+        )
+
+    for field, replacement in (
+        ("merge_pull_request", 5.0),
+        ("hardware_evidence_collected", 0),
+        ("cuda_release_verified", 0),
+        ("merge_commit_sha", "c" * 40),
+    ):
+        type_tampered_gate = copy.deepcopy(bound)
+        type_tampered_gate["cuda_release_gate"][field] = replacement
+        with pytest.raises(ValueError, match="differs from the attested preflight gate"):
+            controls.verify_bound_cuda_release_gate(
+                policy=policy,
+                snapshot=type_tampered_gate,
+                release_tag="v0.15.0",
+                release_commit=SHA,
+                repository=policy["repository"],
+                cuda_exception_id=CUDA_EXCEPTION_ID,
+            )
+
+    fake_evidence = copy.deepcopy(bound)
+    fake_evidence["cuda_evidence"] = {"run": {"id": 456}}
+    with pytest.raises(ValueError, match="must not contain CUDA hardware evidence"):
+        controls.verify_bound_cuda_release_gate(
+            policy=policy,
+            snapshot=fake_evidence,
+            release_tag="v0.15.0",
+            release_commit=SHA,
+            repository=policy["repository"],
+            cuda_exception_id=CUDA_EXCEPTION_ID,
         )
 
 
@@ -760,3 +1156,90 @@ def test_verify_cli_rejects_policy_digest_substitution(tmp_path):
         )
         == 2
     )
+
+
+def test_exception_bind_cli_emits_gate_record_and_outputs_only_after_success(tmp_path, monkeypatch):
+    policy, digest = _policy()
+    snapshot = controls.make_snapshot(
+        policy=policy,
+        policy_sha256=digest,
+        observation=_matching_observation(CUDA_EXCEPTION_ID),
+        workflow_run={},
+    )
+    snapshot_path = tmp_path / "admin-capture.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    output_path = tmp_path / "external-controls.json"
+    gate_path = tmp_path / "cuda-gate-record.json"
+    github_output = tmp_path / "github-output.txt"
+    for name, value in {
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_SHA": SHA,
+        "GITHUB_ACTOR": "jemsbhai",
+        "GITHUB_TRIGGERING_ACTOR": "jemsbhai",
+        "GITHUB_WORKFLOW": "Snapshot mutable controls before a stable tag",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    assert (
+        controls.main(
+            [
+                "bind",
+                "--policy",
+                str(POLICY_PATH),
+                "--snapshot",
+                str(snapshot_path),
+                "--output",
+                str(output_path),
+                "--repository",
+                policy["repository"],
+                "--tag",
+                "v0.15.0",
+                "--commit",
+                SHA,
+                "--cuda-exception-id",
+                CUDA_EXCEPTION_ID,
+                "--cuda-gate-output",
+                str(gate_path),
+                "--github-output",
+                str(github_output),
+            ]
+        )
+        == 0
+    )
+    gate = json.loads(gate_path.read_text(encoding="utf-8"))
+    bound = json.loads(output_path.read_text(encoding="utf-8"))
+    assert gate == bound["cuda_release_gate"]
+    assert gate_path.with_suffix(".json.sha256").is_file()
+    assert output_path.with_suffix(".json.sha256").is_file()
+    assert github_output.read_text(encoding="utf-8").splitlines() == [
+        "cuda_mode=cpu_only_exception",
+        "cuda_run_id=",
+        f"cuda_exception_id={CUDA_EXCEPTION_ID}",
+    ]
+
+    failed_output = tmp_path / "failed-github-output.txt"
+    assert (
+        controls.main(
+            [
+                "verify",
+                "--policy",
+                str(POLICY_PATH),
+                "--snapshot",
+                str(output_path),
+                "--repository",
+                policy["repository"],
+                "--tag",
+                "v0.15.1",
+                "--commit",
+                SHA,
+                "--cuda-exception-id",
+                CUDA_EXCEPTION_ID,
+                "--github-output",
+                str(failed_output),
+            ]
+        )
+        == 2
+    )
+    assert not failed_output.exists()

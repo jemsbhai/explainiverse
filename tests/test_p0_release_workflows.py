@@ -79,6 +79,7 @@ def _assert_cuda_runner_routing_contract(workflow, publish):
     publish_routing = preflight.split(
         "      - name: Require exact reviewed single-GPU runner routing", 1
     )[1].split("\n      - name:", 1)[0]
+    assert "if: steps.verify.outputs.cuda_mode == 'hardware_evidence'" in publish_routing
     assert "CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}" in publish_routing
     assert f'[[ "$CUDA_SINGLE_RUNNER" != "{single_label}" ]]' in publish_routing
     assert publish_routing.count("exit 1") == 1
@@ -103,32 +104,69 @@ def test_preflight_requires_fresh_admin_capture_then_attests_and_binds_it():
     assert "defaults:\n  run:\n    shell: bash" in workflow
     assert "admin_snapshot_base64:" in workflow
     assert "cuda_run_id:" in workflow
+    assert "cuda_exception_id:" in workflow
+    assert workflow.count('default: ""') >= 2
+    assert "supply exactly one of cuda_run_id or cuda_exception_id" in workflow
+    assert '"EXPLAINIVERSE-v0.15.0-CPU-ONLY"' in workflow
+    assert '"$RELEASE_TAG" != "v0.15.0"' in workflow
     assert "jobs?filter=all&per_page=100" in workflow
     assert "gh api --paginate" in workflow
+    assert "if: inputs.cuda_run_id != ''" in workflow
     assert "release_external_controls.py bind" in workflow
     assert "--cuda-run-json release-preflight/cuda-run.json" in workflow
     assert "--cuda-jobs-json release-preflight/cuda-jobs.json" in workflow
+    assert '--cuda-exception-id "$CUDA_EXCEPTION_ID"' in workflow
+    assert "--cuda-gate-output release-preflight/cuda-release-gate.json" in workflow
+    assert '--github-output "$GITHUB_OUTPUT"' in workflow
     assert "admin-capture.json" in workflow
     assert "(cd release-preflight && sha256sum cuda-run.json cuda-jobs.json" in workflow
     assert "(cd release-preflight && sha256sum admin-capture.json" in workflow
     assert "actions/attest-build-provenance@" in workflow
+    assert "subject-path: release-preflight/*" in workflow
+    assert "CUDA release status: NOT RUN" in workflow
+    assert "does not claim CUDA or multi-GPU validation" in workflow
     assert "GH_TOKEN: ${{ github.token }}" in workflow
     assert "GITHUB_RUN_ATTEMPT" in workflow
     assert '"$GITHUB_ACTOR" != "$GITHUB_TRIGGERING_ACTOR"' in workflow
     assert "if: always()" in workflow
 
 
-def test_publish_cannot_build_without_preflight_and_real_cuda_edges():
+def test_publish_requires_verified_hardware_or_the_exact_cpu_only_exception():
     workflow = _read("publish-pypi.yml")
     lowered = workflow.lower()
     assert "preflight_run_id:" in workflow
+    assert "cuda_exception_id:" in workflow
+    assert "supply exactly one of cuda_run_id or cuda_exception_id" in workflow
+    assert '"EXPLAINIVERSE-v0.15.0-CPU-ONLY"' in workflow
+    assert '"$RELEASE_TAG" != "v0.15.0"' in workflow
     assert "needs: [preflight, cuda-release]" in workflow
+    assert "cuda_mode: ${{ steps.verify.outputs.cuda_mode }}" in workflow
+    assert "cuda_run_id: ${{ steps.verify.outputs.cuda_run_id }}" in workflow
+    assert "cuda_exception_id: ${{ steps.verify.outputs.cuda_exception_id }}" in workflow
     assert "gh attestation verify release-preflight/artifact/external-controls.json" in workflow
     assert "release-preflight.yml@refs/heads/main" in workflow
     assert "release_external_controls.py verify" in workflow
     assert "Release CUDA single-GPU (Torch ${{ matrix.torch-edge }}, zero skips)" in workflow
     assert 'EXPLAINIVERSE_REQUIRED_CUDA_DEVICES: "1"' in workflow
     assert "needs: preflight" in workflow
+    cuda_job = workflow.split("  cuda-release:", 1)[1].split("\n  build:", 1)[0]
+    assert "if: needs.preflight.outputs.cuda_mode == 'hardware_evidence'" in cuda_job
+    assert "cpu_only_exception" not in cuda_job
+    assert "continue-on-error" not in cuda_job
+    build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
+    assert "always() &&" in build_job
+    assert "always() && !cancelled() &&" in build_job
+    assert "needs.preflight.result == 'success'" in build_job
+    assert "needs.preflight.outputs.cuda_mode == 'hardware_evidence'" in build_job
+    assert "needs.cuda-release.result == 'success'" in build_job
+    assert "needs.preflight.outputs.cuda_mode == 'cpu_only_exception'" in build_job
+    assert "needs.cuda-release.result == 'skipped'" in build_job
+    assert (
+        "needs.preflight.outputs.cuda_exception_id == "
+        "'EXPLAINIVERSE-v0.15.0-CPU-ONLY'" in build_job
+    )
+    assert "inputs.cuda_exception_id" not in build_job
+    assert "inputs.cuda_run_id" not in build_job
     assert workflow.count("check_pypi_version_absent.py") == 2
     assert workflow.index("check_pypi_version_absent.py") < workflow.index("  build:")
     assert workflow.rindex("check_pypi_version_absent.py") < workflow.index(
@@ -178,7 +216,6 @@ def test_publish_cannot_build_without_preflight_and_real_cuda_edges():
     assert "--require-hashes" in workflow
     assert "defaults:\n  run:\n    shell: bash" in workflow
     assert "'.enabled == true' release-verification/immutable-releases.json" in workflow
-    build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
     assert "actions: read" in build_job and "attestations: read" in build_job
     assert "sha256sum --check admin-capture.json.sha256" in build_job
     assert "sha256sum --check cuda-evidence.sha256" in build_job
@@ -188,6 +225,48 @@ def test_publish_cannot_build_without_preflight_and_real_cuda_edges():
     assert build_job.index("release-source/scripts/audit_typing_readiness.py") < build_job.index(
         "Upload immutable distributions"
     )
+
+
+def test_publish_derives_cuda_mode_only_after_attested_snapshot_verification():
+    workflow = _read("publish-pypi.yml")
+    preflight = workflow.split("  preflight:", 1)[1].split("\n  cuda-release:", 1)[0]
+    verify = preflight.split(
+        "      - name: Bind the verified snapshot and derive the CUDA release mode", 1
+    )[1].split("\n      - name:", 1)[0]
+
+    assert "id: verify" in verify
+    assert "gh attestation verify release-preflight/artifact/external-controls.json" in verify
+    assert verify.index("gh attestation verify") < verify.index(
+        "python scripts/release_external_controls.py verify"
+    )
+    assert '--github-output "$GITHUB_OUTPUT"' in verify
+    assert 'cuda_selector=(--cuda-exception-id "$CUDA_EXCEPTION_ID")' in verify
+    assert "outputs:\n      cuda_mode: ${{ steps.verify.outputs.cuda_mode }}" in preflight
+    assert "Disclose the verified CPU-only release exception" in preflight
+    assert "CUDA release status: NOT RUN" in preflight
+    assert "does not claim CUDA or multi-GPU validation" in preflight
+
+
+def test_publish_attests_and_carries_the_selected_cuda_gate_without_fabrication():
+    workflow = _read("publish-pypi.yml")
+    build_job = workflow.split("  build:", 1)[1].split("\n  attest:", 1)[0]
+    governance = build_job.split(
+        "      - name: Recreate governance and bind the accepted reproducibility artifacts", 1
+    )[1].split("\n      - name:", 1)[0]
+
+    assert "sha256sum --check cuda-release-gate.json.sha256" in governance
+    assert "sha256sum --check cuda-evidence.sha256" in governance
+    assert 'if [[ "$CUDA_MODE" == "hardware_evidence" ]]' in governance
+    assert (
+        'elif [[ "$CUDA_MODE" == "cpu_only_exception" && \\\n'
+        '                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.0-CPU-ONLY" ]]'
+        in governance
+    )
+    assert 'governance_selector=(--cuda-run-id "$CUDA_RUN_ID")' in governance
+    assert 'governance_selector=(--cuda-exception-id "$CUDA_EXCEPTION_ID")' in governance
+    assert 'for evidence in "${evidence[@]}"' in governance
+    assert '"${governance_selector[@]}"' in governance
+    assert "continue-on-error" not in governance
 
 
 def test_publish_rebuilds_a_clean_tag_and_binds_the_attested_reproducibility_bytes():
