@@ -97,8 +97,8 @@ def _source_run():
     return run, jobs
 
 
-def _governance_record():
-    return {
+def _governance_record(*, hardware_evidence=False):
+    record = {
         "schema_version": 1,
         "release": {
             "repository": "jemsbhai/explainiverse",
@@ -109,6 +109,9 @@ def _governance_record():
             "release_dispatch_actor": "jemsbhai",
             "release_triggering_actor": "jemsbhai",
             "release_run_attempt": "1",
+            "cuda_release_mode": (
+                "hardware_evidence" if hardware_evidence else "cpu_only_exception"
+            ),
         },
         "evidence": {
             "release_workflow_run_id": SOURCE_RUN_ID,
@@ -117,6 +120,52 @@ def _governance_record():
             ),
         },
     }
+    if hardware_evidence:
+        record["cuda_release_gate"] = {
+            "schema_version": 1,
+            "mode": "hardware_evidence",
+            "status": "verified",
+            "exception_id": None,
+            "release_tag": "v0.15.0",
+            "release_commit": SHA,
+            "hardware_evidence_collected": True,
+            "cuda_release_verified": True,
+            "cuda_run_id": "456",
+        }
+        record["evidence"].update(
+            {
+                "cuda_run_id": "456",
+                "cuda_run_url": "https://github.com/jemsbhai/explainiverse/actions/runs/456",
+            }
+        )
+    else:
+        record["cuda_release_gate"] = {
+            "schema_version": 1,
+            "mode": "cpu_only_exception",
+            "status": "not_run",
+            "exception_id": "EXPLAINIVERSE-v0.15.0-CPU-ONLY",
+            "release_tag": "v0.15.0",
+            "release_commit": SHA,
+            "package_version": "0.15.0",
+            "merge_pull_request": 5,
+            "hardware_evidence_collected": False,
+            "cuda_release_verified": False,
+            "omitted_required_checks": [
+                "CUDA single-GPU (Torch latest)",
+                "CUDA single-GPU (Torch minimum)",
+            ],
+            "omitted_cuda_jobs": [
+                "CUDA single-GPU (Torch latest)",
+                "CUDA single-GPU (Torch minimum)",
+                "CUDA two-GPU scheduled (Torch latest)",
+                "CUDA two-GPU scheduled (Torch minimum)",
+            ],
+            "authorized_by": ["jemsbhai"],
+            "approved_at": "2026-09-03",
+            "reason": "Approved one-release CPU-only exception.",
+            "disclosure": "No CUDA hardware validation was performed.",
+        }
+    return record
 
 
 def _verify_governance(record, run):
@@ -135,6 +184,11 @@ def test_recovery_governance_record_is_bound_to_the_exact_source_run():
     _verify_governance(_governance_record(), run)
 
 
+def test_recovery_governance_record_accepts_verified_hardware_gate():
+    run, _ = _source_run()
+    _verify_governance(_governance_record(hardware_evidence=True), run)
+
+
 @pytest.mark.parametrize(
     ("target", "path", "replacement", "match"),
     [
@@ -150,6 +204,18 @@ def test_recovery_governance_record_is_bound_to_the_exact_source_run():
             "source run URL",
         ),
         ("record", ("governance", "release_run_attempt"), "2", "source run attempt"),
+        (
+            "record",
+            ("governance", "cuda_release_mode"),
+            "hardware_evidence",
+            "differs from its gate",
+        ),
+        (
+            "record",
+            ("cuda_release_gate", "hardware_evidence_collected"),
+            True,
+            "falsely claims hardware evidence",
+        ),
         ("record", ("governance", "release_dispatch_actor"), "other", "source actor"),
         (
             "record",

@@ -33,6 +33,37 @@ _POST_PYPI_RELEASE_STEPS = (
     "Require and reverify the finalized immutable release",
     "Archive normal-path release verification evidence",
 )
+_HARDWARE_MODE = "hardware_evidence"
+_EXCEPTION_MODE = "cpu_only_exception"
+_HARDWARE_GATE_FIELDS = {
+    "schema_version",
+    "mode",
+    "status",
+    "exception_id",
+    "release_tag",
+    "release_commit",
+    "hardware_evidence_collected",
+    "cuda_release_verified",
+    "cuda_run_id",
+}
+_EXCEPTION_GATE_FIELDS = {
+    "schema_version",
+    "mode",
+    "status",
+    "exception_id",
+    "release_tag",
+    "release_commit",
+    "package_version",
+    "merge_pull_request",
+    "hardware_evidence_collected",
+    "cuda_release_verified",
+    "omitted_required_checks",
+    "omitted_cuda_jobs",
+    "authorized_by",
+    "approved_at",
+    "reason",
+    "disclosure",
+}
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -187,6 +218,93 @@ def _positive_integer(value: Any, name: str) -> int:
     return value
 
 
+def _nonempty_string(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value
+
+
+def _nonempty_string_sequence(value: Any, name: str) -> list[str]:
+    sequence = _sequence(value, name)
+    if not sequence:
+        raise ValueError(f"{name} must not be empty")
+    strings = [_nonempty_string(item, f"{name} entry") for item in sequence]
+    if strings != sorted(set(strings)):
+        raise ValueError(f"{name} must contain unique strings in sorted order")
+    return strings
+
+
+def _verify_recovery_cuda_release_gate(
+    record: Mapping[str, Any],
+    *,
+    repository: str,
+    release_tag: str,
+    release_commit: str,
+    governance: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> None:
+    """Preserve the exact hardware/CPU-only disclosure during recovery."""
+    gate = _mapping(record.get("cuda_release_gate"), "governance record CUDA release gate")
+    schema_version = gate.get("schema_version")
+    if isinstance(schema_version, bool) or schema_version != 1:
+        raise ValueError("governance record CUDA release gate schema_version must be the integer 1")
+    mode = gate.get("mode")
+    if governance.get("cuda_release_mode") != mode:
+        raise ValueError("governance record CUDA release mode differs from its gate")
+    if gate.get("release_tag") != release_tag:
+        raise ValueError("governance record CUDA release gate tag mismatch")
+    if gate.get("release_commit") != release_commit:
+        raise ValueError("governance record CUDA release gate commit mismatch")
+
+    if mode == _HARDWARE_MODE:
+        if set(gate) != _HARDWARE_GATE_FIELDS:
+            raise ValueError("governance record hardware CUDA release gate fields differ")
+        if gate.get("status") != "verified":
+            raise ValueError("governance record hardware CUDA release gate is not verified")
+        if gate.get("exception_id") is not None:
+            raise ValueError("governance record hardware CUDA release gate has an exception id")
+        if gate.get("hardware_evidence_collected") is not True:
+            raise ValueError("governance record falsely denies CUDA hardware evidence")
+        if gate.get("cuda_release_verified") is not True:
+            raise ValueError("governance record hardware CUDA release gate is unverified")
+        cuda_run_id = gate.get("cuda_run_id")
+        if not isinstance(cuda_run_id, str) or re.fullmatch(r"[1-9][0-9]*", cuda_run_id) is None:
+            raise ValueError("CUDA run id must be a positive integer string")
+        expected_url = f"https://github.com/{repository}/actions/runs/{cuda_run_id}"
+        if str(evidence.get("cuda_run_id")) != cuda_run_id:
+            raise ValueError("governance record CUDA evidence run id mismatch")
+        if evidence.get("cuda_run_url") != expected_url:
+            raise ValueError("governance record CUDA evidence run URL mismatch")
+        return
+
+    if mode != _EXCEPTION_MODE:
+        raise ValueError(f"unsupported governance record CUDA release mode: {mode!r}")
+    if set(gate) != _EXCEPTION_GATE_FIELDS:
+        raise ValueError("governance record CPU-only CUDA release gate fields differ")
+    if gate.get("status") != "not_run":
+        raise ValueError("governance record CPU-only CUDA release gate status must be not_run")
+    _nonempty_string(gate.get("exception_id"), "CUDA release exception id")
+    if gate.get("package_version") != release_tag.removeprefix("v"):
+        raise ValueError("governance record CUDA release exception package version mismatch")
+    _positive_integer(gate.get("merge_pull_request"), "CUDA exception merge pull request")
+    if gate.get("hardware_evidence_collected") is not False:
+        raise ValueError("governance record CPU-only exception falsely claims hardware evidence")
+    if gate.get("cuda_release_verified") is not False:
+        raise ValueError("governance record CPU-only exception falsely claims CUDA verification")
+    _nonempty_string_sequence(
+        gate.get("omitted_required_checks"), "CUDA exception omitted required checks"
+    )
+    _nonempty_string_sequence(gate.get("omitted_cuda_jobs"), "CUDA exception omitted jobs")
+    _nonempty_string_sequence(gate.get("authorized_by"), "CUDA exception authorizers")
+    approved_at = _nonempty_string(gate.get("approved_at"), "CUDA exception approval date")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", approved_at) is None:
+        raise ValueError("CUDA exception approval date must have the form YYYY-MM-DD")
+    _nonempty_string(gate.get("reason"), "CUDA exception reason")
+    _nonempty_string(gate.get("disclosure"), "CUDA exception disclosure")
+    if "cuda_run_id" in evidence or "cuda_run_url" in evidence:
+        raise ValueError("CPU-only governance record must not claim a CUDA evidence run")
+
+
 def verify_recovery_governance_record(
     record: Mapping[str, Any],
     run: Mapping[str, Any],
@@ -235,6 +353,14 @@ def verify_recovery_governance_record(
     release = _mapping(record.get("release"), "governance record release")
     governance = _mapping(record.get("governance"), "governance record governance")
     evidence = _mapping(record.get("evidence"), "governance record evidence")
+    _verify_recovery_cuda_release_gate(
+        record,
+        repository=repository,
+        release_tag=release_tag,
+        release_commit=release_commit,
+        governance=governance,
+        evidence=evidence,
+    )
     expected_url = f"https://github.com/{repository}/actions/runs/{source_run_id}"
     record_fields = {
         "repository": (release.get("repository"), repository),

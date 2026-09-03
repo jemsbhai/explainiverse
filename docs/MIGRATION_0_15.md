@@ -206,6 +206,20 @@ Python/JS/tutorial gates, attaches hashes, an SBOM, and provenance, publishes th
 `pypi` environment, and then creates the GitHub Release. Branch protection, immutable-tag
 rules, environment reviewers, and the PyPI Trusted Publisher are external repository/service
 settings; the release checklist must verify them rather than infer them from workflow YAML.
+Release `0.15.0` has one explicit CPU-only exception,
+`EXPLAINIVERSE-v0.15.0-CPU-ONLY`. It omits the two required single-GPU contexts during the
+merge/preflight window and all four one-/two-GPU release jobs. It does not convert a missing GPU
+run into successful evidence: the attested release gate records `hardware_evidence_collected=false`,
+`cuda_release_verified=false`, and the immutable governance disclosure lists every omitted check
+and job. All 21 non-CUDA contexts, the complete CPU release suite, reproducible artifacts, tag
+verification, attestations, and Trusted Publishing remain mandatory. The exception ID is bound
+to this tag and package version and cannot authorize a later release.
+
+For that exception, capture and dispatch preflight with
+`--cuda-exception-id EXPLAINIVERSE-v0.15.0-CPU-ONLY` /
+`cuda_exception_id=EXPLAINIVERSE-v0.15.0-CPU-ONLY`, omitting `cuda_run_id`. Restore both CUDA
+contexts to `main` protection immediately after successful preflight and before creating the
+tag. Normal and future releases omit `cuda_exception_id` and supply the verified CUDA run ID.
 Dispatch the workflow from the tag itself, with the same tag as its input—for example
 `gh workflow run publish-pypi.yml --ref v0.15.0 -f tag=v0.15.0`. The workflow rejects a branch
 dispatch even if its checkout was later pointed at the tag, because attestation provenance is

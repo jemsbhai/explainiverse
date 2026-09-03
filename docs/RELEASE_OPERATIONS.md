@@ -1,8 +1,49 @@
 # Stable release control snapshot and recovery drill
 
-This runbook is executable automation, not evidence that mutable service settings or CUDA
-hardware are already configured. A stable release remains blocked until every preflight and
-hardware job is green and the PyPI project owner directly verifies the Trusted Publisher.
+This runbook is executable automation, not evidence that mutable service settings, Trusted
+Publishing, or CUDA hardware are already configured. The default stable path remains blocked
+until every preflight and hardware job is green. Release `0.15.0` alone may instead use the
+explicitly authorized CPU-only exception described below; that exception is a disclosed absence
+of CUDA evidence, never a representation that a GPU gate passed.
+
+## One-time 0.15.0 CPU-only exception
+
+The reviewed policy contains exactly one exception:
+`EXPLAINIVERSE-v0.15.0-CPU-ONLY`. It is bound to tag/package version `v0.15.0`/`0.15.0`, merge
+PR #5, maintainer `jemsbhai`, and the 2026-09-03 authorization. It records
+`hardware_evidence_collected=false` and `cuda_release_verified=false`. The exception omits only
+these branch checks:
+
+- `CUDA single-GPU (Torch latest)`
+- `CUDA single-GPU (Torch minimum)`
+
+It also omits the minimum/latest one- and two-GPU jobs from the release workflow. The other 21
+provider-bound contexts, complete CPU test suite, Python/JavaScript/tutorial gates, distribution
+reproducibility, signed tag, artifact attestations, environment approval, Trusted Publishing,
+and immutable GitHub Release remain mandatory.
+
+Use a narrow, reversible branch-protection window. Export the full current protection document
+first as rollback input. Change only `required_status_checks`, preserving `strict=true` and
+GitHub Actions app ID `15368` for each remaining check; do not disable administrator enforcement,
+conversation resolution, review rules, force-push protection, or deletion protection. Remove only the two
+names above, verify that the effective set is exactly the 21 names derived by the exception
+policy, and merge PR #5 through GitHub with its expected head SHA. Do not push directly to
+`main` and do not use a broad administrator bypass.
+
+Wait for all 21 required `push`/`main` checks on the resulting merge commit. Pull-request results
+do not qualify. Make the fresh administrator capture and complete the successful preflight while
+the exact 21-check exception state is still live. Immediately after preflight succeeds—and
+before creating or pushing `v0.15.0`—restore both CUDA checks with app ID `15368`, leaving all 23
+baseline checks strict and administrator-enforced. Re-read protection and compare the complete
+check/app bindings with `.github/release-control-policy.json`. If capture or preflight fails,
+restore the 23-check baseline before investigating or retrying.
+
+The preflight and publish dispatches must both name the exact same exception ID. A missing,
+different, mixed CUDA-run/exception, future-tag, altered-policy, or stale-snapshot request fails
+closed. The attested snapshot and immutable `RELEASE_GOVERNANCE.json`/`.md` record the exception,
+every omitted check/job, its authorization, and the absence of CUDA verification. After the
+release, the normal path still requires all 23 branch contexts and the complete one-/two-GPU
+evidence run; this exception cannot authorize any other tag.
 
 ## Administrator-authenticated pre-tag snapshot
 
@@ -22,10 +63,11 @@ enabled so that finalized assets and their tag cannot be altered through the Rel
 live protection or immutable-Release settings only through separately authorized administrator
 action, then recapture rather than editing the observation by hand.
 
-First dispatch `cuda-ci.yml` from the exact `main` commit and record its run ID. All four
-all-attempt job records (single- and two-GPU, Torch minimum and latest) must complete successfully
-exactly once. The preflight queries every jobs page with `filter=all`, binds normalized runner and
-job evidence into the attested snapshot, and the publish workflow queries and compares it again.
+For the normal hardware path, first dispatch `cuda-ci.yml` from the exact `main` commit and record
+its run ID. All four all-attempt job records (single- and two-GPU, Torch minimum and latest) must
+complete successfully exactly once. The preflight queries every jobs page with `filter=all`,
+binds normalized runner and job evidence into the attested snapshot, and the publish workflow
+queries and compares it again.
 
 PowerShell example (do not print or persist the token):
 
@@ -50,24 +92,84 @@ gh workflow run release-preflight.yml --ref main `
   -f admin_snapshot_base64=$snapshotBase64
 ```
 
+For the authorized `0.15.0` CPU-only path, omit `cuda_run_id` and use:
+
+```powershell
+$releaseTag = "v0.15.0"
+$releaseCommit = git rev-parse origin/main
+$cudaExceptionId = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
+$snapshot = Join-Path $env:TEMP "explainiverse-$releaseTag-controls.json"
+$env:GH_TOKEN = gh auth token
+python scripts/release_external_controls.py capture `
+  --policy .github/release-control-policy.json `
+  --output $snapshot `
+  --repository jemsbhai/explainiverse `
+  --tag $releaseTag `
+  --commit $releaseCommit `
+  --cuda-exception-id $cudaExceptionId
+if ($LASTEXITCODE -ne 0) { throw "release controls differ from exception policy" }
+$snapshotBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($snapshot))
+gh workflow run release-preflight.yml --ref main `
+  -f tag=$releaseTag `
+  -f release_commit=$releaseCommit `
+  -f cuda_exception_id=$cudaExceptionId `
+  -f admin_snapshot_base64=$snapshotBase64
+```
+
 The dispatch actor and the actor who triggers the current attempt must both be the authenticated
 capture principal. A rerun records its actual `GITHUB_RUN_ATTEMPT` and
 `GITHUB_TRIGGERING_ACTOR`; publication re-queries the Actions source run and rejects any attempt
 or triggering-actor mismatch before building or publishing.
 
-Record the successful preflight run ID. Only after separately authorized signed-tag creation,
-dispatch `publish-pypi.yml` from that tag and pass the same preflight run ID. The publish workflow
-re-verifies the attestation, source workflow, run ID, repository, commit, tag, policy digest, and
-all observed controls and exact CUDA run before any build. It also accepts only PyPI's HTTP 404
-for the version before build and repeats that fail-closed check immediately before the sole OIDC
-publisher action. An existing version or an ambiguous API/network result never reaches the
-publisher; there is no `skip-existing` path. For example:
+## Signed immutable tag
+
+Configure and test a GPG, SSH, or S/MIME signing key that GitHub recognizes before beginning the
+30-minute snapshot window. The stable tag must be an annotated tag object, point to the exact
+preflighted `main` commit, and carry a signature GitHub reports as verified. The active `v*`
+ruleset has no bypass actor and prevents tag update or deletion, so a bad pushed tag cannot be
+repaired in place.
+
+After preflight succeeds and all 23 baseline contexts have been restored, create and inspect the
+tag locally before its first push:
+
+```powershell
+git tag -s v0.15.0 $releaseCommit -m "Release v0.15.0"
+if ((git cat-file -t v0.15.0) -ne "tag") { throw "release tag is not annotated" }
+if ((git rev-list -n 1 v0.15.0) -ne $releaseCommit) { throw "release tag moved" }
+git push origin refs/tags/v0.15.0
+$tagObject = git rev-parse "v0.15.0^{tag}"
+$verified = gh api "repos/jemsbhai/explainiverse/git/tags/$tagObject" `
+  --jq '.verification.verified'
+if ($verified -ne "true") { throw "GitHub did not verify the release-tag signature" }
+```
+
+Do not dispatch publication unless every check above succeeds and the PyPI project owner has
+confirmed the Trusted Publisher fields are owner `jemsbhai`, repository `explainiverse`, workflow
+`publish-pypi.yml`, and environment `pypi`.
+
+Record the successful preflight run ID. Restore all 23 baseline contexts. Only after separately
+authorized signed-tag creation, dispatch `publish-pypi.yml` from that tag and pass the same
+preflight run ID. The publish workflow re-verifies the attestation, source workflow, run ID,
+repository, commit, tag, policy digest, and all observed controls. It also re-verifies either the
+exact CUDA run or the exact attested `0.15.0` exception before any build. It accepts only PyPI's
+HTTP 404 for the version before build and repeats that fail-closed check immediately before the
+sole OIDC publisher action. An existing version or an ambiguous API/network result never reaches
+the publisher; there is no `skip-existing` path. Normal hardware example:
 
 ```powershell
 gh workflow run publish-pypi.yml --ref $releaseTag `
   -f tag=$releaseTag `
   -f preflight_run_id="<successful-release-preflight-run-id>" `
   -f cuda_run_id=$cudaRunId
+```
+
+Authorized `0.15.0` CPU-only example:
+
+```powershell
+gh workflow run publish-pypi.yml --ref $releaseTag `
+  -f tag=$releaseTag `
+  -f preflight_run_id="<successful-release-preflight-run-id>" `
+  -f cuda_exception_id=$cudaExceptionId
 ```
 
 Candidate-authored Python, tutorial, and JavaScript gates run before any release input is created.
@@ -94,8 +196,10 @@ before matching its clean-checkout build against each accepted artifact set.
 Before the draft GitHub Release is finalized, the workflow downloads and attestation-verifies the
 full preflight evidence, then generates `RELEASE_GOVERNANCE.json` and
 `RELEASE_GOVERNANCE.md`. The record binds the release actor, environment reviewer and self-review
-setting, tag/commit, preflight and CUDA run IDs, and external-control policy/snapshot digests. If
-the live project still uses one operator, the release notes explicitly disclose the absence of
+setting, tag/commit, preflight, CUDA gate mode, and external-control policy/snapshot digests. The
+hardware path includes its CUDA run ID; the `0.15.0` exception instead includes its exact ID,
+authorization, reason, omitted checks/jobs, and explicit false hardware/verification fields. If
+the live project still uses one operator, the release notes also disclose the absence of
 segregation of duties. The draft and its assets must verify before it is published; recovery must
 preserve the identical governance disclosure. The normal and recovery paths both fetch PyPI's
 release JSON and per-file Integrity provenance, constrain the DSSE subjects and Trusted Publisher
@@ -188,3 +292,6 @@ exact release commit, and retain a green four-job run before the preflight can s
 `tests_cuda` session hook converts every runtime or collection skip into a failed job and rejects
 missing, extra, reordered, or duplicate release nodes when manifest enforcement is enabled. A
 local one-GPU diagnostic, even if green, does not substitute for this hosted four-job evidence.
+The exact `0.15.0` CPU-only exception is the sole departure: it truthfully records that this
+evidence was not collected and makes no CUDA release-verification claim. It does not relax the
+runner or evidence requirements for a future tag.
