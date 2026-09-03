@@ -103,6 +103,22 @@ def test_javascript_ci_publish_and_deploy_gates_run_the_high_severity_audit():
         assert workflow.index(command) < workflow.index(downstream_gate)
 
 
+def test_audited_javascript_gates_pin_a_node_20_compatible_npm_before_install():
+    workflows = (
+        ".github/workflows/js-ci.yml",
+        ".github/workflows/publish-pypi.yml",
+        ".github/workflows/deploy-demo.yml",
+    )
+    pin = 'npm install --global --ignore-scripts --no-audit --no-fund "npm@$NPM_VERSION"'
+    verify = 'test "$(npm --version)" = "$NPM_VERSION"'
+    for path in workflows:
+        workflow = _read(path)
+        assert 'NPM_VERSION: "10.9.9"' in workflow
+        assert workflow.count(pin) == 1
+        assert workflow.count(verify) == 1
+        assert workflow.index(pin) < workflow.index(verify) < workflow.index("npm ci")
+
+
 def test_private_javascript_tarball_and_deployment_evidence_are_fail_closed():
     package = json.loads(_read("packages/js/package.json"))
     allowlist = json.loads(_read("packages/js/npm-pack-allowlist.json"))

@@ -280,6 +280,7 @@ jobs:
       contents: read
     env:
       BOOTSTRAP_PIP_VERSION: "26.2.1"
+      NPM_VERSION: "10.9.9"
 
     steps:
       - name: Validate requested tag syntax
@@ -336,6 +337,11 @@ jobs:
           node-version: "20.11.0"
           cache: npm
           cache-dependency-path: packages/js/package-lock.json
+
+      - name: Pin the Node package manager
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund "npm@$NPM_VERSION"
+          test "$(npm --version)" = "$NPM_VERSION"
 
       - name: Pin and record the bootstrap installer
         run: |
