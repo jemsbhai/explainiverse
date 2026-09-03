@@ -12,8 +12,14 @@ on:
         required: true
         type: string
       cuda_run_id:
-        description: "Successful all-edge cuda-ci workflow_dispatch run on release_commit"
-        required: true
+        description: "Successful all-edge cuda-ci workflow_dispatch run; mutually exclusive with cuda_exception_id"
+        required: false
+        default: ""
+        type: string
+      cuda_exception_id:
+        description: "Exact reviewed CPU-only exception; mutually exclusive with cuda_run_id"
+        required: false
+        default: ""
         type: string
       admin_snapshot_base64:
         description: "Fresh base64 capture made locally with an approved administrator gh token"
@@ -48,6 +54,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
           CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
+          CUDA_EXCEPTION_ID: ${{ inputs.cuda_exception_id }}
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "tag must have the form vMAJOR.MINOR.PATCH" >&2
@@ -57,9 +64,24 @@ jobs:
             echo "release-commit must be a complete lowercase commit SHA" >&2
             exit 1
           fi
-          if [[ ! "$CUDA_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
-            echo "cuda_run_id must be a positive integer" >&2
+          if [[ -n "$CUDA_RUN_ID" && -n "$CUDA_EXCEPTION_ID" ]] || \
+             [[ -z "$CUDA_RUN_ID" && -z "$CUDA_EXCEPTION_ID" ]]; then
+            echo "supply exactly one of cuda_run_id or cuda_exception_id" >&2
             exit 1
+          fi
+          if [[ -n "$CUDA_RUN_ID" && ! "$CUDA_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "cuda_run_id must be a positive integer when supplied" >&2
+            exit 1
+          fi
+          if [[ -n "$CUDA_EXCEPTION_ID" ]]; then
+            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.0-CPU-ONLY" ]]; then
+              echo "cuda_exception_id is not the exact reviewed exception" >&2
+              exit 1
+            fi
+            if [[ "$RELEASE_TAG" != "v0.15.0" ]]; then
+              echo "the CPU-only CUDA exception is valid only for v0.15.0" >&2
+              exit 1
+            fi
           fi
           if [[ ! "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
             echo "GITHUB_RUN_ATTEMPT must be a positive integer" >&2
@@ -85,6 +107,7 @@ jobs:
           python-version: "3.12"
 
       - name: Query every attempt and page of exact-commit CUDA evidence
+        if: inputs.cuda_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
@@ -117,30 +140,46 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
           CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
+          CUDA_EXCEPTION_ID: ${{ inputs.cuda_exception_id }}
         run: |
+          cuda_selector=()
+          if [[ -n "$CUDA_RUN_ID" ]]; then
+            cuda_selector=(
+              --cuda-run-json release-preflight/cuda-run.json
+              --cuda-jobs-json release-preflight/cuda-jobs.json
+              --cuda-run-id "$CUDA_RUN_ID"
+            )
+          else
+            cuda_selector=(--cuda-exception-id "$CUDA_EXCEPTION_ID")
+          fi
           python scripts/release_external_controls.py bind \
             --policy .github/release-control-policy.json \
             --snapshot release-preflight/admin-capture.json \
             --output release-preflight/external-controls.json \
+            --cuda-gate-output release-preflight/cuda-release-gate.json \
+            --github-output "$GITHUB_OUTPUT" \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --commit "$RELEASE_COMMIT" \
-            --cuda-run-json release-preflight/cuda-run.json \
-            --cuda-jobs-json release-preflight/cuda-jobs.json \
-            --cuda-run-id "$CUDA_RUN_ID"
+            "${cuda_selector[@]}"
+
+      - name: Disclose the CPU-only release exception in the run summary
+        if: steps.bind.outputs.cuda_mode == 'cpu_only_exception'
+        env:
+          CUDA_EXCEPTION_ID: ${{ steps.bind.outputs.cuda_exception_id }}
+        run: |
+          {
+            echo "## CUDA release status: NOT RUN"
+            echo
+            echo "Exception \`$CUDA_EXCEPTION_ID\` applies only to v0.15.0."
+            echo "This preflight does not claim CUDA or multi-GPU validation."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Attest the accepted pre-tag control snapshot
         if: steps.bind.outcome == 'success'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-path: |
-            release-preflight/admin-capture.json
-            release-preflight/admin-capture.json.sha256
-            release-preflight/cuda-run.json
-            release-preflight/cuda-jobs.json
-            release-preflight/cuda-evidence.sha256
-            release-preflight/external-controls.json
-            release-preflight/external-controls.json.sha256
+          subject-path: release-preflight/*
 
       - name: Archive the control snapshot even when policy verification fails
         if: always()

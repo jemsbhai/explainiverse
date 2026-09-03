@@ -12,8 +12,14 @@ on:
         required: true
         type: string
       cuda_run_id:
-        description: "Exact CUDA evidence run attested by release-preflight"
-        required: true
+        description: "Exact CUDA evidence run; mutually exclusive with cuda_exception_id"
+        required: false
+        default: ""
+        type: string
+      cuda_exception_id:
+        description: "Exact reviewed CPU-only exception; mutually exclusive with cuda_run_id"
+        required: false
+        default: ""
         type: string
       stage_recovery_drill:
         description: "Intentionally stop after PyPI so the recovery-only workflow can be drilled"
@@ -37,6 +43,10 @@ jobs:
     name: Verify the attested pre-tag external-control snapshot
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      cuda_mode: ${{ steps.verify.outputs.cuda_mode }}
+      cuda_run_id: ${{ steps.verify.outputs.cuda_run_id }}
+      cuda_exception_id: ${{ steps.verify.outputs.cuda_exception_id }}
     permissions:
       actions: read
       attestations: read
@@ -47,23 +57,31 @@ jobs:
         env:
           PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
           CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
+          CUDA_EXCEPTION_ID: ${{ inputs.cuda_exception_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           if [[ ! "$PREFLIGHT_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
             echo "preflight_run_id must be a positive integer" >&2
             exit 1
           fi
-          if [[ ! "$CUDA_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
-            echo "cuda_run_id must be a positive integer" >&2
+          if [[ -n "$CUDA_RUN_ID" && -n "$CUDA_EXCEPTION_ID" ]] || \
+             [[ -z "$CUDA_RUN_ID" && -z "$CUDA_EXCEPTION_ID" ]]; then
+            echo "supply exactly one of cuda_run_id or cuda_exception_id" >&2
             exit 1
           fi
-
-      - name: Require exact reviewed single-GPU runner routing
-        env:
-          CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
-        run: |
-          if [[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]; then
-            echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
+          if [[ -n "$CUDA_RUN_ID" && ! "$CUDA_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "cuda_run_id must be a positive integer when supplied" >&2
             exit 1
+          fi
+          if [[ -n "$CUDA_EXCEPTION_ID" ]]; then
+            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.0-CPU-ONLY" ]]; then
+              echo "cuda_exception_id is not the exact reviewed exception" >&2
+              exit 1
+            fi
+            if [[ "$RELEASE_TAG" != "v0.15.0" ]]; then
+              echo "the CPU-only CUDA exception is valid only for v0.15.0" >&2
+              exit 1
+            fi
           fi
 
       - name: Check out the immutable release tag
@@ -78,18 +96,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download and bind the preflight run and attested snapshot
+      - name: Download the preflight run and attested snapshot
         env:
           GH_TOKEN: ${{ github.token }}
           PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
-          CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
-          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           mkdir -p release-preflight
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID" \
             > release-preflight/source-run.json
           gh run download "$PREFLIGHT_RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name release-control-preflight --dir release-preflight/artifact
+
+      - name: Re-query every attempt and page of exact-commit CUDA evidence
+        if: inputs.cuda_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
+        run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CUDA_RUN_ID" \
             > release-preflight/live-cuda-run.json
           gh api --paginate \
@@ -98,10 +121,30 @@ jobs:
             | jq -s \
               '{query_filter:"all",pagination_complete:true,jobs:.}' \
               > release-preflight/live-cuda-jobs.json
+
+      - name: Bind the verified snapshot and derive the CUDA release mode
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
+          CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
+          CUDA_EXCEPTION_ID: ${{ inputs.cuda_exception_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
           (cd release-preflight/artifact && sha256sum --check external-controls.json.sha256)
           gh attestation verify release-preflight/artifact/external-controls.json \
             --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-preflight.yml@refs/heads/main"
+          cuda_selector=()
+          if [[ -n "$CUDA_RUN_ID" ]]; then
+            cuda_selector=(
+              --cuda-run-json release-preflight/live-cuda-run.json
+              --cuda-jobs-json release-preflight/live-cuda-jobs.json
+              --cuda-run-id "$CUDA_RUN_ID"
+            )
+          else
+            cuda_selector=(--cuda-exception-id "$CUDA_EXCEPTION_ID")
+          fi
           python scripts/release_external_controls.py verify \
             --policy .github/release-control-policy.json \
             --snapshot release-preflight/artifact/external-controls.json \
@@ -110,9 +153,31 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --commit "$(git rev-parse HEAD)" \
-            --cuda-run-json release-preflight/live-cuda-run.json \
-            --cuda-jobs-json release-preflight/live-cuda-jobs.json \
-            --cuda-run-id "$CUDA_RUN_ID"
+            --github-output "$GITHUB_OUTPUT" \
+            "${cuda_selector[@]}"
+
+      - name: Require exact reviewed single-GPU runner routing
+        if: steps.verify.outputs.cuda_mode == 'hardware_evidence'
+        env:
+          CUDA_SINGLE_RUNNER: ${{ vars.CUDA_SINGLE_RUNNER }}
+        run: |
+          if [[ "$CUDA_SINGLE_RUNNER" != "explainiverse-cuda-single" ]]; then
+            echo "CUDA_SINGLE_RUNNER must be exactly explainiverse-cuda-single" >&2
+            exit 1
+          fi
+
+      - name: Disclose the verified CPU-only release exception
+        if: steps.verify.outputs.cuda_mode == 'cpu_only_exception'
+        env:
+          CUDA_EXCEPTION_ID: ${{ steps.verify.outputs.cuda_exception_id }}
+        run: |
+          test "$CUDA_EXCEPTION_ID" = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
+          {
+            echo "## CUDA release status: NOT RUN"
+            echo
+            echo "The attested preflight authorizes \`$CUDA_EXCEPTION_ID\` for v0.15.0 only."
+            echo "This publication does not claim CUDA or multi-GPU validation."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail before build if PyPI already contains the release version
         env:
@@ -125,6 +190,7 @@ jobs:
   cuda-release:
     name: Release CUDA single-GPU (Torch ${{ matrix.torch-edge }}, zero skips)
     needs: preflight
+    if: needs.preflight.outputs.cuda_mode == 'hardware_evidence'
     runs-on: explainiverse-cuda-single
     timeout-minutes: 45
     permissions:
@@ -187,6 +253,25 @@ jobs:
   build:
     name: Verify, build once, and inventory
     needs: [preflight, cuda-release]
+    if: >-
+      ${{
+        always() &&
+        needs.preflight.result == 'success' &&
+        (
+          (
+            needs.preflight.outputs.cuda_mode == 'hardware_evidence' &&
+            needs.preflight.outputs.cuda_run_id != '' &&
+            needs.preflight.outputs.cuda_exception_id == '' &&
+            needs.cuda-release.result == 'success'
+          ) ||
+          (
+            needs.preflight.outputs.cuda_mode == 'cpu_only_exception' &&
+            needs.preflight.outputs.cuda_run_id == '' &&
+            needs.preflight.outputs.cuda_exception_id == 'EXPLAINIVERSE-v0.15.0-CPU-ONLY' &&
+            needs.cuda-release.result == 'skipped'
+          )
+        )
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -327,7 +412,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
-          CUDA_RUN_ID: ${{ inputs.cuda_run_id }}
+          CUDA_MODE: ${{ needs.preflight.outputs.cuda_mode }}
+          CUDA_RUN_ID: ${{ needs.preflight.outputs.cuda_run_id }}
+          CUDA_EXCEPTION_ID: ${{ needs.preflight.outputs.cuda_exception_id }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           mkdir release-governance reproducibility-proof provenance
@@ -335,12 +422,26 @@ jobs:
             --name release-control-preflight --dir release-governance
           (cd release-governance && \
             sha256sum --check admin-capture.json.sha256 && \
-            sha256sum --check cuda-evidence.sha256 && \
+            sha256sum --check cuda-release-gate.json.sha256 && \
             sha256sum --check external-controls.json.sha256)
-          for evidence in \
-            admin-capture.json admin-capture.json.sha256 \
-            cuda-run.json cuda-jobs.json cuda-evidence.sha256 \
-            external-controls.json external-controls.json.sha256; do
+          evidence=(
+            admin-capture.json admin-capture.json.sha256
+            cuda-release-gate.json cuda-release-gate.json.sha256
+            external-controls.json external-controls.json.sha256
+          )
+          governance_selector=()
+          if [[ "$CUDA_MODE" == "hardware_evidence" ]]; then
+            (cd release-governance && sha256sum --check cuda-evidence.sha256)
+            evidence+=(cuda-run.json cuda-jobs.json cuda-evidence.sha256)
+            governance_selector=(--cuda-run-id "$CUDA_RUN_ID")
+          elif [[ "$CUDA_MODE" == "cpu_only_exception" && \
+                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.0-CPU-ONLY" ]]; then
+            governance_selector=(--cuda-exception-id "$CUDA_EXCEPTION_ID")
+          else
+            echo "verified preflight returned an unsupported CUDA release mode" >&2
+            exit 1
+          fi
+          for evidence in "${evidence[@]}"; do
             gh attestation verify "release-governance/$evidence" \
               --repo "$GITHUB_REPOSITORY" \
               --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-preflight.yml@refs/heads/main"
@@ -357,7 +458,7 @@ jobs:
             --tag "$RELEASE_TAG" \
             --commit "$(git -C release-source rev-parse HEAD)" \
             --preflight-run-id "$PREFLIGHT_RUN_ID" \
-            --cuda-run-id "$CUDA_RUN_ID" \
+            "${governance_selector[@]}" \
             --release-run-id "$GITHUB_RUN_ID" \
             --release-run-attempt "$GITHUB_RUN_ATTEMPT" \
             --release-actor "$GITHUB_ACTOR" \
