@@ -146,6 +146,7 @@ def test_release_environment_records_pip_runner_tools_and_lock(monkeypatch, tmp_
     requirements = _artifact(tmp_path, "release-tools.txt", b"poetry==2.3.2\n")
     monkeypatch.setenv("ImageOS", "ubuntu24")
     monkeypatch.setenv("ImageVersion", "20260801.1")
+    monkeypatch.setenv("RUNNER_ARCH", "X64")
     monkeypatch.setenv("RUNNER_OS", "Linux")
     monkeypatch.setenv("RUNNER_NAME", "GitHub Actions 1")
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
@@ -155,7 +156,10 @@ def test_release_environment_records_pip_runner_tools_and_lock(monkeypatch, tmp_
     monkeypatch.setenv("REPRODUCIBILITY_BUILD_ID", "one")
     monkeypatch.setenv("REPRODUCIBILITY_JOB_INDEX", "0")
     monkeypatch.setenv("REPRODUCIBILITY_JOB_TOTAL", "2")
+    monkeypatch.setenv("REPRODUCIBILITY_RUNNER_LABEL", "ubuntu-24.04")
     monkeypatch.setenv("REPRODUCIBILITY_RUNNER_ENVIRONMENT", "github-hosted")
+    monkeypatch.setattr("record_release_environment.platform.system", lambda: "Linux")
+    monkeypatch.setattr("record_release_environment.platform.machine", lambda: "x86_64")
     monkeypatch.setattr(
         "record_release_environment.importlib.metadata.version",
         lambda package: {
@@ -167,13 +171,14 @@ def test_release_environment_records_pip_runner_tools_and_lock(monkeypatch, tmp_
 
     payload = release_environment(requirements, build_identity="123456:1:one")
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["bootstrap_pip"].startswith("pip ")
     assert payload["bootstrap_pip_version"]
     assert payload["build_identity"] == "123456:1:one"
     assert payload["runner"]["ImageOS"] == "ubuntu24"
     assert payload["runner"]["ImageVersion"] == "20260801.1"
     assert payload["runner"]["RUNNER_OS"] == "Linux"
+    assert payload["runner"]["REPRODUCIBILITY_RUNNER_LABEL"] == "ubuntu-24.04"
     assert payload["source"]["commit"]
     assert payload["source"]["commit_timestamp"].isdigit()
     assert payload["platform_identity"]["system"]
@@ -193,7 +198,7 @@ def _recorded_environment(build_identity="123456:1:one"):
     slot = build_identity.rsplit(":", 1)[-1] if isinstance(build_identity, str) else "one"
     job_index = {"one": "0", "two": "1"}.get(slot, "0")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "build_identity": build_identity,
         "python": {
             "executable": "/opt/hostedtoolcache/Python/3.12/bin/python",
@@ -232,12 +237,13 @@ def _recorded_environment(build_identity="123456:1:one"):
             "REPRODUCIBILITY_BUILD_ID": slot,
             "REPRODUCIBILITY_JOB_INDEX": job_index,
             "REPRODUCIBILITY_JOB_TOTAL": "2",
+            "REPRODUCIBILITY_RUNNER_LABEL": "ubuntu-24.04",
             "REPRODUCIBILITY_RUNNER_ENVIRONMENT": "github-hosted",
         },
     }
 
 
-def test_environment_comparison_matches_stable_identity_and_proves_distinct_builds():
+def test_environment_comparison_matches_stable_inputs_and_proves_distinct_builds():
     first = _recorded_environment("123456:1:one")
     second = _recorded_environment("123456:1:two")
     second["runner"]["RUNNER_NAME"] = "GitHub Actions 2"
@@ -246,8 +252,9 @@ def test_environment_comparison_matches_stable_identity_and_proves_distinct_buil
 
     report = compare_release_environments(first, second)
 
+    assert report["schema_version"] == 2
     assert report["compatible"] is True
-    assert report["comparison"] == "stable-environment-identity"
+    assert report["comparison"] == "stable-build-input-identity"
     assert report["distinct_build_identities"] == {
         "first": "123456:1:one",
         "second": "123456:1:two",
@@ -264,7 +271,33 @@ def test_environment_comparison_matches_stable_identity_and_proves_distinct_buil
             "matrix_job_index": "1",
         },
     }
-    assert report["matching_identity"]["runner.ImageVersion"] == "20260801.1"
+    assert report["matching_identity"]["runner.REPRODUCIBILITY_RUNNER_LABEL"] == "ubuntu-24.04"
+    assert "runner.ImageVersion" not in report["matching_identity"]
+    assert report["hosted_runner_image_versions"] == {
+        "first": "20260801.1",
+        "second": "20260801.1",
+        "exact_match": True,
+        "equality_policy": "recorded-host-variation",
+    }
+    assert report["first"] == first
+    assert report["second"] == second
+
+
+def test_environment_comparison_records_hosted_image_rollout_version_variance():
+    first = _recorded_environment("123456:1:one")
+    second = _recorded_environment("123456:1:two")
+    first["runner"]["ImageVersion"] = "20260831.293.1"
+    second["runner"]["ImageVersion"] = "20260823.283.1"
+
+    report = compare_release_environments(first, second)
+
+    assert report["compatible"] is True
+    assert report["hosted_runner_image_versions"] == {
+        "first": "20260831.293.1",
+        "second": "20260823.283.1",
+        "exact_match": False,
+        "equality_policy": "recorded-host-variation",
+    }
     assert report["first"] == first
     assert report["second"] == second
 
@@ -298,22 +331,73 @@ def test_environment_comparison_matches_stable_identity_and_proves_distinct_buil
             lambda value: value["runner"].update(GITHUB_SHA="e" * 40),
             "runner.GITHUB_SHA",
         ),
+        (lambda value: value["runner"].update(ImageOS="ubuntu22"), "runner.ImageOS"),
         (
-            lambda value: value["runner"].update(ImageVersion="20260808.1"),
-            "runner.ImageVersion",
+            lambda value: value["runner"].update(REPRODUCIBILITY_RUNNER_LABEL="ubuntu-latest"),
+            "runner.REPRODUCIBILITY_RUNNER_LABEL",
         ),
+        (lambda value: value["runner"].update(RUNNER_ARCH="ARM64"), "runner.RUNNER_ARCH"),
         (
             lambda value: value["runner"].update(RUNNER_OS="Windows"),
             "runner.RUNNER_OS",
         ),
     ],
 )
-def test_environment_comparison_rejects_stable_identity_drift(mutation, match):
+def test_environment_comparison_rejects_stable_build_input_drift(mutation, match):
     first = _recorded_environment("123456:1:one")
     second = deepcopy(_recorded_environment("123456:1:two"))
     mutation(second)
 
     with pytest.raises(ValueError, match=match):
+        compare_release_environments(first, second)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("REPRODUCIBILITY_RUNNER_LABEL", "ubuntu-latest"),
+        ("ImageOS", "ubuntu22"),
+        ("RUNNER_OS", "Windows"),
+        ("RUNNER_ARCH", "ARM64"),
+    ],
+)
+def test_environment_comparison_rejects_matching_but_unsupported_runner_profile(field, value):
+    first = _recorded_environment("123456:1:one")
+    second = _recorded_environment("123456:1:two")
+    first["runner"][field] = value
+    second["runner"][field] = value
+
+    with pytest.raises(ValueError, match=field):
+        compare_release_environments(first, second)
+
+
+@pytest.mark.parametrize(("field", "value"), [("system", "Darwin"), ("machine", "aarch64")])
+def test_environment_comparison_rejects_matching_but_unsupported_platform_profile(field, value):
+    first = _recorded_environment("123456:1:one")
+    second = _recorded_environment("123456:1:two")
+    first["platform_identity"][field] = value
+    second["platform_identity"][field] = value
+
+    with pytest.raises(ValueError, match=f"platform_identity.{field}"):
+        compare_release_environments(first, second)
+
+
+@pytest.mark.parametrize("image_version", [None, "", " ", 20260831])
+def test_environment_comparison_requires_each_runner_image_version(image_version):
+    first = _recorded_environment("123456:1:one")
+    second = _recorded_environment("123456:1:two")
+    second["runner"]["ImageVersion"] = image_version
+
+    with pytest.raises(ValueError, match="runner image version"):
+        compare_release_environments(first, second)
+
+
+def test_environment_comparison_rejects_missing_runner_image_version():
+    first = _recorded_environment("123456:1:one")
+    second = _recorded_environment("123456:1:two")
+    del second["runner"]["ImageVersion"]
+
+    with pytest.raises(ValueError, match="missing runner field 'ImageVersion'"):
         compare_release_environments(first, second)
 
 
@@ -390,6 +474,7 @@ def test_environment_comparison_cli_writes_both_complete_manifests(monkeypatch, 
     output_path = tmp_path / "comparison.json"
     first = _recorded_environment("123456:1:one")
     second = _recorded_environment("123456:1:two")
+    second["runner"]["ImageVersion"] = "20260823.283.1"
     first_path.write_text(json.dumps(first), encoding="utf-8")
     second_path.write_text(json.dumps(second), encoding="utf-8")
     monkeypatch.setattr(
@@ -408,6 +493,12 @@ def test_environment_comparison_cli_writes_both_complete_manifests(monkeypatch, 
     environment.main()
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["hosted_runner_image_versions"] == {
+        "first": "20260801.1",
+        "second": "20260823.283.1",
+        "exact_match": False,
+        "equality_policy": "recorded-host-variation",
+    }
     assert report["first"] == first
     assert report["second"] == second
 
@@ -420,7 +511,7 @@ def test_environment_comparison_cli_writes_failure_report_before_nonzero_exit(
     output_path = tmp_path / "provenance" / "comparison.json"
     first = _recorded_environment("123456:1:one")
     second = _recorded_environment("123456:1:two")
-    second["runner"]["ImageVersion"] = "different-image"
+    second["runner"]["ImageOS"] = "ubuntu22"
     first_path.write_text(json.dumps(first), encoding="utf-8")
     second_path.write_text(json.dumps(second), encoding="utf-8")
     monkeypatch.setattr(
@@ -442,7 +533,7 @@ def test_environment_comparison_cli_writes_failure_report_before_nonzero_exit(
     assert exc_info.value.code == 2
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["compatible"] is False
-    assert "runner.ImageVersion" in report["error"]
+    assert "runner.ImageOS" in report["error"]
     assert report["first"] == first
     assert report["second"] == second
 
@@ -478,7 +569,8 @@ def test_reproducibility_workflow_uses_two_clean_runners_and_no_publish_step():
     )
 
     assert "build-id: [one, two]" in workflow
-    assert "runs-on: ubuntu-24.04" in workflow
+    assert "runner: [ubuntu-24.04]" in workflow
+    assert "runs-on: ${{ matrix.runner }}" in workflow
     assert "--require-hashes" in workflow
     assert "--only-binary=:all:" in workflow
     assert "SOURCE_DATE_EPOCH" in workflow
@@ -490,6 +582,7 @@ def test_reproducibility_workflow_uses_two_clean_runners_and_no_publish_step():
     )
     assert "REPRODUCIBILITY_JOB_INDEX: ${{ strategy.job-index }}" in workflow
     assert "REPRODUCIBILITY_JOB_TOTAL: ${{ strategy.job-total }}" in workflow
+    assert "REPRODUCIBILITY_RUNNER_LABEL: ${{ matrix.runner }}" in workflow
     assert "REPRODUCIBILITY_RUNNER_ENVIRONMENT: ${{ runner.environment }}" in workflow
     assert "--compare" in workflow
     assert "release-environment-comparison.json" in workflow
@@ -497,7 +590,10 @@ def test_reproducibility_workflow_uses_two_clean_runners_and_no_publish_step():
     assert "release-environment-two.json" in workflow
     assert workflow.index("cp independent/one") < workflow.index("--compare")
     assert workflow.index("cp independent/two") < workflow.index("--compare")
-    assert "Require stable hosted-runner environment identity\n        if: always()" in workflow
+    assert (
+        "Require stable build inputs and record hosted-runner image versions\n"
+        "        if: always()" in workflow
+    )
     assert "Require byte-identical wheel and source distribution\n        if: always()" in workflow
     assert "path: provenance/*" in workflow
     assert "Archive reproducibility report\n        if: always()" in workflow

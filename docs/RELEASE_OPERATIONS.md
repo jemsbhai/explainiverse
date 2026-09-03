@@ -80,6 +80,17 @@ second checkout and must be byte-identical to both accepted builds before it can
 uploaded. Missing or expired proof artifacts require a fresh exact-commit reproducibility run;
 they are never bypassed.
 
+GitHub deploys hosted-runner image releases gradually, so two parallel jobs that both request the
+versioned `ubuntu-24.04` label can receive different exact `ImageVersion` values. The comparison
+does not erase or normalize that difference: each value is mandatory, both are retained in the
+complete manifests, and the comparison report records both values and whether they match. The
+requested label, actual image family, operating system, architecture, Python and pip versions,
+hash-locked tool graph, source, workflow run, and attempt remain exact requirements. A rollout
+version difference is acceptable only when those stable build inputs match and the separate
+mandatory comparison proves the wheel and source distribution byte-identical. Missing image
+provenance or any stable-input difference fails closed, and publication replays both comparisons
+before matching its clean-checkout build against each accepted artifact set.
+
 Before the draft GitHub Release is finalized, the workflow downloads and attestation-verifies the
 full preflight evidence, then generates `RELEASE_GOVERNANCE.json` and
 `RELEASE_GOVERNANCE.md`. The record binds the release actor, environment reviewer and self-review

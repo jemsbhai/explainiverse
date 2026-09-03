@@ -1,4 +1,4 @@
-"""Record and compare hosted-runner identities used for release builds."""
+"""Record release build inputs and hosted-runner provenance."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 _RELEASE_TOOLS = ("poetry", "twine", "cyclonedx-bom")
+_SCHEMA_VERSION = 2
+_COMPARISON = "stable-build-input-identity"
 _RUNNER_ENVIRONMENT_KEYS = (
     "GITHUB_ACTION",
     "GITHUB_ACTIONS",
@@ -33,9 +35,13 @@ _RUNNER_ENVIRONMENT_KEYS = (
     "REPRODUCIBILITY_BUILD_ID",
     "REPRODUCIBILITY_JOB_INDEX",
     "REPRODUCIBILITY_JOB_TOTAL",
+    "REPRODUCIBILITY_RUNNER_LABEL",
     "REPRODUCIBILITY_RUNNER_ENVIRONMENT",
 )
-_STABLE_RUNNER_KEYS = (
+# Standard hosted-runner ImageVersion values cannot be selected and can differ while GitHub
+# rolls an image release across its fleet. They remain mandatory provenance below; the requested
+# label and actual platform profile are the equality-gated inputs.
+_STABLE_RUNNER_INPUT_KEYS = (
     "GITHUB_JOB",
     "GITHUB_ACTIONS",
     "GITHUB_REF",
@@ -45,15 +51,23 @@ _STABLE_RUNNER_KEYS = (
     "GITHUB_SHA",
     "GITHUB_WORKFLOW",
     "ImageOS",
-    "ImageVersion",
     "RUNNER_ARCH",
     "RUNNER_OS",
+    "REPRODUCIBILITY_RUNNER_LABEL",
 )
 _BUILD_IDENTITY = re.compile(
     r"(?P<run_id>[1-9][0-9]*):(?P<run_attempt>[1-9][0-9]*):(?P<slot>one|two)"
 )
 _EXPECTED_JOB_INDEX = {"one": "0", "two": "1"}
-_STABLE_ENVIRONMENT_PATHS = (
+_EXPECTED_HOSTED_BUILD_PROFILE = (
+    (("runner", "REPRODUCIBILITY_RUNNER_LABEL"), "ubuntu-24.04"),
+    (("runner", "ImageOS"), "ubuntu24"),
+    (("runner", "RUNNER_OS"), "Linux"),
+    (("runner", "RUNNER_ARCH"), "X64"),
+    (("platform_identity", "system"), "Linux"),
+    (("platform_identity", "machine"), "x86_64"),
+)
+_STABLE_BUILD_INPUT_PATHS = (
     ("schema_version",),
     ("python", "implementation"),
     ("python", "version"),
@@ -63,7 +77,7 @@ _STABLE_ENVIRONMENT_PATHS = (
     ("source",),
     ("release_tools",),
     ("requirements",),
-) + tuple(("runner", key) for key in _STABLE_RUNNER_KEYS)
+) + tuple(("runner", key) for key in _STABLE_RUNNER_INPUT_KEYS)
 
 
 def _file_sha256(path: Path) -> str:
@@ -95,7 +109,7 @@ def release_environment(requirements: Path, *, build_identity: str | None = None
 
     pip_identity = _command_stdout([sys.executable, "-m", "pip", "--version"])
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": _SCHEMA_VERSION,
         "build_identity": build_identity,
         "python": {
             "executable": sys.executable,
@@ -161,7 +175,12 @@ def _required_runner_field(payload: Mapping[str, Any], label: str, field: str) -
 
 def _validate_hosted_build_identity(
     payload: Mapping[str, Any], label: str, expected_slot: str
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
+    if payload.get("schema_version") != _SCHEMA_VERSION:
+        raise ValueError(
+            f"{label} release environment schema_version must be {_SCHEMA_VERSION}; "
+            f"got {payload.get('schema_version')!r}"
+        )
     identity = _parse_build_identity(payload.get("build_identity"), label)
     if identity["slot"] != expected_slot:
         raise ValueError(
@@ -205,32 +224,55 @@ def _validate_hosted_build_identity(
     if _required_runner_field(payload, label, "GITHUB_ACTIONS") != "true":
         raise ValueError(f"{label} release build is not bound to GitHub Actions")
 
+    for path, expected in _EXPECTED_HOSTED_BUILD_PROFILE:
+        dotted = ".".join(path)
+        try:
+            observed = _nested(payload, path)
+        except KeyError as exc:
+            raise ValueError(
+                f"{label} release environment is missing required field {dotted!r}"
+            ) from exc
+        if observed != expected:
+            raise ValueError(
+                f"{label} release environment field {dotted!r} must be {expected!r}; "
+                f"got {observed!r}"
+            )
+
+    image_version = _required_runner_field(payload, label, "ImageVersion")
+    if not isinstance(image_version, str) or not image_version.strip():
+        raise ValueError(f"{label} release environment has no runner image version")
     runner_name = _required_runner_field(payload, label, "RUNNER_NAME")
-    if not isinstance(runner_name, str) or not runner_name:
+    if not isinstance(runner_name, str) or not runner_name.strip():
         raise ValueError(f"{label} release environment has no runner name")
-    return str(payload["build_identity"]), runner_name
+    return str(payload["build_identity"]), runner_name, image_version
 
 
 def compare_release_environments(
     first: Mapping[str, Any], second: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Require stable build inputs to match and logical build identities to differ."""
-    first_identity, first_runner = _validate_hosted_build_identity(first, "first", "one")
-    second_identity, second_runner = _validate_hosted_build_identity(second, "second", "two")
+    first_identity, first_runner, first_image_version = _validate_hosted_build_identity(
+        first, "first", "one"
+    )
+    second_identity, second_runner, second_image_version = _validate_hosted_build_identity(
+        second, "second", "two"
+    )
 
     matching_identity: dict[str, Any] = {}
-    for path in _STABLE_ENVIRONMENT_PATHS:
+    for path in _STABLE_BUILD_INPUT_PATHS:
         dotted = ".".join(path)
         try:
             first_value = _nested(first, path)
             second_value = _nested(second, path)
         except KeyError as exc:
-            raise ValueError(f"release environment is missing stable field {dotted!r}") from exc
+            raise ValueError(
+                f"release environment is missing stable build input {dotted!r}"
+            ) from exc
         if first_value in (None, "") or second_value in (None, ""):
-            raise ValueError(f"stable release environment field {dotted!r} must be non-empty")
+            raise ValueError(f"stable build input {dotted!r} must be non-empty")
         if first_value != second_value:
             raise ValueError(
-                f"stable release environment field {dotted!r} differs: "
+                f"stable build input {dotted!r} differs: "
                 f"first={first_value!r}, second={second_value!r}"
             )
         matching_identity[dotted] = first_value
@@ -244,8 +286,8 @@ def compare_release_environments(
                 f"{source_commit!r} != {github_sha!r}"
             )
     return {
-        "schema_version": 1,
-        "comparison": "stable-environment-identity",
+        "schema_version": _SCHEMA_VERSION,
+        "comparison": _COMPARISON,
         "compatible": True,
         "distinct_build_identities": {
             "first": first_identity,
@@ -262,6 +304,12 @@ def compare_release_environments(
                 "matrix_slot": "two",
                 "matrix_job_index": "1",
             },
+        },
+        "hosted_runner_image_versions": {
+            "first": first_image_version,
+            "second": second_image_version,
+            "exact_match": first_image_version == second_image_version,
+            "equality_policy": "recorded-host-variation",
         },
         "matching_identity": matching_identity,
         "first": dict(first),
@@ -310,11 +358,9 @@ def main() -> None:
         importlib.metadata.PackageNotFoundError,
     ) as exc:
         failure: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": _SCHEMA_VERSION,
             "comparison": (
-                "stable-environment-identity"
-                if args.compare is not None
-                else "release-environment-recording"
+                _COMPARISON if args.compare is not None else "release-environment-recording"
             ),
             "compatible": False,
             "error": str(exc),
