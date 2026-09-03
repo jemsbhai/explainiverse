@@ -163,9 +163,11 @@ the concrete class and registry scope before use.
 `ExplanationSuite.run(...)` executes only local explainers, checks both constructor and method
 arguments, and leaves exact array shape to each concrete contract. Required method arguments
 such as ProtoDash reference data must be supplied through `explainer_call_kwargs` or
-`call_kwargs_by_explainer`. `ExplanationSuite.compare()` requires the same ordered feature
-identity, explained target, and explicit caller-asserted `metadata["comparison_contract"]`
-across multiple outputs. Built-in explainers do not currently emit that contract. The
+`call_kwargs_by_explainer`. The returned mapping is detached from `suite.explanations`, so
+changing its keys does not alter the suite's stored results; both mappings contain the same
+`Explanation` objects. `ExplanationSuite.compare()` requires the same ordered feature identity,
+explained target, and explicit caller-asserted `metadata["comparison_contract"]` across multiple
+outputs. Built-in explainers do not currently emit that contract. The
 `allow_incommensurate=True` escape hatch is a warned descriptive display, not a mathematical
 comparison.
 

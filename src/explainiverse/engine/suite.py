@@ -264,7 +264,9 @@ class ExplanationSuite:
                 part of each concrete explainer's contract.
 
         Returns:
-            Dictionary mapping explainer names to Explanation objects
+            A new dictionary mapping explainer names to Explanation objects.
+            The mapping is detached from ``suite.explanations``; its Explanation
+            values are the same objects retained by the suite.
         """
         self.explanations = {}
         try:
@@ -308,7 +310,7 @@ class ExplanationSuite:
             current[name] = explanation
 
         self.explanations = current
-        return self.explanations
+        return dict(self.explanations)
 
     def compare(self, *, allow_incommensurate: bool = False) -> None:
         """

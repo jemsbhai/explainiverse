@@ -124,6 +124,9 @@ unrepresentable objective raises `ValueError` instead of placing `NaN` or infini
 - Consistency defaults to stable feature order at a top-k cutoff tie. Detail mode records tie
   incidence; `tie_policy="reject"` refuses a tie spanning the cutoff and
   `tie_policy="include_all"` includes the complete tied set. Comparisons reject mixed policies.
+- `ExplanationSuite.run()` returns a detached mapping, so clearing or changing the returned
+  dictionary no longer changes `suite.explanations`. The contained `Explanation` objects remain
+  shared.
 - `ExplanationSuite.compare()` uses semantic target equality, not `repr` identity.
 - Metric registry entries now expose reviewed `stochasticity` values (`deterministic`,
   `conditional`, or `stochastic`). The legacy `stochastic` boolean remains a derived view.

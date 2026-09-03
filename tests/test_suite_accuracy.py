@@ -218,6 +218,24 @@ def test_run_replaces_previous_results_atomically():
     assert "stale" not in suite.explanations
 
 
+def test_run_returns_mapping_that_cannot_clear_stored_results(capsys):
+    explanation = _valid_explanation()
+    suite = ExplanationSuite(None, [("static", {})])
+    suite._registry = _StaticRegistry(explanation)
+
+    results = suite.run(np.array([1.0]))
+
+    assert results == {"static": explanation}
+    assert results is not suite.explanations
+    assert results["static"] is suite.explanations["static"]
+    results.clear()
+
+    assert suite.explanations == {"static": explanation}
+    assert suite.list_completed() == ["static"]
+    suite.compare()
+    assert "Side-by-Side Comparison" in capsys.readouterr().out
+
+
 def test_instance_runner_requires_and_forwards_method_specific_call_arguments():
     reference = np.ones((3, 2))
     registry = _MetadataRegistry()
