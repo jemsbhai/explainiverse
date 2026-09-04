@@ -530,7 +530,6 @@ def test_exception_capture_reads_and_binds_pr5_merge_metadata():
             "state": pull_request["state"],
             "merged": pull_request["merged"],
             "merged_at": pull_request["merged_at"],
-            "merge_commit_sha": pull_request["merge_commit_sha"],
             "base": {
                 "ref": pull_request["base_ref"],
                 "repo": {"full_name": pull_request["base_repository"]},
@@ -541,6 +540,14 @@ def test_exception_capture_reads_and_binds_pr5_merge_metadata():
             },
             "merged_by": {"login": pull_request["merged_by"]},
         },
+        f"{root}/issues/5/timeline?per_page=100&page=1": [
+            {
+                "event": "merged",
+                "commit_id": pull_request["merge_commit_sha"],
+                "actor": {"login": pull_request["merged_by"]},
+                "created_at": pull_request["merged_at"],
+            }
+        ],
         f"{root}/immutable-releases": observation["immutable_releases"],
         f"{root}/rulesets": [{"id": 7, "name": policy["tag_ruleset"]["name"]}],
         f"{root}/rulesets/7": observation["rulesets"][0],
@@ -580,8 +587,102 @@ def test_exception_capture_reads_and_binds_pr5_merge_metadata():
     )
 
     assert f"{root}/pulls/5" in requested
+    assert f"{root}/issues/5/timeline?per_page=100&page=1" in requested
     assert captured == observation
     assert controls.evaluate_controls(policy, captured) == []
+
+
+def test_exception_merge_event_reads_every_timeline_page():
+    root = "repos/jemsbhai/explainiverse"
+    first_page = [{"event": "commented"} for _ in range(99)]
+    first_page.append(
+        {
+            "event": "merged",
+            "commit_id": SHA,
+            "actor": {"login": "jemsbhai"},
+            "created_at": "2026-09-03T12:00:00Z",
+        }
+    )
+    responses = {
+        f"{root}/issues/5/timeline?per_page=100&page=1": first_page,
+        f"{root}/issues/5/timeline?per_page=100&page=2": [],
+    }
+    requested = []
+
+    def get_json(path):
+        requested.append(path)
+        return responses[path]
+
+    event = controls._exception_merge_event(
+        get_json=get_json,
+        root=root,
+        pull_number=5,
+    )
+
+    assert event["commit_id"] == SHA
+    assert requested == list(responses)
+
+
+@pytest.mark.parametrize(
+    ("events", "match"),
+    [
+        ([], "exactly one merged event"),
+        (
+            [
+                {"event": "merged", "commit_id": SHA},
+                {"event": "merged", "commit_id": SHA},
+            ],
+            "exactly one merged event",
+        ),
+        ([{"event": "merged", "commit_id": "short"}], "complete lowercase commit SHA"),
+    ],
+)
+def test_exception_merge_event_fails_closed_on_ambiguous_metadata(events, match):
+    with pytest.raises(ValueError, match=match):
+        controls._exception_merge_event(
+            get_json=lambda _path: events,
+            root="repos/jemsbhai/explainiverse",
+            pull_number=5,
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_field", "replacement", "match"),
+    [
+        ("actor", {"login": "someone-else"}, "actor differs"),
+        ("created_at", "2026-09-03T12:00:01Z", "time differs"),
+    ],
+)
+def test_exception_pull_request_normalization_cross_checks_merge_event(
+    event_field, replacement, match
+):
+    policy, _ = _policy()
+    pull_request = _matching_observation(CUDA_EXCEPTION_ID)["cuda_exception_merge_pull_request"]
+    raw = {
+        "number": pull_request["number"],
+        "state": pull_request["state"],
+        "merged": pull_request["merged"],
+        "merged_at": pull_request["merged_at"],
+        "base": {
+            "ref": pull_request["base_ref"],
+            "repo": {"full_name": policy["repository"]},
+        },
+        "head": {
+            "sha": pull_request["head_sha"],
+            "repo": {"full_name": policy["repository"]},
+        },
+        "merged_by": {"login": pull_request["merged_by"]},
+    }
+    event = {
+        "event": "merged",
+        "commit_id": pull_request["merge_commit_sha"],
+        "actor": {"login": pull_request["merged_by"]},
+        "created_at": pull_request["merged_at"],
+    }
+    event[event_field] = replacement
+
+    with pytest.raises(ValueError, match=match):
+        controls._normalize_exception_pull_request(raw, merged_event=event)
 
 
 def test_snapshot_is_bound_to_exact_policy_repository_tag_and_commit():
