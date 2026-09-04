@@ -107,8 +107,8 @@ def test_preflight_requires_fresh_admin_capture_then_attests_and_binds_it():
     assert "cuda_exception_id:" in workflow
     assert workflow.count('default: ""') >= 2
     assert "supply exactly one of cuda_run_id or cuda_exception_id" in workflow
-    assert '"EXPLAINIVERSE-v0.15.0-CPU-ONLY"' in workflow
-    assert '"$RELEASE_TAG" != "v0.15.0"' in workflow
+    assert '"EXPLAINIVERSE-v0.15.1-CPU-ONLY"' in workflow
+    assert '"$RELEASE_TAG" != "v0.15.1"' in workflow
     assert "jobs?filter=all&per_page=100" in workflow
     assert "gh api --paginate" in workflow
     assert "if: inputs.cuda_run_id != ''" in workflow
@@ -137,8 +137,8 @@ def test_publish_requires_verified_hardware_or_the_exact_cpu_only_exception():
     assert "preflight_run_id:" in workflow
     assert "cuda_exception_id:" in workflow
     assert "supply exactly one of cuda_run_id or cuda_exception_id" in workflow
-    assert '"EXPLAINIVERSE-v0.15.0-CPU-ONLY"' in workflow
-    assert '"$RELEASE_TAG" != "v0.15.0"' in workflow
+    assert '"EXPLAINIVERSE-v0.15.1-CPU-ONLY"' in workflow
+    assert '"$RELEASE_TAG" != "v0.15.1"' in workflow
     assert "needs: [preflight, cuda-release]" in workflow
     assert "cuda_mode: ${{ steps.verify.outputs.cuda_mode }}" in workflow
     assert "cuda_run_id: ${{ steps.verify.outputs.cuda_run_id }}" in workflow
@@ -163,7 +163,7 @@ def test_publish_requires_verified_hardware_or_the_exact_cpu_only_exception():
     assert "needs.cuda-release.result == 'skipped'" in build_job
     assert (
         "needs.preflight.outputs.cuda_exception_id == "
-        "'EXPLAINIVERSE-v0.15.0-CPU-ONLY'" in build_job
+        "'EXPLAINIVERSE-v0.15.1-CPU-ONLY'" in build_job
     )
     assert "inputs.cuda_exception_id" not in build_job
     assert "inputs.cuda_run_id" not in build_job
@@ -259,7 +259,7 @@ def test_publish_attests_and_carries_the_selected_cuda_gate_without_fabrication(
     assert 'if [[ "$CUDA_MODE" == "hardware_evidence" ]]' in governance
     assert (
         'elif [[ "$CUDA_MODE" == "cpu_only_exception" && \\\n'
-        '                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.0-CPU-ONLY" ]]'
+        '                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.1-CPU-ONLY" ]]'
         in governance
     )
     assert 'governance_selector=(--cuda-run-id "$CUDA_RUN_ID")' in governance
@@ -357,6 +357,13 @@ def test_publish_rebuilds_a_clean_tag_and_binds_the_attested_reproducibility_byt
     assert '(cd release-source && poetry build --output "$GITHUB_WORKSPACE/dist")' in build_job
     assert "dist reproducibility-proof/one/dist" in build_job
     assert "dist reproducibility-proof/two/dist" in build_job
+    prepare_sbom = build_job.index("prepare_release_sbom_pyproject.py")
+    generate_sbom = build_job.index("cyclonedx-py environment")
+    assert clean_build < prepare_sbom < generate_sbom
+    assert "--source release-source/pyproject.toml" in build_job
+    assert "--output provenance/explainiverse-sbom.pyproject.toml" in build_job
+    assert "--pyproject provenance/explainiverse-sbom.pyproject.toml" in build_job
+    assert "--pyproject release-source/pyproject.toml" not in build_job
 
 
 def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():

@@ -36,11 +36,11 @@ _POST_PYPI_RELEASE_STEPS = (
 )
 _HARDWARE_MODE = "hardware_evidence"
 _EXCEPTION_MODE = "cpu_only_exception"
-_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
-_CUDA_EXCEPTION_TAG = "v0.15.0"
-_CUDA_EXCEPTION_VERSION = "0.15.0"
-_CUDA_EXCEPTION_PULL_REQUEST = 5
-_CUDA_EXCEPTION_APPROVED_AT = "2026-09-03"
+_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.1-CPU-ONLY"
+_CUDA_EXCEPTION_TAG = "v0.15.1"
+_CUDA_EXCEPTION_VERSION = "0.15.1"
+_CUDA_EXCEPTION_PULL_REQUEST = 6
+_CUDA_EXCEPTION_APPROVED_AT = "2026-09-04"
 _CUDA_EXCEPTION_AUTHORIZED_BY = ["jemsbhai"]
 _CUDA_EXCEPTION_OMITTED_CHECKS = [
     "CUDA single-GPU (Torch latest)",
@@ -53,12 +53,16 @@ _CUDA_EXCEPTION_OMITTED_JOBS = [
     "CUDA two-GPU scheduled (Torch minimum)",
 ]
 _CUDA_EXCEPTION_REASON = (
-    "Approved one-release CPU-only exception because isolated one- and two-GPU "
-    "release runners are unavailable."
+    "Approved one-release CPU-only roll-forward because isolated one- and two-GPU "
+    "release runners remain unavailable and the immutable v0.15.0 publication attempt "
+    "failed during SBOM generation before publication."
 )
 _CUDA_EXCEPTION_DISCLOSURE = (
-    "Explainiverse 0.15.0 is CPU-verified; CUDA hardware validation was not performed "
-    "and this release makes no CUDA release-verification claim."
+    "Explainiverse 0.15.1 is CPU-verified; CUDA hardware validation was not performed "
+    "and this release makes no CUDA release-verification claim. The immutable signed "
+    "v0.15.0 Git tag remains unchanged, but v0.15.0 was not published to PyPI and has "
+    "no GitHub Release: workflow run 33891048942 failed during SBOM generation before "
+    "artifact upload, attestation, PyPI publication, or GitHub Release creation."
 )
 _HARDWARE_GATE_FIELDS = {
     "schema_version",

@@ -170,10 +170,10 @@
     }
   },
   "cuda_release_exception": {
-    "id": "EXPLAINIVERSE-v0.15.0-CPU-ONLY",
-    "release_tag": "v0.15.0",
-    "package_version": "0.15.0",
-    "merge_pull_request": 5,
+    "id": "EXPLAINIVERSE-v0.15.1-CPU-ONLY",
+    "release_tag": "v0.15.1",
+    "package_version": "0.15.1",
+    "merge_pull_request": 6,
     "omitted_required_checks": [
       "CUDA single-GPU (Torch latest)",
       "CUDA single-GPU (Torch minimum)"
@@ -187,9 +187,9 @@
     "hardware_evidence_collected": false,
     "cuda_release_verified": false,
     "authorized_by": ["jemsbhai"],
-    "approved_at": "2026-09-03",
-    "reason": "Approved one-release CPU-only exception because isolated one- and two-GPU release runners are unavailable.",
-    "disclosure": "Explainiverse 0.15.0 is CPU-verified; CUDA hardware validation was not performed and this release makes no CUDA release-verification claim."
+    "approved_at": "2026-09-04",
+    "reason": "Approved one-release CPU-only roll-forward because isolated one- and two-GPU release runners remain unavailable and the immutable v0.15.0 publication attempt failed during SBOM generation before publication.",
+    "disclosure": "Explainiverse 0.15.1 is CPU-verified; CUDA hardware validation was not performed and this release makes no CUDA release-verification claim. The immutable signed v0.15.0 Git tag remains unchanged, but v0.15.0 was not published to PyPI and has no GitHub Release: workflow run 33891048942 failed during SBOM generation before artifact upload, attestation, PyPI publication, or GitHub Release creation."
   },
   "branch_protection": {
     "admin_enforcement": true,

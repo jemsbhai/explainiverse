@@ -30,7 +30,7 @@ GOVERNANCE_SPEC.loader.exec_module(governance_generator)
 
 SHA = "a" * 40
 SOURCE_RUN_ID = "1234"
-FILENAMES = ("explainiverse-0.15.0-py3-none-any.whl", "explainiverse-0.15.0.tar.gz")
+FILENAMES = ("explainiverse-0.15.1-py3-none-any.whl", "explainiverse-0.15.1.tar.gz")
 
 
 def _artifacts(tmp_path):
@@ -47,7 +47,7 @@ def _artifacts(tmp_path):
         encoding="utf-8",
     )
     pypi = {
-        "info": {"name": "explainiverse", "version": "0.15.0"},
+        "info": {"name": "explainiverse", "version": "0.15.1"},
         "urls": [
             {"filename": filename, "digests": {"sha256": digest}}
             for filename, digest in hashes.items()
@@ -66,7 +66,7 @@ def _source_run():
         "path": ".github/workflows/publish-pypi.yml",
         "event": "workflow_dispatch",
         "head_sha": SHA,
-        "head_branch": "v0.15.0",
+        "head_branch": "v0.15.1",
         "status": "completed",
         # The overall run is expected to be failed when GitHub Release creation failed.
         "conclusion": "failure",
@@ -117,7 +117,7 @@ def _governance_material(*, hardware_evidence=False):
         "violations": [],
         "observation": {
             "repository": policy["repository"],
-            "release_tag": "v0.15.0",
+            "release_tag": "v0.15.1",
             "release_commit": SHA,
             "capture_principal": "jemsbhai",
             "pypi_environment": {
@@ -140,7 +140,7 @@ def _governance_material(*, hardware_evidence=False):
             "mode": "hardware_evidence",
             "status": "verified",
             "exception_id": None,
-            "release_tag": "v0.15.0",
+            "release_tag": "v0.15.1",
             "release_commit": SHA,
             "hardware_evidence_collected": True,
             "cuda_release_verified": True,
@@ -152,7 +152,7 @@ def _governance_material(*, hardware_evidence=False):
         exception = policy["cuda_release_exception"]
         snapshot["cuda_release_exception"] = exception
         snapshot["observation"]["cuda_exception_merge_pull_request"] = {
-            "number": 5,
+            "number": 6,
             "state": "closed",
             "merged": True,
             "merged_at": "2026-09-03T12:00:00Z",
@@ -168,7 +168,7 @@ def _governance_material(*, hardware_evidence=False):
             "mode": "cpu_only_exception",
             "status": "not_run",
             "exception_id": exception["id"],
-            "release_tag": "v0.15.0",
+            "release_tag": "v0.15.1",
             "release_commit": SHA,
             "package_version": exception["package_version"],
             "merge_pull_request": exception["merge_pull_request"],
@@ -191,7 +191,7 @@ def _governance_material(*, hardware_evidence=False):
         policy_bytes=policy_bytes,
         snapshot_bytes=snapshot_bytes,
         repository="jemsbhai/explainiverse",
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         preflight_run_id="123",
         **cuda_arguments,
@@ -227,7 +227,7 @@ def _verify_governance(
         snapshot_bytes=default_snapshot if snapshot_bytes is None else snapshot_bytes,
         governance_markdown=canonical_markdown if markdown is None else markdown,
         repository="jemsbhai/explainiverse",
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         source_run_id=SOURCE_RUN_ID,
     )
@@ -248,7 +248,7 @@ def test_recovery_governance_record_accepts_verified_hardware_gate():
     [
         ("record", ("schema_version",), True, "schema_version"),
         ("record", ("release", "repository"), "other/repository", "record repository"),
-        ("record", ("release", "tag"), "v0.15.1", "record tag"),
+        ("record", ("release", "tag"), "v0.15.2", "record tag"),
         ("record", ("release", "commit"), "b" * 40, "record commit"),
         ("record", ("evidence", "release_workflow_run_id"), "999", "source run id"),
         (
@@ -285,7 +285,7 @@ def test_recovery_governance_record_accepts_verified_hardware_gate():
         ),
         ("run", ("id",), 999, "source run id mismatch"),
         ("run", ("repository", "full_name"), "other/repository", "source run repository"),
-        ("run", ("head_branch",), "v0.15.1", "source run tag"),
+        ("run", ("head_branch",), "v0.15.2", "source run tag"),
         ("run", ("head_sha",), "b" * 40, "source run commit"),
         ("run", ("run_attempt",), 2, "record source run attempt"),
         ("run", ("actor", "login"), "other", "record source actor"),
@@ -338,7 +338,7 @@ def test_governance_record_cli_fails_closed_on_retained_record_substitution(tmp_
         "--repository",
         "jemsbhai/explainiverse",
         "--tag",
-        "v0.15.0",
+        "v0.15.1",
         "--commit",
         SHA,
         "--source-run-id",
@@ -353,8 +353,8 @@ def test_governance_record_cli_fails_closed_on_retained_record_substitution(tmp_
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
-        ("exception_id", "EXPLAINIVERSE-v0.15.0-CPU-ONLY-forged"),
-        ("merge_pull_request", 5.0),
+        ("exception_id", "EXPLAINIVERSE-v0.15.1-CPU-ONLY-forged"),
+        ("merge_pull_request", 6.0),
         ("merge_commit_sha", "b" * 40),
         ("hardware_evidence_collected", 0),
         ("cuda_release_verified", 0),
@@ -409,7 +409,7 @@ def test_original_dist_pypi_and_github_assets_must_have_identical_hashes(tmp_pat
     expected = recovery.parse_sha256sums(sums)
     assert expected == hashes
     recovery.verify_distribution_directory(dist, expected)
-    recovery.verify_pypi_json(pypi, project="explainiverse", version="0.15.0", expected=expected)
+    recovery.verify_pypi_json(pypi, project="explainiverse", version="0.15.1", expected=expected)
     release_assets = tmp_path / "github-assets"
     release_assets.mkdir()
     for source in dist.iterdir():
@@ -525,7 +525,7 @@ def test_distribution_verification_rejects_missing_extra_or_changed_files(tmp_pa
     ("mutation", "match"),
     [
         (lambda value: value["info"].update(name="other"), "project mismatch"),
-        (lambda value: value["info"].update(version="0.15.1"), "version mismatch"),
+        (lambda value: value["info"].update(version="0.15.2"), "version mismatch"),
         (
             lambda value: value["urls"][0]["digests"].update(sha256="0" * 64),
             "inventory/hash mismatch",
@@ -539,7 +539,7 @@ def test_pypi_verification_fails_closed_on_identity_or_hash_drift(tmp_path, muta
     mutation(pypi)
     with pytest.raises(ValueError, match=match):
         recovery.verify_pypi_json(
-            pypi, project="explainiverse", version="0.15.0", expected=expected
+            pypi, project="explainiverse", version="0.15.1", expected=expected
         )
 
 
@@ -551,7 +551,7 @@ def test_failed_overall_source_run_is_accepted_only_after_publish_succeeded():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
         == "staged_drill"
@@ -564,7 +564,7 @@ def test_failed_overall_source_run_is_accepted_only_after_publish_succeeded():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 
@@ -578,7 +578,7 @@ def test_source_run_must_prove_failed_overall_and_downstream_release_job():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 
@@ -590,7 +590,7 @@ def test_source_run_must_prove_failed_overall_and_downstream_release_job():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 
@@ -606,7 +606,7 @@ def test_source_run_distinguishes_staged_drill_from_unplanned_failure():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
         == "unplanned_downstream_failure"
@@ -631,7 +631,7 @@ def test_source_run_rejects_ambiguous_downstream_failure_evidence(mutation):
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 
@@ -645,7 +645,7 @@ def test_source_run_rejects_hidden_rerun_attempts_and_incomplete_pagination():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 
@@ -657,7 +657,7 @@ def test_source_run_rejects_hidden_rerun_attempts_and_incomplete_pagination():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 
@@ -669,7 +669,7 @@ def test_source_run_rejects_hidden_rerun_attempts_and_incomplete_pagination():
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 
@@ -694,7 +694,7 @@ def test_source_run_is_bound_to_exact_tag_workflow_and_commit(field, replacement
             jobs,
             repository="jemsbhai/explainiverse",
             workflow_path=".github/workflows/publish-pypi.yml",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
         )
 

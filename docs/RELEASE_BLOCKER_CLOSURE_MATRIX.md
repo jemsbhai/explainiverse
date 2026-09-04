@@ -10,8 +10,8 @@ bound widening and B11 is an intentionally retained P2 quarantine, so their bloc
 not stable-release failures while those surfaces remain unclaimed.
 
 The default stable-release recommendation is **NO** while every P0 external/live-main acceptance
-row remains open. There is one exception: the maintainer authorized
-`EXPLAINIVERSE-v0.15.0-CPU-ONLY` on 2026-09-03 for PR #5 and release `v0.15.0`. That release may
+row remains open. There is one current exception: the maintainer authorized
+`EXPLAINIVERSE-v0.15.1-CPU-ONLY` on 2026-09-04 for PR #6 and release `v0.15.1`. That release may
 proceed only with every non-CUDA gate and publication control green and with immutable disclosure
 that CUDA hardware evidence was not collected and CUDA release verification is false. The
 exception cannot close B04, support a CUDA claim, or authorize another tag.
@@ -20,7 +20,7 @@ The 2026-08-11 evidence below predates this exception and remains a historical r
 audit. Its statements that no merge, tag, publication, release creation, settings mutation, or
 GPU representation had been authorized describe that audit, not the later one-release decision.
 
-## 2026-09-03 exception authorization
+## 2026-09-03 historical v0.15.0 exception authorization
 
 - The versioned policy keeps the 23-context baseline. For `v0.15.0` plus exception ID
   `EXPLAINIVERSE-v0.15.0-CPU-ONLY`, it omits only the two single-GPU exact-commit check-run
@@ -36,11 +36,37 @@ GPU representation had been authorized describe that audit, not the later one-re
   results and performs administrator capture/preflight while all 23 protections are live.
 - The preflight snapshot, publish verification, and `RELEASE_GOVERNANCE.json`/`.md` bind the
   exception ID, tag/version, GitHub PR #5's actual merge commit, authorizer/date/reason, every
-  omission, the restored 23-context protection, and both false CUDA evidence fields. All future
-  releases use the normal hardware-evidence branch.
+  omission, the restored 23-context protection, and both false CUDA evidence fields. Its scope
+  ended with `v0.15.0`; any later exception requires a separate, explicit authorization.
+
+The exception was exercised through signed tag creation, but publication run `33891048942`
+stopped during SBOM generation before artifact upload, distribution attestation, PyPI publication,
+or GitHub Release creation. The signed immutable `v0.15.0` tag remains unchanged and is not a
+published release.
+
+## 2026-09-04 v0.15.1 roll-forward authorization
+
+- `EXPLAINIVERSE-v0.15.1-CPU-ONLY` is bound to tag/package version `v0.15.1`/`0.15.1`, PR #6,
+  maintainer `jemsbhai`, and the 2026-09-04 authorization. It retains the same exact two omitted
+  single-GPU contexts, four omitted release CUDA jobs, and false hardware/verification fields.
+- The roll-forward fixes the deterministic SBOM metadata failure and GitHub's removal of
+  `merge_commit_sha` from current pull-request payloads. It does not broaden any CUDA claim or
+  waive any non-CUDA check, reproducibility proof, signing, attestation, OIDC, or immutable-Release
+  requirement.
+- The 21-context protection state may exist only long enough to merge PR #6. Both CUDA contexts
+  must then be restored with Actions app ID `15368` before exact-main checks, a fresh administrator
+  capture, and preflight for `v0.15.1`.
 
 ## Fresh control observations
 
+- On 2026-09-04, the owner authenticated to PyPI and registered the exact Trusted Publisher for
+  owner `jemsbhai`, repository `explainiverse`, workflow `publish-pypi.yml`, and environment
+  `pypi`. GitHub preflight run `33890660777` accepted all 23 restored branch contexts and the
+  original exception on PR #5's merge. Signed-tag publish run `33891048942` then passed the full
+  Python, JavaScript, and reproducibility gates but failed deterministically while CycloneDX read
+  hybrid Poetry-2/PEP-621 metadata. It produced no artifacts and never reached attestation, the
+  protected PyPI environment, publication, or GitHub Release creation. PyPI versions `0.15.0` and
+  `0.15.1` were both absent when the roll-forward was authorized.
 - The authenticated GitHub capture was made by repository administrator `jemsbhai` at
   `2026-08-11T17:16:13.612560+00:00` against `origin/main`
   `49e962c090e90e62f315837067e5adc3e3f04d1c` and planned tag `v0.15.0`. Snapshot SHA-256:
@@ -78,10 +104,10 @@ GPU representation had been authorized describe that audit, not the later one-re
 
 | Blocker | State | Owner | Required authority and action | Falsifiable acceptance | Fresh evidence |
 |---|---|---|---|---|---|
-| B01 | **BLOCKED — PyPI owner/OIDC** | PyPI project owner `jemsbhai` | Directly verify or register the exact Trusted Publisher for owner `jemsbhai`, repository `explainiverse`, workflow `publish-pypi.yml`, environment `pypi`; separately authorize one release. | Archive the authenticated settings record. On the exact candidate, the sole publisher uses OIDC with no token/user/password/secret fallback; each exact PyPI file has Integrity provenance whose DSSE subject/digest and GitHub publisher repository/workflow/environment pass the hash-locked cryptographic verifier; repository and environment secret-name inventories remain empty. | Owner settings could not be read without login. Public 0.14.0 provenance is absent and 0.15.0 is unused. The repository now adversarially enforces the token-free publisher and provenance shape, but no authorized OIDC upload exists. |
-| B02 | **EXCEPTION PATH AUTHORIZED; EXECUTION EVIDENCE PENDING** | GitHub repository administrator and CI/merge authority | For `v0.15.0`, narrow only the app-bound required-check set to the policy-derived 21, merge PR #5, immediately restore all 23 contexts, and run every non-CUDA gate on the exact `main` commit. Capture/preflight only while the restored 23-context protection is live. | A capture no older than 30 minutes has `repository_controls_accepted=true`, zero violations under the exact exception, immutable Releases enabled, exact policy/snapshot digests, all 23 exact context/app bindings, and one successful provider-bound check for each of the 21 non-CUDA names on the candidate SHA. The capture proves that SHA is GitHub PR #5's actual `merge_commit_sha`; actor and triggering actor match the capture principal. | On 2026-09-03, live `main` protection had all 23 names bound to Actions app ID 15368, strict checks and administrator enforcement, no force-push/delete, and immutable Releases enabled. PR #5 predecessor head `439fa420601fd386b2093c2077707a1716745b98` passed its 21 non-CUDA contexts; the final exception head, merge/main push, immediate restoration, 21 non-CUDA exact-commit results, and successful full-23-context capture/preflight were still pending. |
+| B01 | **TRUSTED PUBLISHER CONFIGURED; OIDC RELEASE PENDING** | PyPI project owner `jemsbhai` | Preserve the exact Trusted Publisher for owner `jemsbhai`, repository `explainiverse`, workflow `publish-pypi.yml`, environment `pypi`; complete the authorized roll-forward without adding a token fallback. | On the exact candidate, the sole publisher uses OIDC with no token/user/password/secret fallback; each exact PyPI file has Integrity provenance whose DSSE subject/digest and GitHub publisher repository/workflow/environment pass the hash-locked cryptographic verifier; repository and environment secret-name inventories remain empty. | The owner authenticated on 2026-09-04 and registered the exact publisher. Run `33891048942` stopped before requesting the environment or OIDC token, so successful publication remains pending. |
+| B02 | **V0.15.1 EXCEPTION PATH AUTHORIZED; EXECUTION EVIDENCE PENDING** | GitHub repository administrator and CI/merge authority | For `v0.15.1`, narrow only the app-bound required-check set to the policy-derived 21, merge PR #6, immediately restore all 23 contexts, and run every non-CUDA gate on the exact `main` commit. Capture/preflight only while the restored 23-context protection is live. | A capture no older than 30 minutes has `repository_controls_accepted=true`, zero violations under the exact exception, immutable Releases enabled, exact policy/snapshot digests, all 23 exact context/app bindings, and one successful provider-bound check for each of the 21 non-CUDA names on the candidate SHA. The capture proves that SHA is GitHub PR #6's actual merge event commit; actor and triggering actor match the capture principal. | The original PR #5 path restored and proved all 23 protections before `v0.15.0` failed safely at SBOM generation. PR #6 must repeat the narrow merge window, restoration, exact-main results, and fresh capture/preflight with the repaired collector and SBOM path. |
 | B03 | **BLOCKED — authorized recovery drill** | Separately authorized release operator | On a future build/attest/OIDC run, request the deliberate post-PyPI failure, then dispatch recovery from the immutable release tag and recover only the downstream GitHub Release from that original run. Do not reuse 0.14.0. | Source run concludes failure; build, attest, and publish each have exactly one successful attempt; the release job fails at the explicit drill step with later release steps skipped. Recovery executes from `refs/tags/<tag>` at that tag's exact commit, verifies attestations, and proves original, PyPI, and GitHub files byte-identical without a second upload. Retain source/all-attempt jobs, inventories, hashes, service JSON, and recovery evidence. | Verifier now distinguishes a staged drill from an unplanned downstream failure and rejects successful, missing, skipped, duplicate, branch-dispatched, or wrong-SHA source evidence. No authorized live drill exists; legacy 0.14.0 cannot satisfy it. |
-| B04 | **WAIVED FOR `v0.15.0` ONLY; OTHERWISE BLOCKED** | Repository administrator and GPU-infrastructure owner | The exceptional release uses only `EXPLAINIVERSE-v0.15.0-CPU-ONLY` and makes no CUDA claim. Provision approved isolated Linux runners carrying `explainiverse-cuda-single` and `explainiverse-cuda-two` before any future stable release or CUDA verification claim. | The `v0.15.0` immutable record says all four CUDA jobs were not run, hardware evidence was not collected, and CUDA release verification is false. Closing B04 still requires all four minimum/latest one-/two-GPU jobs to succeed once on the exact candidate, with expected custom labels, visible-device counts, exact 15-node manifest, zero skips, retained evidence, and infrastructure approval. | Live variables/runners remain zero, so no authorized hosted hardware record exists. PR routing failures prove the fail-closed guard only. The explicit CPU-only record preserves that fact rather than representing manual/local testing as release evidence. |
+| B04 | **WAIVED FOR `v0.15.1` ONLY; OTHERWISE BLOCKED** | Repository administrator and GPU-infrastructure owner | The exceptional release uses only `EXPLAINIVERSE-v0.15.1-CPU-ONLY` and makes no CUDA claim. Provision approved isolated Linux runners carrying `explainiverse-cuda-single` and `explainiverse-cuda-two` before any future stable release or CUDA verification claim. | The `v0.15.1` immutable record says all four CUDA jobs were not run, hardware evidence was not collected, and CUDA release verification is false. Closing B04 still requires all four minimum/latest one-/two-GPU jobs to succeed once on the exact candidate, with expected custom labels, visible-device counts, exact 15-node manifest, zero skips, retained evidence, and infrastructure approval. | Live variables/runners remain zero, so no authorized hosted hardware record exists. PR routing failures prove the fail-closed guard only. The explicit CPU-only record preserves that fact rather than representing manual/local testing as release evidence. |
 | B05 | **BLOCKED — accepted push/live-main dependency evidence; hosted PR rehearsal green** | CI/merge authority | Land and run Python 3.10-3.13 plus direct-floor, Captum, SHAP/XGBoost, and current/floor dependency jobs; require their contexts. | Every declared edge is green on the exact candidate, with the correct substantive test surface, resolved graph, `pip check`, and no unowned skip. | PR dependency run `31513520975`, associated with head `9408f5c…` and merge checkout `0d5ca699…`, completed successfully across all six direct-floor/latest, SHAP/XGBoost, and Captum jobs; Python run `31513521028` also passed full-quality, minimum-direct, Quantus 9/9, and every supported-platform job. The rehearsals used event `pull_request`; the workflows are not landed or required on live `main`, so accepted `push` evidence remains open. |
 | B06 | **BLOCKED — accepted push-event/publish binding; hosted PR rehearsal green** | Release-CI owner | Execute the artifact reproducibility workflow on two clean hosted Linux/Python-3.12 jobs. | Both builds use the same source SHA, Python and pip versions, platform family/architecture, hash-locked tools, requested `ubuntu-24.04` label, actual Ubuntu image family/OS/architecture, GitHub run, and attempt; matrix slots, job indexes, and build identities are distinct; wheel and sdist bytes match. Each exact hosted `ImageVersion` is required and retained as observed provenance but may differ during a fleet rollout; the report must expose both values and whether they match rather than normalize them. Full `platform.platform()` strings and runner display names are also retained for diagnosis but need not be equal. The exact accepted run and both complete manifests/hashes are retained, and the later publish distribution is byte-identical to each accepted build before attestation or upload. | PR run `31513521096` attempt 2 built merge checkout `0d5ca6996e548e6ffb4d89e83aac7fc524ba5dbd` on two distinct hosted jobs using Ubuntu image `20260720.247.2`; comparator job `93855161504` retained report artifact `9110345374`, digest `sha256:ae02222d908d820ca12e5aac0c765fe51a0e267cca70fca4befae01e81ab183e`. The 377,159-byte wheel SHA-256 is `56bd9d021b19ddc0ec4a49cdea67c142ace4b2faaa9df7213d9e94009a7b8746`; the 335,201-byte sdist SHA-256 is `5e51f2f1bf59bfea28a3f3b84a910709e673dcef34e66a42bb8fffdc1ca850a3`. This was a `pull_request` rehearsal associated with head `9408f5c…`, not the required landed `push` run, and no later publish distribution has been byte-bound to it. Later PR run `33795426655` recorded `20260831.293.1` and `20260823.283.1` on the same requested Ubuntu 24.04 profile and passed the byte comparison, but the former exact-version equality rule failed the environment step; that failed run is diagnostic evidence, not accepted release evidence. |
 | B07 | **BLOCKED — accepted push/live-main binding; hosted PR rehearsal green** | Captum/CI owner | Run the mandatory five-file surface under exact Captum 0.8 and current after graph-integrity changes, locally and in required hosted jobs. | Both versions explicitly import Captum and pass all analytical, reference-parity, restoration, and fail-closed graph tests with zero skips before any surface is widened. | Dependency run `31513520975` explicitly imported Captum 0.8.0 and 0.9.0 and passed the exact five-file 306/306 surface with zero skips in both jobs. The Quantus/fixture partition guard also passed the exact 9/9 hosted reference lane. This demonstrates the repository contract on the PR merge checkout, but not the policy-required landed `push` contexts on live `main`. |
@@ -99,6 +125,6 @@ this stable release's gates even though their general roadmap priority is P1. Ty
 AT remain claim gates: stable Python can remain explicitly untyped and the private demo can remain
 explicitly AT-uncertified. Green pull-request rehearsals do not satisfy the reviewed event/ref
 binding. A normal stable release still cannot be recommended while B01-B08 and B09's selected
-macOS/JS contexts lack accepted `push` evidence on the landed candidate. The exact `v0.15.0`
+macOS/JS contexts lack accepted `push` evidence on the landed candidate. The exact `v0.15.1`
 exception may proceed after every non-CUDA and publication acceptance is satisfied, but B04
 remains open and the resulting release scope is CPU-verified only.

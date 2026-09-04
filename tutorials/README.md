@@ -1,8 +1,8 @@
 # Explainiverse tutorials
 
 The first four tutorials are verified, deterministic, offline examples for the current
-`0.15.0` candidate source tree. They were reviewed and published from the locked
-environment on 2026-08-11. Their source/package/lock digests bind them to this checkout; they
+`0.15.1` roll-forward source tree. They were reviewed and published from the locked
+environment on 2026-09-04. Their source/package/lock digests bind them to this checkout; they
 must not be attributed to the older `v0.14.0` tag. The remaining entries on this page are
 curriculum plans, not implemented capabilities.
 

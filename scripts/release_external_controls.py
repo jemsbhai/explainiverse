@@ -30,18 +30,24 @@ from typing import Any, Callable, Mapping, Sequence
 _SHA = re.compile(r"[0-9a-f]{40}")
 _TAG = re.compile(r"v\d+\.\d+\.\d+")
 _MAX_SNAPSHOT_AGE = timedelta(minutes=30)
-_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
-_CUDA_EXCEPTION_TAG = "v0.15.0"
-_CUDA_EXCEPTION_VERSION = "0.15.0"
-_CUDA_EXCEPTION_PULL_REQUEST = 5
-_CUDA_EXCEPTION_APPROVED_AT = "2026-09-03"
+_TIMELINE_PAGE_SIZE = 100
+_MAX_TIMELINE_PAGES = 100
+_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.1-CPU-ONLY"
+_CUDA_EXCEPTION_TAG = "v0.15.1"
+_CUDA_EXCEPTION_VERSION = "0.15.1"
+_CUDA_EXCEPTION_PULL_REQUEST = 6
+_CUDA_EXCEPTION_APPROVED_AT = "2026-09-04"
 _CUDA_EXCEPTION_REASON = (
-    "Approved one-release CPU-only exception because isolated one- and two-GPU "
-    "release runners are unavailable."
+    "Approved one-release CPU-only roll-forward because isolated one- and two-GPU "
+    "release runners remain unavailable and the immutable v0.15.0 publication attempt "
+    "failed during SBOM generation before publication."
 )
 _CUDA_EXCEPTION_DISCLOSURE = (
-    "Explainiverse 0.15.0 is CPU-verified; CUDA hardware validation was not performed "
-    "and this release makes no CUDA release-verification claim."
+    "Explainiverse 0.15.1 is CPU-verified; CUDA hardware validation was not performed "
+    "and this release makes no CUDA release-verification claim. The immutable signed "
+    "v0.15.0 Git tag remains unchanged, but v0.15.0 was not published to PyPI and has "
+    "no GitHub Release: workflow run 33891048942 failed during SBOM generation before "
+    "artifact upload, attestation, PyPI publication, or GitHub Release creation."
 )
 _CUDA_EXCEPTION_OMITTED_CHECKS = (
     "CUDA single-GPU (Torch latest)",
@@ -225,19 +231,71 @@ def _resolve_cuda_release_exception(
     return exception
 
 
-def _normalize_exception_pull_request(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+def _exception_merge_event(
+    *,
+    get_json: Callable[[str], Any],
+    root: str,
+    pull_number: int,
+) -> Mapping[str, Any]:
+    """Read the unique authoritative merge event with fail-closed pagination."""
+    merged_events: list[Mapping[str, Any]] = []
+    for page_number in range(1, _MAX_TIMELINE_PAGES + 1):
+        path = (
+            f"{root}/issues/{pull_number}/timeline?"
+            f"per_page={_TIMELINE_PAGE_SIZE}&page={page_number}"
+        )
+        page = _sequence(get_json(path), f"exception pull request timeline page {page_number}")
+        if len(page) > _TIMELINE_PAGE_SIZE:
+            raise ValueError("exception pull request timeline page exceeds the requested page size")
+        for raw_event in page:
+            event = _mapping(raw_event, "exception pull request timeline event")
+            if event.get("event") == "merged":
+                merged_events.append(event)
+        if len(page) < _TIMELINE_PAGE_SIZE:
+            break
+    else:
+        raise ValueError(
+            "exception pull request timeline pagination exceeded the fail-closed page limit"
+        )
+
+    if len(merged_events) != 1:
+        raise ValueError(
+            "exception pull request timeline must contain exactly one merged event, "
+            f"got {len(merged_events)}"
+        )
+    merge_commit_sha = merged_events[0].get("commit_id")
+    if not isinstance(merge_commit_sha, str) or _SHA.fullmatch(merge_commit_sha) is None:
+        raise ValueError(
+            "exception pull request merged event commit_id must be a complete lowercase "
+            "commit SHA"
+        )
+    return merged_events[0]
+
+
+def _normalize_exception_pull_request(
+    raw: Mapping[str, Any], *, merged_event: Mapping[str, Any]
+) -> Mapping[str, Any]:
     """Keep the immutable PR-to-merge fields used by the one-release exception."""
     base = _mapping(raw.get("base"), "exception pull request base")
     head = _mapping(raw.get("head"), "exception pull request head")
     base_repository = _mapping(base.get("repo"), "exception pull request base repository")
     head_repository = _mapping(head.get("repo"), "exception pull request head repository")
     merged_by = _mapping(raw.get("merged_by"), "exception pull request merged_by")
+    merge_actor = _mapping(merged_event.get("actor"), "exception pull request merge event actor")
+    if merge_actor.get("login") != merged_by.get("login"):
+        raise ValueError(
+            "exception pull request merge event actor differs from the pull request merger"
+        )
+    if merged_event.get("created_at") != raw.get("merged_at"):
+        raise ValueError(
+            "exception pull request merge event time differs from the pull request merge time"
+        )
     return {
         "number": raw.get("number"),
         "state": raw.get("state"),
         "merged": raw.get("merged"),
         "merged_at": raw.get("merged_at"),
-        "merge_commit_sha": raw.get("merge_commit_sha"),
+        "merge_commit_sha": merged_event.get("commit_id"),
         "base_ref": base.get("ref"),
         "base_repository": base_repository.get("full_name"),
         "head_sha": head.get("sha"),
@@ -252,7 +310,7 @@ def _evaluate_exception_pull_request(
     exception: Mapping[str, Any],
     observation: Mapping[str, Any],
 ) -> list[str]:
-    """Require the release SHA to be PR #5's actual GitHub merge commit."""
+    """Require the release SHA to be PR #6's actual GitHub merge commit."""
     violations: list[str] = []
     pull_request = _mapping(
         observation.get("cuda_exception_merge_pull_request"),
@@ -704,7 +762,15 @@ def capture_observation(
             get_json(f"{root}/pulls/{pull_number}"),
             "exception pull request response",
         )
-        exception_pull_request = _normalize_exception_pull_request(raw_pull_request)
+        merged_event = _exception_merge_event(
+            get_json=get_json,
+            root=root,
+            pull_number=pull_number,
+        )
+        exception_pull_request = _normalize_exception_pull_request(
+            raw_pull_request,
+            merged_event=merged_event,
+        )
 
     try:
         immutable_releases = _mapping(

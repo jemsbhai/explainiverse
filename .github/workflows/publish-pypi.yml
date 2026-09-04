@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag selected as both workflow ref and input (for example v0.15.0)"
+        description: "Tag selected as both workflow ref and input (for example v1.2.3)"
         required: true
         type: string
       preflight_run_id:
@@ -74,12 +74,12 @@ jobs:
             exit 1
           fi
           if [[ -n "$CUDA_EXCEPTION_ID" ]]; then
-            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.0-CPU-ONLY" ]]; then
+            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.1-CPU-ONLY" ]]; then
               echo "cuda_exception_id is not the exact reviewed exception" >&2
               exit 1
             fi
-            if [[ "$RELEASE_TAG" != "v0.15.0" ]]; then
-              echo "the CPU-only CUDA exception is valid only for v0.15.0" >&2
+            if [[ "$RELEASE_TAG" != "v0.15.1" ]]; then
+              echo "the CPU-only CUDA exception is valid only for v0.15.1" >&2
               exit 1
             fi
           fi
@@ -171,11 +171,11 @@ jobs:
         env:
           CUDA_EXCEPTION_ID: ${{ steps.verify.outputs.cuda_exception_id }}
         run: |
-          test "$CUDA_EXCEPTION_ID" = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
+          test "$CUDA_EXCEPTION_ID" = "EXPLAINIVERSE-v0.15.1-CPU-ONLY"
           {
             echo "## CUDA release status: NOT RUN"
             echo
-            echo "The attested preflight authorizes \`$CUDA_EXCEPTION_ID\` for v0.15.0 only."
+            echo "The attested preflight authorizes \`$CUDA_EXCEPTION_ID\` for v0.15.1 only."
             echo "This publication does not claim CUDA or multi-GPU validation."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -267,7 +267,7 @@ jobs:
           (
             needs.preflight.outputs.cuda_mode == 'cpu_only_exception' &&
             needs.preflight.outputs.cuda_run_id == '' &&
-            needs.preflight.outputs.cuda_exception_id == 'EXPLAINIVERSE-v0.15.0-CPU-ONLY' &&
+            needs.preflight.outputs.cuda_exception_id == 'EXPLAINIVERSE-v0.15.1-CPU-ONLY' &&
             needs.cuda-release.result == 'skipped'
           )
         )
@@ -441,7 +441,7 @@ jobs:
             evidence+=(cuda-run.json cuda-jobs.json cuda-evidence.sha256)
             governance_selector=(--cuda-run-id "$CUDA_RUN_ID")
           elif [[ "$CUDA_MODE" == "cpu_only_exception" && \
-                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.0-CPU-ONLY" ]]; then
+                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.1-CPU-ONLY" ]]; then
             governance_selector=(--cuda-exception-id "$CUDA_EXCEPTION_ID")
           else
             echo "verified preflight returned an unsupported CUDA release mode" >&2
@@ -624,8 +624,11 @@ jobs:
           (cd dist && sha256sum *.whl *.tar.gz) > provenance/SHA256SUMS
           (cd dist && sha256sum --check ../provenance/SHA256SUMS)
           poetry_python=$(poetry env info --executable)
+          python release-source/scripts/prepare_release_sbom_pyproject.py \
+            --source release-source/pyproject.toml \
+            --output provenance/explainiverse-sbom.pyproject.toml
           cyclonedx-py environment "$poetry_python" \
-            --pyproject release-source/pyproject.toml \
+            --pyproject provenance/explainiverse-sbom.pyproject.toml \
             --mc-type library \
             --output-reproducible \
             --output-format JSON \
