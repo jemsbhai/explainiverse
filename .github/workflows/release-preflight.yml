@@ -74,12 +74,12 @@ jobs:
             exit 1
           fi
           if [[ -n "$CUDA_EXCEPTION_ID" ]]; then
-            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.1-CPU-ONLY" ]]; then
+            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.2-CPU-ONLY" ]]; then
               echo "cuda_exception_id is not the exact reviewed exception" >&2
               exit 1
             fi
-            if [[ "$RELEASE_TAG" != "v0.15.1" ]]; then
-              echo "the CPU-only CUDA exception is valid only for v0.15.1" >&2
+            if [[ "$RELEASE_TAG" != "v0.15.2" ]]; then
+              echo "the CPU-only CUDA exception is valid only for v0.15.2" >&2
               exit 1
             fi
           fi
@@ -171,7 +171,7 @@ jobs:
           {
             echo "## CUDA release status: NOT RUN"
             echo
-            echo "Exception \`$CUDA_EXCEPTION_ID\` applies only to v0.15.1."
+            echo "Exception \`$CUDA_EXCEPTION_ID\` applies only to v0.15.2."
             echo "This preflight does not claim CUDA or multi-GPU validation."
           } >> "$GITHUB_STEP_SUMMARY"
 

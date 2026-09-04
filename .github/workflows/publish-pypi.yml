@@ -74,12 +74,12 @@ jobs:
             exit 1
           fi
           if [[ -n "$CUDA_EXCEPTION_ID" ]]; then
-            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.1-CPU-ONLY" ]]; then
+            if [[ "$CUDA_EXCEPTION_ID" != "EXPLAINIVERSE-v0.15.2-CPU-ONLY" ]]; then
               echo "cuda_exception_id is not the exact reviewed exception" >&2
               exit 1
             fi
-            if [[ "$RELEASE_TAG" != "v0.15.1" ]]; then
-              echo "the CPU-only CUDA exception is valid only for v0.15.1" >&2
+            if [[ "$RELEASE_TAG" != "v0.15.2" ]]; then
+              echo "the CPU-only CUDA exception is valid only for v0.15.2" >&2
               exit 1
             fi
           fi
@@ -171,11 +171,11 @@ jobs:
         env:
           CUDA_EXCEPTION_ID: ${{ steps.verify.outputs.cuda_exception_id }}
         run: |
-          test "$CUDA_EXCEPTION_ID" = "EXPLAINIVERSE-v0.15.1-CPU-ONLY"
+          test "$CUDA_EXCEPTION_ID" = "EXPLAINIVERSE-v0.15.2-CPU-ONLY"
           {
             echo "## CUDA release status: NOT RUN"
             echo
-            echo "The attested preflight authorizes \`$CUDA_EXCEPTION_ID\` for v0.15.1 only."
+            echo "The attested preflight authorizes \`$CUDA_EXCEPTION_ID\` for v0.15.2 only."
             echo "This publication does not claim CUDA or multi-GPU validation."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -267,7 +267,7 @@ jobs:
           (
             needs.preflight.outputs.cuda_mode == 'cpu_only_exception' &&
             needs.preflight.outputs.cuda_run_id == '' &&
-            needs.preflight.outputs.cuda_exception_id == 'EXPLAINIVERSE-v0.15.1-CPU-ONLY' &&
+            needs.preflight.outputs.cuda_exception_id == 'EXPLAINIVERSE-v0.15.2-CPU-ONLY' &&
             needs.cuda-release.result == 'skipped'
           )
         )
@@ -441,7 +441,7 @@ jobs:
             evidence+=(cuda-run.json cuda-jobs.json cuda-evidence.sha256)
             governance_selector=(--cuda-run-id "$CUDA_RUN_ID")
           elif [[ "$CUDA_MODE" == "cpu_only_exception" && \
-                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.1-CPU-ONLY" ]]; then
+                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.2-CPU-ONLY" ]]; then
             governance_selector=(--cuda-exception-id "$CUDA_EXCEPTION_ID")
           else
             echo "verified preflight returned an unsupported CUDA release mode" >&2
@@ -655,6 +655,7 @@ jobs:
   attest:
     name: Attest the immutable distributions
     needs: build
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -688,6 +689,7 @@ jobs:
   publish:
     name: Publish through PyPI Trusted Publishing
     needs: attest
+    if: ${{ always() && !cancelled() && needs.attest.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -742,6 +744,7 @@ jobs:
   github-release:
     name: Create the immutable GitHub release
     needs: publish
+    if: ${{ always() && !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

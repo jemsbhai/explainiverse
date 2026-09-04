@@ -210,29 +210,48 @@ The signed immutable `v0.15.0` tag remains as release-automation history, but `0
 published to PyPI and has no GitHub Release. Publication run `33891048942` stopped during SBOM
 generation before artifact upload, attestation, PyPI publication, or GitHub Release creation.
 
-Release `0.15.1` has one explicit CPU-only roll-forward exception,
-`EXPLAINIVERSE-v0.15.1-CPU-ONLY`. The two required single-GPU contexts may be removed only long
-enough to merge PR #6 and must be restored immediately afterward; all four one-/two-GPU release
-jobs remain not run. The exception does not convert a missing GPU run into successful evidence:
-the attested release gate records `hardware_evidence_collected=false`,
-`cuda_release_verified=false`, and the immutable governance disclosure lists every omitted check
-and job. All 23 branch-protection contexts and app bindings, all 21 successful non-CUDA
-exact-commit results, the complete CPU release suite, reproducible artifacts, tag verification,
-attestations, and Trusted Publishing remain mandatory. The exception ID is bound to this tag and
-package version and cannot authorize a later release.
+The signed immutable `v0.15.1` tag is also release-automation history, not a published release.
+Workflow run `33901507340` built successfully and retained workflow artifacts, including the
+repaired SBOM, but GitHub skipped distribution attestation, PyPI publication, and GitHub Release
+creation because the intentionally skipped CUDA job was an ancestor and the default skipped-job
+condition propagated downstream. Neither `0.15.0` nor `0.15.1` is on PyPI or has a GitHub Release;
+both signed tags remain unchanged.
+
+Release `0.15.2` has one explicit CPU-only roll-forward exception,
+`EXPLAINIVERSE-v0.15.2-CPU-ONLY`, authorized on 2026-09-04 by `jemsbhai`. The two required
+single-GPU contexts may be removed only long enough to merge PR #7 and must be restored
+immediately afterward. The following four release jobs remain not run:
+
+- `CUDA single-GPU (Torch latest)`
+- `CUDA single-GPU (Torch minimum)`
+- `CUDA two-GPU scheduled (Torch latest)`
+- `CUDA two-GPU scheduled (Torch minimum)`
+
+The exception does not convert a missing GPU run into successful evidence: the attested release
+gate records `hardware_evidence_collected=false`, `cuda_release_verified=false`, and the immutable
+governance disclosure lists every omitted check and job. All 23 branch-protection contexts and app
+bindings, all 21 successful non-CUDA exact-commit results, the complete CPU release suite,
+reproducible artifacts, tag verification, distribution attestations, Trusted Publishing, and the
+immutable GitHub Release remain mandatory. The exception ID is bound to this tag and package
+version and cannot authorize a later release.
 
 For that exception, capture and dispatch preflight with
-`--cuda-exception-id EXPLAINIVERSE-v0.15.1-CPU-ONLY` /
-`cuda_exception_id=EXPLAINIVERSE-v0.15.1-CPU-ONLY`, omitting `cuda_run_id`. Restore both CUDA
-contexts to `main` protection immediately after PR #6 merges, wait for the 21 non-CUDA
+`--cuda-exception-id EXPLAINIVERSE-v0.15.2-CPU-ONLY` /
+`cuda_exception_id=EXPLAINIVERSE-v0.15.2-CPU-ONLY`, omitting `cuda_run_id`. Restore both CUDA
+contexts to `main` protection immediately after PR #7 merges, wait for the 21 non-CUDA
 `push`/`main` results on that merge commit, and capture/dispatch preflight only after the full
-23-context protection is live again. The capture binds the candidate to GitHub PR #6's actual
-`merge_commit_sha`; its attested snapshot is the restoration proof retained with release
-governance. Normal and future releases omit `cuda_exception_id` and supply the verified CUDA run
-ID.
+23-context protection is live again. The capture binds the candidate to GitHub PR #7's single
+authoritative merged-event commit from its fully paginated issue timeline; its attested snapshot
+is the restoration proof retained with release governance. Normal and future releases omit
+`cuda_exception_id` and supply the verified CUDA run ID.
+
 Dispatch the workflow from the tag itself, with the same tag as its input—for example
-`gh workflow run publish-pypi.yml --ref v0.15.1 -f tag=v0.15.1`. The workflow rejects a branch
+`gh workflow run publish-pypi.yml --ref v0.15.2 -f tag=v0.15.2`. The workflow rejects a branch
 dispatch even if its checkout was later pointed at the tag, because attestation provenance is
-bound to the workflow ref and SHA.
+bound to the workflow ref and SHA. The `attest`, `publish`, and `github-release` jobs each carry an
+explicit downstream bridge: `always()` makes the job condition evaluate after an intentionally
+skipped ancestor, `!cancelled()` rejects cancellation, and exact success of the direct upstream
+job is mandatory (`build`, `attest`, and `publish`, respectively). Thus the CPU-only CUDA skip
+cannot suppress publication again, while any upstream failure or cancellation still blocks it.
 If a post-publication GitHub Release step fails, rerun failed jobs while retained artifacts
 exist; do not rerun the PyPI job or add an unchecked `skip-existing` path.

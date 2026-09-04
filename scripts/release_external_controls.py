@@ -32,22 +32,26 @@ _TAG = re.compile(r"v\d+\.\d+\.\d+")
 _MAX_SNAPSHOT_AGE = timedelta(minutes=30)
 _TIMELINE_PAGE_SIZE = 100
 _MAX_TIMELINE_PAGES = 100
-_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.1-CPU-ONLY"
-_CUDA_EXCEPTION_TAG = "v0.15.1"
-_CUDA_EXCEPTION_VERSION = "0.15.1"
-_CUDA_EXCEPTION_PULL_REQUEST = 6
+_CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.2-CPU-ONLY"
+_CUDA_EXCEPTION_TAG = "v0.15.2"
+_CUDA_EXCEPTION_VERSION = "0.15.2"
+_CUDA_EXCEPTION_PULL_REQUEST = 7
 _CUDA_EXCEPTION_APPROVED_AT = "2026-09-04"
 _CUDA_EXCEPTION_REASON = (
     "Approved one-release CPU-only roll-forward because isolated one- and two-GPU "
-    "release runners remain unavailable and the immutable v0.15.0 publication attempt "
-    "failed during SBOM generation before publication."
+    "release runners remain unavailable and the immutable v0.15.0 and v0.15.1 release "
+    "attempts both stopped before publication."
 )
 _CUDA_EXCEPTION_DISCLOSURE = (
-    "Explainiverse 0.15.1 is CPU-verified; CUDA hardware validation was not performed "
-    "and this release makes no CUDA release-verification claim. The immutable signed "
-    "v0.15.0 Git tag remains unchanged, but v0.15.0 was not published to PyPI and has "
-    "no GitHub Release: workflow run 33891048942 failed during SBOM generation before "
-    "artifact upload, attestation, PyPI publication, or GitHub Release creation."
+    "Explainiverse 0.15.2 is CPU-verified; CUDA hardware validation was not performed "
+    "and this release makes no CUDA release-verification claim. The signed v0.15.0 and "
+    "v0.15.1 Git tags remain immutable; neither version is on PyPI or has a GitHub "
+    "Release. Workflow run 33891048942 for v0.15.0 failed during SBOM generation before "
+    "artifact upload, attestation, PyPI publication, or GitHub Release creation. Workflow "
+    "run 33901507340 for v0.15.1 successfully built and retained workflow artifacts, "
+    "including the repaired SBOM, but GitHub skipped distribution attestation, PyPI "
+    "publication, and GitHub Release creation because a skipped ancestor condition "
+    "propagated to those jobs."
 )
 _CUDA_EXCEPTION_OMITTED_CHECKS = (
     "CUDA single-GPU (Torch latest)",
@@ -310,7 +314,7 @@ def _evaluate_exception_pull_request(
     exception: Mapping[str, Any],
     observation: Mapping[str, Any],
 ) -> list[str]:
-    """Require the release SHA to be PR #6's actual GitHub merge commit."""
+    """Require the release SHA to be PR #7's actual GitHub merge commit."""
     violations: list[str] = []
     pull_request = _mapping(
         observation.get("cuda_exception_merge_pull_request"),
