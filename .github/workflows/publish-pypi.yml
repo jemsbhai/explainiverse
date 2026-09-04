@@ -624,8 +624,11 @@ jobs:
           (cd dist && sha256sum *.whl *.tar.gz) > provenance/SHA256SUMS
           (cd dist && sha256sum --check ../provenance/SHA256SUMS)
           poetry_python=$(poetry env info --executable)
+          python release-source/scripts/prepare_release_sbom_pyproject.py \
+            --source release-source/pyproject.toml \
+            --output provenance/explainiverse-sbom.pyproject.toml
           cyclonedx-py environment "$poetry_python" \
-            --pyproject release-source/pyproject.toml \
+            --pyproject provenance/explainiverse-sbom.pyproject.toml \
             --mc-type library \
             --output-reproducible \
             --output-format JSON \

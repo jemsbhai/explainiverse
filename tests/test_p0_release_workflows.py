@@ -357,6 +357,13 @@ def test_publish_rebuilds_a_clean_tag_and_binds_the_attested_reproducibility_byt
     assert '(cd release-source && poetry build --output "$GITHUB_WORKSPACE/dist")' in build_job
     assert "dist reproducibility-proof/one/dist" in build_job
     assert "dist reproducibility-proof/two/dist" in build_job
+    prepare_sbom = build_job.index("prepare_release_sbom_pyproject.py")
+    generate_sbom = build_job.index("cyclonedx-py environment")
+    assert clean_build < prepare_sbom < generate_sbom
+    assert "--source release-source/pyproject.toml" in build_job
+    assert "--output provenance/explainiverse-sbom.pyproject.toml" in build_job
+    assert "--pyproject provenance/explainiverse-sbom.pyproject.toml" in build_job
+    assert "--pyproject release-source/pyproject.toml" not in build_job
 
 
 def test_recovery_is_idempotent_downstream_only_and_hash_checks_all_services():
