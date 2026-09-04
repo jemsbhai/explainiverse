@@ -9,28 +9,59 @@ the reviewed PEP 621 metadata while hiding that incompatible tool namespace.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - exercised by the Python 3.10 CI lane
     import tomli as tomllib
 
-_TABLE_HEADER = re.compile(
-    r"^\s*(?P<open>\[\[|\[)(?P<path>[A-Za-z0-9_.-]+)(?P<close>\]\]|\])\s*(?:#.*)?$"
-)
+_TABLE_SENTINEL = "__explainiverse_sbom_table_sentinel_6f6c45f1__"
 
 
-def _table_path(line: str) -> str | None:
-    match = _TABLE_HEADER.fullmatch(line.rstrip("\r\n"))
-    if match is None:
+def _table_path(line: str) -> tuple[str, ...] | None:
+    """Parse one TOML table header with the standard library's full grammar."""
+    if not line.lstrip().startswith("["):
         return None
-    if len(match.group("open")) != len(match.group("close")):
+    header = line.rstrip("\r\n")
+    candidate = f"{header}\n{_TABLE_SENTINEL} = true\n"
+    try:
+        parsed = tomllib.loads(candidate)
+    except tomllib.TOMLDecodeError:
         return None
-    return match.group("path")
+
+    path: list[str] = []
+    node: Any = parsed
+    while isinstance(node, Mapping):
+        if node.get(_TABLE_SENTINEL) is True:
+            return tuple(path)
+        if len(node) != 1:
+            return None
+        key, node = next(iter(node.items()))
+        if not isinstance(key, str):  # pragma: no cover - TOML keys are strings
+            return None
+        path.append(key)
+        if isinstance(node, list):
+            if len(node) != 1:
+                return None
+            node = node[0]
+    return None
+
+
+def _without_poetry(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return parsed TOML data with only the ``tool.poetry`` subtree removed."""
+    normalized = dict(data)
+    tool = data.get("tool")
+    if isinstance(tool, Mapping):
+        remaining_tool = {key: value for key, value in tool.items() if key != "poetry"}
+        if remaining_tool:
+            normalized["tool"] = remaining_tool
+        else:
+            normalized.pop("tool", None)
+    return normalized
 
 
 def prepare_sbom_pyproject(source: str) -> str:
@@ -45,14 +76,14 @@ def prepare_sbom_pyproject(source: str) -> str:
     for line in source.splitlines(keepends=True):
         table_path = _table_path(line)
         if table_path is not None:
-            omit_table = table_path == "tool.poetry" or table_path.startswith("tool.poetry.")
+            omit_table = table_path[:2] == ("tool", "poetry")
         if not omit_table:
             rendered.append(line)
 
     prepared = "".join(rendered)
     parsed_prepared = tomllib.loads(prepared)
-    if parsed_prepared.get("project") != project:
-        raise ValueError("prepared SBOM manifest changed the reviewed PEP 621 project metadata")
+    if _without_poetry(parsed_prepared) != _without_poetry(parsed_source):
+        raise ValueError("prepared SBOM manifest changed reviewed non-Poetry metadata")
     tool = parsed_prepared.get("tool", {})
     if isinstance(tool, Mapping) and "poetry" in tool:
         raise ValueError("prepared SBOM manifest still contains tool.poetry metadata")

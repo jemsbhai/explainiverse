@@ -64,6 +64,31 @@ ignore_missing_imports = true
     assert parsed["tool"]["mypy"]["overrides"][0]["module"] == ["example.*"]
 
 
+def test_preparation_preserves_quoted_and_whitespace_separated_table_keys():
+    source = """\
+[project]
+name = "example"
+version = "1.0.0"
+
+[tool.poetry]
+packages = [{ include = "example", from = "src" }]
+
+[tool . "black"]
+line-length = 100
+
+[[tool . 'mypy' . overrides]]
+module = ["example.*"]
+ignore_missing_imports = true
+"""
+
+    prepared = sbom_manifest.prepare_sbom_pyproject(source)
+    parsed = tomllib.loads(prepared)
+
+    assert "poetry" not in parsed["tool"]
+    assert parsed["tool"]["black"]["line-length"] == 100
+    assert parsed["tool"]["mypy"]["overrides"][0]["module"] == ["example.*"]
+
+
 def test_preparation_fails_closed_if_dotted_poetry_metadata_remains():
     source = """\
 tool.poetry.packages = []
