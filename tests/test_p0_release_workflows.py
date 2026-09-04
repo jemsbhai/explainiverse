@@ -89,6 +89,27 @@ def _assert_cuda_runner_routing_contract(workflow, publish):
     assert "ubuntu-latest" not in publish_cuda
 
 
+def _assert_fail_closed_release_job_bridges(workflow):
+    bridges = (
+        ("attest", "build", "publish"),
+        ("publish", "attest", "github-release"),
+        ("github-release", "publish", None),
+    )
+    for job, upstream, next_job in bridges:
+        section = workflow.split(f"  {job}:", 1)[1]
+        if next_job is not None:
+            section = section.split(f"\n  {next_job}:", 1)[0]
+        header = section.split("\n    steps:", 1)[0]
+        assert f"    needs: {upstream}\n" in header
+        assert (
+            "    if: ${{ always() && !cancelled() && needs."
+            + upstream
+            + ".result == 'success' }}\n"
+            in header
+        )
+        assert header.count("\n    if:") == 1
+
+
 def test_every_external_action_is_pinned_to_a_full_commit_sha():
     for workflow in WORKFLOWS.glob("*.yml"):
         for line in workflow.read_text(encoding="utf-8").splitlines():
@@ -107,8 +128,8 @@ def test_preflight_requires_fresh_admin_capture_then_attests_and_binds_it():
     assert "cuda_exception_id:" in workflow
     assert workflow.count('default: ""') >= 2
     assert "supply exactly one of cuda_run_id or cuda_exception_id" in workflow
-    assert '"EXPLAINIVERSE-v0.15.1-CPU-ONLY"' in workflow
-    assert '"$RELEASE_TAG" != "v0.15.1"' in workflow
+    assert '"EXPLAINIVERSE-v0.15.2-CPU-ONLY"' in workflow
+    assert '"$RELEASE_TAG" != "v0.15.2"' in workflow
     assert "jobs?filter=all&per_page=100" in workflow
     assert "gh api --paginate" in workflow
     assert "if: inputs.cuda_run_id != ''" in workflow
@@ -137,8 +158,8 @@ def test_publish_requires_verified_hardware_or_the_exact_cpu_only_exception():
     assert "preflight_run_id:" in workflow
     assert "cuda_exception_id:" in workflow
     assert "supply exactly one of cuda_run_id or cuda_exception_id" in workflow
-    assert '"EXPLAINIVERSE-v0.15.1-CPU-ONLY"' in workflow
-    assert '"$RELEASE_TAG" != "v0.15.1"' in workflow
+    assert '"EXPLAINIVERSE-v0.15.2-CPU-ONLY"' in workflow
+    assert '"$RELEASE_TAG" != "v0.15.2"' in workflow
     assert "needs: [preflight, cuda-release]" in workflow
     assert "cuda_mode: ${{ steps.verify.outputs.cuda_mode }}" in workflow
     assert "cuda_run_id: ${{ steps.verify.outputs.cuda_run_id }}" in workflow
@@ -163,7 +184,7 @@ def test_publish_requires_verified_hardware_or_the_exact_cpu_only_exception():
     assert "needs.cuda-release.result == 'skipped'" in build_job
     assert (
         "needs.preflight.outputs.cuda_exception_id == "
-        "'EXPLAINIVERSE-v0.15.1-CPU-ONLY'" in build_job
+        "'EXPLAINIVERSE-v0.15.2-CPU-ONLY'" in build_job
     )
     assert "inputs.cuda_exception_id" not in build_job
     assert "inputs.cuda_run_id" not in build_job
@@ -225,6 +246,35 @@ def test_publish_requires_verified_hardware_or_the_exact_cpu_only_exception():
     assert build_job.index("release-source/scripts/audit_typing_readiness.py") < build_job.index(
         "Upload immutable distributions"
     )
+    _assert_fail_closed_release_job_bridges(workflow)
+
+
+def test_publish_release_job_bridges_reject_failed_or_cancelled_upstream_results():
+    workflow = _read("publish-pypi.yml")
+    exact_conditions = (
+        "if: ${{ always() && !cancelled() && needs.build.result == 'success' }}",
+        "if: ${{ always() && !cancelled() && needs.attest.result == 'success' }}",
+        "if: ${{ always() && !cancelled() && needs.publish.result == 'success' }}",
+    )
+    for exact in exact_conditions:
+        assert workflow.count(exact) == 1
+
+    weakened = (
+        workflow.replace(exact_conditions[0], "if: ${{ always() }}", 1),
+        workflow.replace(
+            exact_conditions[1],
+            "if: ${{ always() && needs.attest.result != 'failure' }}",
+            1,
+        ),
+        workflow.replace(
+            exact_conditions[2],
+            "if: ${{ always() && !cancelled() }}",
+            1,
+        ),
+    )
+    for mutation in weakened:
+        with pytest.raises(AssertionError):
+            _assert_fail_closed_release_job_bridges(mutation)
 
 
 def test_publish_derives_cuda_mode_only_after_attested_snapshot_verification():
@@ -259,7 +309,7 @@ def test_publish_attests_and_carries_the_selected_cuda_gate_without_fabrication(
     assert 'if [[ "$CUDA_MODE" == "hardware_evidence" ]]' in governance
     assert (
         'elif [[ "$CUDA_MODE" == "cpu_only_exception" && \\\n'
-        '                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.1-CPU-ONLY" ]]'
+        '                  "$CUDA_EXCEPTION_ID" == "EXPLAINIVERSE-v0.15.2-CPU-ONLY" ]]'
         in governance
     )
     assert 'governance_selector=(--cuda-run-id "$CUDA_RUN_ID")' in governance
