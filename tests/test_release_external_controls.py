@@ -21,7 +21,7 @@ SPEC.loader.exec_module(controls)
 
 POLICY_PATH = ROOT / ".github" / "release-control-policy.json"
 SHA = "a" * 40
-CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.0-CPU-ONLY"
+CUDA_EXCEPTION_ID = "EXPLAINIVERSE-v0.15.1-CPU-ONLY"
 
 
 def _policy():
@@ -90,7 +90,7 @@ def _matching_observation(cuda_exception_id=None):
         omitted = set(policy["cuda_release_exception"]["omitted_required_checks"])
         evidence_checks = [name for name in checks if name not in omitted]
         exception_pull_request = {
-            "number": 5,
+            "number": 6,
             "state": "closed",
             "merged": True,
             "merged_at": "2026-09-03T12:00:00Z",
@@ -108,7 +108,7 @@ def _matching_observation(cuda_exception_id=None):
         "repository": policy["repository"],
         "default_branch": policy["default_branch"],
         "capture_principal": "jemsbhai",
-        "release_tag": "v0.15.0",
+        "release_tag": "v0.15.1",
         "release_commit": SHA,
         "cuda_exception_id": cuda_exception_id,
         "cuda_exception_merge_pull_request": exception_pull_request,
@@ -234,7 +234,7 @@ def test_reviewed_control_policy_has_a_falsifiably_green_fixture():
     assert controls.evaluate_controls(policy, _matching_observation()) == []
 
 
-def test_explicit_v0150_exception_requires_23_branch_controls_and_21_check_results():
+def test_explicit_v0151_exception_requires_23_branch_controls_and_21_check_results():
     policy, _ = _policy()
     observation = _matching_observation(CUDA_EXCEPTION_ID)
 
@@ -278,10 +278,10 @@ def test_exception_rejects_a_21_check_branch_protection_snapshot():
     ("field", "replacement", "match"),
     [
         ("id", "CUDA-ANY-RELEASE", "id must be exactly"),
-        ("release_tag", "v0.15.1", "release_tag must be exactly"),
-        ("package_version", "0.15.1", "package_version must be exactly"),
-        ("merge_pull_request", 6, "merge_pull_request must be exactly"),
-        ("merge_pull_request", 5.0, "merge_pull_request must be exactly"),
+        ("release_tag", "v0.15.2", "release_tag must be exactly"),
+        ("package_version", "0.15.2", "package_version must be exactly"),
+        ("merge_pull_request", 7, "merge_pull_request must be exactly"),
+        ("merge_pull_request", 6.0, "merge_pull_request must be exactly"),
         ("merge_pull_request", True, "merge_pull_request must be exactly"),
         ("hardware_evidence_collected", True, "must be exactly False"),
         ("hardware_evidence_collected", 0, "must be exactly False"),
@@ -321,8 +321,8 @@ def test_exception_policy_rejects_scope_or_identity_drift(field, replacement, ma
 @pytest.mark.parametrize(
     ("tag", "exception_id", "match"),
     [
-        ("v0.15.0", "wrong-exception", "id must be exactly"),
-        ("v0.15.1", CUDA_EXCEPTION_ID, "restricted to 'v0.15.0'"),
+        ("v0.15.1", "wrong-exception", "id must be exactly"),
+        ("v0.15.2", CUDA_EXCEPTION_ID, "restricted to 'v0.15.1'"),
     ],
 )
 def test_exception_resolution_rejects_wrong_id_or_any_other_tag(tag, exception_id, match):
@@ -339,9 +339,9 @@ def test_exception_resolution_rejects_wrong_id_or_any_other_tag(tag, exception_i
 @pytest.mark.parametrize(
     ("field", "replacement", "match"),
     [
-        ("number", 5.0, "number"),
+        ("number", 6.0, "number"),
         ("number", False, "number"),
-        ("number", 6, "number"),
+        ("number", 7, "number"),
         ("state", "open", "state"),
         ("merged", 1, "merged"),
         ("merged", False, "merged"),
@@ -354,7 +354,7 @@ def test_exception_resolution_rejects_wrong_id_or_any_other_tag(tag, exception_i
         ("head_sha", "short", "head_sha"),
     ],
 )
-def test_exception_is_hard_bound_to_pr5_actual_merge_commit(field, replacement, match):
+def test_exception_is_hard_bound_to_pr6_actual_merge_commit(field, replacement, match):
     policy, _ = _policy()
     observation = _matching_observation(CUDA_EXCEPTION_ID)
     observation["cuda_exception_merge_pull_request"][field] = replacement
@@ -498,7 +498,7 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
         }
 
     def get_json(path):
-        if path == f"{root}/git/ref/tags/v0.15.0":
+        if path == f"{root}/git/ref/tags/v0.15.1":
             raise controls.ApiNotFoundError(path)
         if immutable_not_found and path == f"{root}/immutable-releases":
             raise controls.ApiNotFoundError(path)
@@ -506,7 +506,7 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
 
     captured = controls.capture_observation(
         policy=policy,
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         get_json=get_json,
     )
@@ -519,13 +519,13 @@ def test_capture_observation_requires_tag_absence_and_collects_detailed_ruleset(
         assert any("immutable_releases.enabled" in value for value in violations)
 
 
-def test_exception_capture_reads_and_binds_pr5_merge_metadata():
+def test_exception_capture_reads_and_binds_pr6_merge_metadata():
     policy, _ = _policy()
     observation = _matching_observation(CUDA_EXCEPTION_ID)
     root = f"repos/{policy['repository']}"
     pull_request = observation["cuda_exception_merge_pull_request"]
     responses = {
-        f"{root}/pulls/5": {
+        f"{root}/pulls/6": {
             "number": pull_request["number"],
             "state": pull_request["state"],
             "merged": pull_request["merged"],
@@ -540,7 +540,7 @@ def test_exception_capture_reads_and_binds_pr5_merge_metadata():
             },
             "merged_by": {"login": pull_request["merged_by"]},
         },
-        f"{root}/issues/5/timeline?per_page=100&page=1": [
+        f"{root}/issues/6/timeline?per_page=100&page=1": [
             {
                 "event": "merged",
                 "commit_id": pull_request["merge_commit_sha"],
@@ -574,20 +574,20 @@ def test_exception_capture_reads_and_binds_pr5_merge_metadata():
 
     def get_json(path):
         requested.append(path)
-        if path == f"{root}/git/ref/tags/v0.15.0":
+        if path == f"{root}/git/ref/tags/v0.15.1":
             raise controls.ApiNotFoundError(path)
         return responses[path]
 
     captured = controls.capture_observation(
         policy=policy,
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         get_json=get_json,
         cuda_exception_id=CUDA_EXCEPTION_ID,
     )
 
-    assert f"{root}/pulls/5" in requested
-    assert f"{root}/issues/5/timeline?per_page=100&page=1" in requested
+    assert f"{root}/pulls/6" in requested
+    assert f"{root}/issues/6/timeline?per_page=100&page=1" in requested
     assert captured == observation
     assert controls.evaluate_controls(policy, captured) == []
 
@@ -604,8 +604,8 @@ def test_exception_merge_event_reads_every_timeline_page():
         }
     )
     responses = {
-        f"{root}/issues/5/timeline?per_page=100&page=1": first_page,
-        f"{root}/issues/5/timeline?per_page=100&page=2": [],
+        f"{root}/issues/6/timeline?per_page=100&page=1": first_page,
+        f"{root}/issues/6/timeline?per_page=100&page=2": [],
     }
     requested = []
 
@@ -616,7 +616,7 @@ def test_exception_merge_event_reads_every_timeline_page():
     event = controls._exception_merge_event(
         get_json=get_json,
         root=root,
-        pull_number=5,
+        pull_number=6,
     )
 
     assert event["commit_id"] == SHA
@@ -642,7 +642,7 @@ def test_exception_merge_event_fails_closed_on_ambiguous_metadata(events, match)
         controls._exception_merge_event(
             get_json=lambda _path: events,
             root="repos/jemsbhai/explainiverse",
-            pull_number=5,
+            pull_number=6,
         )
 
 
@@ -698,7 +698,7 @@ def test_snapshot_is_bound_to_exact_policy_repository_tag_and_commit():
         policy_sha256=digest,
         snapshot=snapshot,
         repository=policy["repository"],
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
     )
     assert snapshot["pypi_trusted_publisher"]["verification_status"] == (
@@ -707,7 +707,7 @@ def test_snapshot_is_bound_to_exact_policy_repository_tag_and_commit():
 
     for field, replacement in (
         ("repository", "attacker/fork"),
-        ("release_tag", "v0.15.1"),
+        ("release_tag", "v0.15.2"),
         ("release_commit", "b" * 40),
     ):
         tampered = copy.deepcopy(snapshot)
@@ -718,7 +718,7 @@ def test_snapshot_is_bound_to_exact_policy_repository_tag_and_commit():
                 policy_sha256=digest,
                 snapshot=tampered,
                 repository=policy["repository"],
-                release_tag="v0.15.0",
+                release_tag="v0.15.1",
                 release_commit=SHA,
             )
 
@@ -826,7 +826,7 @@ def test_admin_snapshot_binding_requires_freshness_and_same_dispatch_actor():
         policy_sha256=digest,
         snapshot=snapshot,
         repository=policy["repository"],
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         workflow_run=workflow_run,
         cuda_run=_cuda_run(),
@@ -852,7 +852,7 @@ def test_admin_snapshot_binding_requires_freshness_and_same_dispatch_actor():
                 policy_sha256=digest,
                 snapshot=snapshot,
                 repository=policy["repository"],
-                release_tag="v0.15.0",
+                release_tag="v0.15.1",
                 release_commit=SHA,
                 workflow_run={**workflow_run, **mutation},
                 cuda_run=_cuda_run(),
@@ -866,7 +866,7 @@ def test_admin_snapshot_binding_requires_freshness_and_same_dispatch_actor():
             policy_sha256=digest,
             snapshot=snapshot,
             repository=policy["repository"],
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             workflow_run=workflow_run,
             cuda_run=_cuda_run(),
@@ -892,7 +892,7 @@ def test_exception_snapshot_binds_an_explicit_cpu_only_gate_without_cuda_evidenc
         policy_sha256=digest,
         snapshot=snapshot,
         repository=policy["repository"],
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         workflow_run=_preflight_workflow_run(),
         cuda_exception_id=CUDA_EXCEPTION_ID,
@@ -905,10 +905,10 @@ def test_exception_snapshot_binds_an_explicit_cpu_only_gate_without_cuda_evidenc
         "mode": "cpu_only_exception",
         "status": "not_run",
         "exception_id": CUDA_EXCEPTION_ID,
-        "release_tag": "v0.15.0",
+        "release_tag": "v0.15.1",
         "release_commit": SHA,
-        "package_version": "0.15.0",
-        "merge_pull_request": 5,
+        "package_version": "0.15.1",
+        "merge_pull_request": 6,
         "merge_commit_sha": SHA,
         "hardware_evidence_collected": False,
         "cuda_release_verified": False,
@@ -917,7 +917,7 @@ def test_exception_snapshot_binds_an_explicit_cpu_only_gate_without_cuda_evidenc
         ),
         "omitted_cuda_jobs": sorted(policy["cuda_evidence"]["required_jobs"]),
         "authorized_by": ["jemsbhai"],
-        "approved_at": "2026-09-03",
+        "approved_at": "2026-09-04",
         "reason": policy["cuda_release_exception"]["reason"],
         "disclosure": policy["cuda_release_exception"]["disclosure"],
     }
@@ -932,7 +932,7 @@ def test_exception_snapshot_binds_an_explicit_cpu_only_gate_without_cuda_evidenc
         controls.verify_bound_cuda_release_gate(
             policy=policy,
             snapshot=bound,
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             repository=policy["repository"],
             cuda_exception_id=CUDA_EXCEPTION_ID,
@@ -956,7 +956,7 @@ def test_exception_rejects_any_cuda_hardware_evidence_input(cuda_run, cuda_jobs,
     with pytest.raises(ValueError, match="must be absent"):
         controls.resolve_cuda_release_gate(
             policy=policy,
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             cuda_run=cuda_run,
             cuda_jobs=cuda_jobs,
@@ -981,7 +981,7 @@ def test_normal_mode_requires_the_complete_cuda_evidence_trio(cuda_run, cuda_job
     with pytest.raises(ValueError, match="requires --cuda-run-id"):
         controls.resolve_cuda_release_gate(
             policy=policy,
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             cuda_run=cuda_run,
             cuda_jobs=cuda_jobs,
@@ -1005,7 +1005,7 @@ def test_exception_publish_verification_rejects_gate_or_evidence_tampering():
         policy_sha256=digest,
         snapshot=snapshot,
         repository=policy["repository"],
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         workflow_run=_preflight_workflow_run(),
         cuda_exception_id=CUDA_EXCEPTION_ID,
@@ -1020,14 +1020,14 @@ def test_exception_publish_verification_rejects_gate_or_evidence_tampering():
         controls.verify_bound_cuda_release_gate(
             policy=policy,
             snapshot=tampered_gate,
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             repository=policy["repository"],
             cuda_exception_id=CUDA_EXCEPTION_ID,
         )
 
     for field, replacement in (
-        ("merge_pull_request", 5.0),
+        ("merge_pull_request", 6.0),
         ("hardware_evidence_collected", 0),
         ("cuda_release_verified", 0),
         ("merge_commit_sha", "c" * 40),
@@ -1038,7 +1038,7 @@ def test_exception_publish_verification_rejects_gate_or_evidence_tampering():
             controls.verify_bound_cuda_release_gate(
                 policy=policy,
                 snapshot=type_tampered_gate,
-                release_tag="v0.15.0",
+                release_tag="v0.15.1",
                 release_commit=SHA,
                 repository=policy["repository"],
                 cuda_exception_id=CUDA_EXCEPTION_ID,
@@ -1050,7 +1050,7 @@ def test_exception_publish_verification_rejects_gate_or_evidence_tampering():
         controls.verify_bound_cuda_release_gate(
             policy=policy,
             snapshot=fake_evidence,
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             repository=policy["repository"],
             cuda_exception_id=CUDA_EXCEPTION_ID,
@@ -1073,7 +1073,7 @@ def test_publish_verification_rejects_replay_after_thirty_minutes():
         policy_sha256=digest,
         snapshot=snapshot,
         repository=policy["repository"],
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         now=now,
     )
@@ -1083,7 +1083,7 @@ def test_publish_verification_rejects_replay_after_thirty_minutes():
             policy_sha256=digest,
             snapshot=snapshot,
             repository=policy["repository"],
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             now=now + timedelta(minutes=2),
         )
@@ -1195,7 +1195,7 @@ def test_publish_requery_must_equal_attested_cuda_evidence():
         policy_sha256=digest,
         snapshot=snapshot,
         repository=policy["repository"],
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         workflow_run=_preflight_workflow_run(),
         cuda_run=_cuda_run(),
@@ -1244,7 +1244,7 @@ def test_verify_cli_rejects_policy_digest_substitution(tmp_path):
                 "--repository",
                 policy["repository"],
                 "--tag",
-                "v0.15.0",
+                "v0.15.1",
                 "--commit",
                 SHA,
                 "--cuda-run-json",
@@ -1296,7 +1296,7 @@ def test_exception_bind_cli_emits_gate_record_and_outputs_only_after_success(tmp
                 "--repository",
                 policy["repository"],
                 "--tag",
-                "v0.15.0",
+                "v0.15.1",
                 "--commit",
                 SHA,
                 "--cuda-exception-id",
@@ -1332,7 +1332,7 @@ def test_exception_bind_cli_emits_gate_record_and_outputs_only_after_success(tmp
                 "--repository",
                 policy["repository"],
                 "--tag",
-                "v0.15.1",
+                "v0.15.2",
                 "--commit",
                 SHA,
                 "--cuda-exception-id",

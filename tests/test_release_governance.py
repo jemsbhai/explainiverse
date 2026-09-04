@@ -33,7 +33,7 @@ def _evidence(*, cpu_only=False):
         "violations": [],
         "observation": {
             "repository": policy["repository"],
-            "release_tag": "v0.15.0",
+            "release_tag": "v0.15.1",
             "release_commit": SHA,
             "capture_principal": "jemsbhai",
             "pypi_environment": {
@@ -54,7 +54,7 @@ def _evidence(*, cpu_only=False):
         exception = policy["cuda_release_exception"]
         snapshot["cuda_release_exception"] = exception
         snapshot["observation"]["cuda_exception_merge_pull_request"] = {
-            "number": 5,
+            "number": 6,
             "state": "closed",
             "merged": True,
             "merged_at": "2026-09-03T12:00:00Z",
@@ -90,7 +90,7 @@ def _evidence(*, cpu_only=False):
             "mode": "hardware_evidence",
             "status": "verified",
             "exception_id": None,
-            "release_tag": "v0.15.0",
+            "release_tag": "v0.15.1",
             "release_commit": SHA,
             "hardware_evidence_collected": True,
             "cuda_release_verified": True,
@@ -111,7 +111,7 @@ def _record(policy_bytes, snapshot):
         policy_bytes=policy_bytes,
         snapshot_bytes=(json.dumps(snapshot, sort_keys=True) + "\n").encode(),
         repository="jemsbhai/explainiverse",
-        release_tag="v0.15.0",
+        release_tag="v0.15.1",
         release_commit=SHA,
         preflight_run_id="123",
         **cuda_args,
@@ -155,7 +155,7 @@ def test_cpu_only_record_discloses_the_exact_exception_without_cuda_evidence():
     assert "cuda_run_url" not in record["evidence"]
     markdown = governance.render_markdown(record)
     assert "CPU-only CUDA release exception" in markdown
-    assert "EXPLAINIVERSE-v0.15.0-CPU-ONLY" in markdown
+    assert "EXPLAINIVERSE-v0.15.1-CPU-ONLY" in markdown
     assert f"Verified PR merge commit: `{SHA}`" in markdown
     assert "No CUDA hardware evidence was collected" in markdown
     assert "CUDA release verification: `false`" in markdown
@@ -228,7 +228,7 @@ def test_governance_record_rejects_release_actor_independence_fiction():
             policy_bytes=policy_bytes,
             snapshot_bytes=json.dumps(snapshot).encode(),
             repository="jemsbhai/explainiverse",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             preflight_run_id="123",
             cuda_run_id="456",
@@ -247,7 +247,7 @@ def test_governance_record_rejects_a_different_rerun_triggering_actor():
             policy_bytes=policy_bytes,
             snapshot_bytes=json.dumps(snapshot).encode(),
             repository="jemsbhai/explainiverse",
-            release_tag="v0.15.0",
+            release_tag="v0.15.1",
             release_commit=SHA,
             preflight_run_id="123",
             cuda_run_id="456",
@@ -288,7 +288,7 @@ def test_governance_record_rejects_a_different_rerun_triggering_actor():
         ),
         (
             lambda policy, _snapshot: policy["cuda_release_exception"].update(
-                merge_pull_request=5.0
+                merge_pull_request=6.0
             ),
             "differs from the reviewed exception",
         ),
@@ -317,7 +317,7 @@ def test_governance_record_rejects_a_different_rerun_triggering_actor():
             "differs from reviewed policy",
         ),
         (
-            lambda _policy, snapshot: snapshot["cuda_release_gate"].update(merge_pull_request=5.0),
+            lambda _policy, snapshot: snapshot["cuda_release_gate"].update(merge_pull_request=6.0),
             "differs from reviewed policy",
         ),
         (
@@ -348,7 +348,7 @@ def test_governance_record_requires_exactly_one_cuda_gate_credential():
         "policy_bytes": policy_bytes,
         "snapshot_bytes": (json.dumps(snapshot, sort_keys=True) + "\n").encode(),
         "repository": "jemsbhai/explainiverse",
-        "release_tag": "v0.15.0",
+        "release_tag": "v0.15.1",
         "release_commit": SHA,
         "preflight_run_id": "123",
         "release_run_id": "789",
@@ -362,15 +362,15 @@ def test_governance_record_requires_exactly_one_cuda_gate_credential():
         governance.build_record(
             **common,
             cuda_run_id="456",
-            cuda_exception_id="EXPLAINIVERSE-v0.15.0-CPU-ONLY",
+            cuda_exception_id="EXPLAINIVERSE-v0.15.1-CPU-ONLY",
         )
 
 
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
-        ("exception_id", "EXPLAINIVERSE-v0.15.0-CPU-ONLY-forged"),
-        ("merge_pull_request", 5.0),
+        ("exception_id", "EXPLAINIVERSE-v0.15.1-CPU-ONLY-forged"),
+        ("merge_pull_request", 6.0),
         ("hardware_evidence_collected", 0),
         ("cuda_release_verified", 0),
         ("reason", "Approved one-release CPU-only exception."),

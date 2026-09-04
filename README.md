@@ -7,11 +7,13 @@ deployment.
 
 Version `0.14.0` is the last legacy release: its distributions were uploaded with Twine, without
 Trusted Publishing or published provenance. The matching annotated Git tag is unsigned and no
-GitHub Release exists, so that cross-service release record is incomplete. The `0.15.0` release
-line declares Python 3.10 through 3.13 and has an explicitly authorized, one-release CPU-only
-exception, `EXPLAINIVERSE-v0.15.0-CPU-ONLY`. Its CPU, packaging, and hosted compatibility gates
-remain mandatory, but CUDA hardware validation was not performed and `0.15.0` makes no CUDA
-release-verification claim.
+GitHub Release exists, so that cross-service release record is incomplete. The signed immutable
+`v0.15.0` tag is retained as failed release-automation history: run `33891048942` stopped during
+SBOM generation before artifact upload, attestation, PyPI publication, or GitHub Release creation.
+The `0.15.1` roll-forward declares Python 3.10 through 3.13 and has an explicitly authorized,
+one-release CPU-only exception, `EXPLAINIVERSE-v0.15.1-CPU-ONLY`. Its CPU, packaging, and hosted
+compatibility gates remain mandatory, but CUDA hardware validation was not performed and `0.15.1`
+makes no CUDA release-verification claim.
 
 ## Accuracy status
 
@@ -225,7 +227,7 @@ poetry build
 
 CPU CI permits the four explicitly allowlisted CUDA skips plus the conditional Python 3.10 /
 XGBoost-before-3.1 vector-intercept skip; any other skipped test fails the corresponding pytest
-job. The exact `0.15.0` exception records those CUDA release jobs as not run, not passed. CUDA
+job. The exact `0.15.1` exception records those CUDA release jobs as not run, not passed. CUDA
 execution remains outside the verified device scope until approved GPU runners satisfy the
 normal release gate. Reference packages are imported explicitly before tests, and the built
 wheel and source distribution are each exercised in isolated consumer environments.
