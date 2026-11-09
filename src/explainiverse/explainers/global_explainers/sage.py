@@ -290,7 +290,19 @@ class SAGEExplainer(BaseExplainer):
             mean_prediction = np.mean(background_predictions, axis=0, keepdims=True)
             return np.repeat(mean_prediction, n_samples, axis=0)
 
-        completed = np.repeat(self.X, n_background, axis=0)
+        # Preserve both observed and donor values when their dtypes differ.
+        completed_dtype = np.result_type(self.X.dtype, self.background_data.dtype)
+        if np.issubdtype(completed_dtype, np.floating):
+            for values in (self.X, self.background_data):
+                if np.issubdtype(values.dtype, np.integer) and any(
+                    int(converted) != int(original)
+                    for original, converted in zip(values.flat, values.astype(completed_dtype).flat)
+                ):
+                    # Common floating dtypes can round wide integers. Object
+                    # storage retains them exactly alongside floating donors.
+                    completed_dtype = np.dtype(object)
+                    break
+        completed = np.repeat(self.X.astype(completed_dtype, copy=False), n_background, axis=0)
         tiled_background = np.tile(self.background_data, (n_samples, 1))
         completed[:, ~mask] = tiled_background[:, ~mask]
 
