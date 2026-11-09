@@ -17,6 +17,7 @@ import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import _stable_mean
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
 
 Feature = Union[int, str]
@@ -293,7 +294,7 @@ class PartialDependenceExplainer(BaseExplainer):
         for grid_idx, value in enumerate(grid):
             X_temp = self._grid_copy((feature_idx,))
             X_temp[:, feature_idx] = value
-            pdp_values[grid_idx] = np.mean(
+            pdp_values[grid_idx] = _stable_mean(
                 self._selected_predictions(X_temp, output_index, expected_n_outputs)
             )
         return grid, pdp_values
@@ -317,7 +318,7 @@ class PartialDependenceExplainer(BaseExplainer):
                 X_temp = self._grid_copy((feature_idx1, feature_idx2))
                 X_temp[:, feature_idx1] = value1
                 X_temp[:, feature_idx2] = value2
-                pdp_values[i, j] = np.mean(
+                pdp_values[i, j] = _stable_mean(
                     self._selected_predictions(X_temp, output_index, expected_n_outputs)
                 )
         return grid1, grid2, pdp_values
@@ -328,12 +329,38 @@ class PartialDependenceExplainer(BaseExplainer):
         target_class: Optional[int] = None,
         **kwargs,
     ) -> Explanation:
-        """Compute partial dependence for the requested features."""
+        """Compute partial dependence for the requested features.
+
+        Results use feature names as keys and join interaction names with
+        ``_x_``. Distinct selections producing the same key raise ``ValueError``
+        before prediction; request those selections in separate calls instead.
+        Repeated selections of the same ordered features remain supported.
+        """
         if kwargs:
             unexpected = ", ".join(sorted(kwargs))
             raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
         if not isinstance(features, (list, tuple)) or not features:
             raise ValueError("features must be a non-empty list or tuple")
+
+        resolved_features: list[tuple[str, tuple[int, ...]]] = []
+        key_features: dict[str, tuple[int, ...]] = {}
+        for feature in features:
+            if isinstance(feature, tuple):
+                if len(feature) != 2:
+                    raise ValueError("A PDP interaction tuple must contain two features")
+                indices = tuple(self._get_feature_idx(item) for item in feature)
+                if indices[0] == indices[1]:
+                    raise ValueError("A PDP interaction requires two distinct features")
+            else:
+                indices = (self._get_feature_idx(feature),)
+            key = "_x_".join(self.feature_names[index] for index in indices)
+            if key in key_features and key_features[key] != indices:
+                raise ValueError(
+                    f"Distinct PDP selections produce the same result key {key!r}; "
+                    "request those selections in separate calls"
+                )
+            key_features[key] = indices
+            resolved_features.append((key, indices))
 
         reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
         output_index = _resolve_output_index(reference, self.task, target_class)
@@ -342,19 +369,15 @@ class PartialDependenceExplainer(BaseExplainer):
         grid_results: dict[str, object] = {}
         grid_types: dict[str, object] = {}
 
-        for feature in features:
-            if isinstance(feature, tuple):
-                if len(feature) != 2:
-                    raise ValueError("A PDP interaction tuple must contain two features")
-                idx1 = self._get_feature_idx(feature[0])
-                idx2 = self._get_feature_idx(feature[1])
+        for key, indices in resolved_features:
+            if len(indices) == 2:
+                idx1, idx2 = indices
                 grid1, grid2, pdp = self._compute_pdp_2d(
                     idx1,
                     idx2,
                     output_index,
                     expected_n_outputs,
                 )
-                key = f"{self.feature_names[idx1]}_x_{self.feature_names[idx2]}"
                 pdp_results[key] = pdp.tolist()
                 grid_results[key] = {
                     "grid1": grid1.tolist(),
@@ -365,13 +388,12 @@ class PartialDependenceExplainer(BaseExplainer):
                     "categorical" if idx2 in self.categorical_features else "numeric",
                 ]
             else:
-                idx = self._get_feature_idx(feature)
+                idx = indices[0]
                 grid, pdp = self._compute_pdp_1d(
                     idx,
                     output_index,
                     expected_n_outputs,
                 )
-                key = self.feature_names[idx]
                 pdp_results[key] = pdp.tolist()
                 grid_results[key] = grid.tolist()
                 grid_types[key] = "categorical" if idx in self.categorical_features else "numeric"

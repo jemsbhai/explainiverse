@@ -103,6 +103,9 @@ def _finite_vector_difference(left: np.ndarray, right: np.ndarray, context: str)
 def _finite_l2_norm(values: np.ndarray, context: str) -> float:
     """Evaluate a Euclidean norm without overflow or tiny-value underflow."""
     vector = np.asarray(values, dtype=np.float64)
+    # Removing the sole sensitive feature leaves a valid empty matching space.
+    if vector.size == 0:
+        return 0.0
     scale = float(np.max(np.abs(vector)))
     if scale == 0.0:
         return 0.0
@@ -774,6 +777,10 @@ def compute_sensitive_attribution_change(
     structural-causal counterfactual.  Nearest-opposite-group matching is
     observational rather than counterfactual.  Both modes are reported as
     diagnostics, never as Kusner counterfactual fairness.
+
+    Matching uses only the non-sensitive columns. If the sensitive column is
+    the only feature, all matching distances are zero. Distance ties select
+    the first opposite-group row in input order.
     """
     data = _validate_matrix(inputs, "inputs")
     attrs = _validate_attributions(attributions)

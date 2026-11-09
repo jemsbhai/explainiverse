@@ -162,7 +162,7 @@ def compute_lipschitz_estimate(
     rng = np.random.default_rng(seed)
     generator = _generate_perturbations_l2 if perturb_norm == "l2" else _generate_perturbations_linf
     neighbours = generator(instance, radius, n_samples, rng)
-    original, explained_target = _get_explanation_vector_and_target(
+    original, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer,
         instance,
         instance.size,
@@ -180,6 +180,7 @@ def compute_lipschitz_estimate(
             instance.size,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
         numerator_vector = _vector_difference(original, perturbed, "Lipschitz attribution")
         ratios.append(

@@ -755,5 +755,78 @@ def test_gradient_paths_do_not_mutate_caller_tensor_autograd_state():
     assert caller_input.grad is None
 
 
+@pytest.mark.parametrize("view_kind", ["features", "samples", "singleton"])
+@pytest.mark.parametrize(
+    "operation", ["predict", "input_gradients", "layer_output", "layer_gradients"]
+)
+def test_numpy_reversed_views_work_across_adapter_operations(view_kind, operation):
+    from explainiverse.adapters import PyTorchAdapter
+
+    model = nn.Sequential(nn.Linear(3, 2, bias=False, dtype=torch.float64))
+    weights = np.array([[1.0, 2.0, 3.0], [-1.0, 0.0, 1.0]])
+    with torch.no_grad():
+        model[0].weight.copy_(torch.from_numpy(weights))
+    adapter = PyTorchAdapter(
+        model,
+        output_activation="none",
+        classification_output_kind="scores",
+        input_dtype="preserve",
+        batch_size=1,
+    )
+    source = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    original = source.copy()
+    if view_kind == "features":
+        values = source[:, ::-1]
+    elif view_kind == "samples":
+        values = source[::-1]
+    else:
+        # NumPy regards this view as contiguous despite its negative stride.
+        # Merely calling ascontiguousarray would therefore leave it unchanged.
+        values = source[:1][::-1]
+    assert any(stride < 0 for stride in values.strides)
+    expected_scores = values @ weights.T
+
+    if operation == "predict":
+        np.testing.assert_allclose(adapter.predict(values), expected_scores)
+    elif operation == "input_gradients":
+        scores, gradients = adapter.predict_with_gradients(values, target_class=0)
+        np.testing.assert_allclose(scores, expected_scores)
+        np.testing.assert_allclose(gradients, np.broadcast_to(weights[0], values.shape))
+    elif operation == "layer_output":
+        np.testing.assert_allclose(adapter.get_layer_output(values, "0"), expected_scores)
+    else:
+        activations, gradients = adapter.get_layer_gradients(values, "0", target_class=0)
+        np.testing.assert_allclose(activations, expected_scores)
+        np.testing.assert_allclose(gradients, np.broadcast_to([1.0, 0.0], expected_scores.shape))
+    np.testing.assert_array_equal(source, original)
+
+
+def test_numpy_reversed_token_views_preserve_integer_dtype():
+    from explainiverse.adapters import PyTorchAdapter
+
+    class EmbeddingClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            tokens = torch.arange(8, dtype=torch.float32)
+            self.embedding = nn.Embedding.from_pretrained(
+                torch.stack((tokens, -tokens), dim=1), freeze=False
+            )
+
+        def forward(self, values):
+            return self.embedding(values).sum(dim=1)
+
+    adapter = PyTorchAdapter(
+        EmbeddingClassifier(), output_activation="none", classification_output_kind="scores"
+    )
+    source = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64)
+    original = source.copy()
+    values = source[:, ::-1]
+    np.testing.assert_allclose(adapter.predict(values), [[6.0, -6.0], [15.0, -15.0]])
+    activations = adapter.get_layer_output(values, "embedding")
+    np.testing.assert_array_equal(activations[..., 0], values)
+    np.testing.assert_array_equal(activations[..., 1], -values)
+    np.testing.assert_array_equal(source, original)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

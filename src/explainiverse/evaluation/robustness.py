@@ -15,6 +15,9 @@ These functions report declared finite-sample instability or agreement
 statistics. They do not certify stability outside the sampled inputs and
 perturbations.
 
+Comparisons require the same ordered feature identity across explanations.
+Renamed or reordered features raise rather than being compared positionally.
+
 References:
     Yeh, C. K., Hsieh, C. Y., Suggala, A. S., Inouye, D. I., & Ravikumar, P.
     (2019). On the (In)fidelity and Sensitivity of Explanations. NeurIPS.
@@ -405,12 +408,20 @@ def _generate_perturbations_linf(
     return perturbations
 
 
+def _ordered_feature_identity(explanation: Explanation, n_features: int) -> tuple[str, ...]:
+    """Snapshot the feature order after attribution-map validation."""
+    if explanation.feature_names:
+        return tuple(explanation.feature_names)
+    return tuple(f"feature_{index}" for index in range(n_features))
+
+
 def _get_explanation_vector(
     explainer: BaseExplainer,
     instance: np.ndarray,
     n_features: int,
     target_class: Optional[int] = None,
     expected_target=_UNSET_TARGET,
+    expected_features: Optional[tuple[str, ...]] = None,
 ) -> np.ndarray:
     """
     Get attribution vector for a single instance.
@@ -436,6 +447,13 @@ def _get_explanation_vector(
             f"({expected_target!r} -> {exp.target_class!r}). Pass an explicit "
             "target_class to an explainer that supports fixed targets."
         )
+    observed_features = _ordered_feature_identity(exp, n_features)
+    if expected_features is not None and observed_features != expected_features:
+        raise ValueError(
+            "The explainer changed ordered feature identity across compared explanations "
+            f"({expected_features!r} -> {observed_features!r}). "
+            "Return the same feature names in the same order for every comparison."
+        )
     return values
 
 
@@ -445,6 +463,7 @@ def _get_explanation_vector_and_target(
     n_features: int,
     target_class: Optional[int] = None,
 ):
+    """Return attribution values, target, and an immutable feature-identity tuple."""
     exp = _get_explanation(explainer, instance, target_class=target_class)
     values = _extract_attribution_vector(exp)
     if values.size != n_features:
@@ -452,7 +471,7 @@ def _get_explanation_vector_and_target(
             f"Explanation has {values.size} attribution values; expected "
             f"{n_features}, one per input feature."
         )
-    return values, exp.target_class
+    return values, exp.target_class, _ordered_feature_identity(exp, n_features)
 
 
 # =============================================================================
@@ -527,7 +546,7 @@ def compute_max_sensitivity(
     rng = np.random.default_rng(seed)
 
     # Get original explanation
-    original_attr, explained_target = _get_explanation_vector_and_target(
+    original_attr, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer, instance, n_features, target_class=target_class
     )
     original_norm = _vector_norm(original_attr, norm_ord)
@@ -555,6 +574,7 @@ def compute_max_sensitivity(
             n_features,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
         diffs.append(
             _vector_norm(
@@ -1104,7 +1124,7 @@ def compute_relative_input_stability(
     rng = np.random.default_rng(seed)
 
     # Get original explanation and prediction
-    original_attr, explained_target = _get_explanation_vector_and_target(
+    original_attr, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer, instance, n_features, target_class=target_class
     )
     original_class = _get_predicted_class(model, instance)
@@ -1150,6 +1170,7 @@ def compute_relative_input_stability(
             n_features,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
 
         # Numerator: ||(e_x - e_x') / e_x||_p  (element-wise percent change)
@@ -1419,7 +1440,7 @@ def compute_relative_representation_stability(
     rng = np.random.default_rng(seed)
 
     # Get original explanation, prediction, and representation
-    original_attr, explained_target = _get_explanation_vector_and_target(
+    original_attr, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer, instance, n_features, target_class=target_class
     )
     original_class = _get_predicted_class(model, instance)
@@ -1453,6 +1474,7 @@ def compute_relative_representation_stability(
             n_features,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
         repr_pert = _evaluate_single_vector_fn(representation_fn, x_prime, name="representation_fn")
         if repr_pert.shape != repr_orig.shape:
@@ -1680,7 +1702,7 @@ def compute_relative_output_stability(
     rng = np.random.default_rng(seed)
 
     # Get original explanation, prediction, and logits
-    original_attr, explained_target = _get_explanation_vector_and_target(
+    original_attr, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer, instance, n_features, target_class=target_class
     )
     original_class = _get_predicted_class(model, instance)
@@ -1714,6 +1736,7 @@ def compute_relative_output_stability(
             n_features,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
         logits_pert = _evaluate_single_vector_fn(logit_fn, x_prime, name="logit_fn")
         if logits_pert.shape != logits_orig.shape:
@@ -1934,7 +1957,7 @@ def compute_relative_stability(
     rng = np.random.default_rng(seed)
 
     # Get original explanation and prediction
-    original_attr, explained_target = _get_explanation_vector_and_target(
+    original_attr, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer, instance, n_features, target_class=target_class
     )
     original_class = _get_predicted_class(model, instance)
@@ -1980,6 +2003,7 @@ def compute_relative_stability(
             n_features,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
 
         # Shared numerator: ||(e_x - e_x') / e_x||_p
@@ -2391,8 +2415,16 @@ def compute_consistency(
     top_k_sets = []  # frozenset per instance
     cutoff_ties: List[bool] = []
     predictions = []  # predicted class per instance
+    expected_features = None
     for i in range(n_instances):
-        attr = _get_explanation_vector(explainer, X[i], n_features)
+        if i == 0:
+            attr, _, expected_features = _get_explanation_vector_and_target(
+                explainer, X[i], n_features
+            )
+        else:
+            attr = _get_explanation_vector(
+                explainer, X[i], n_features, expected_features=expected_features
+            )
         pred = _get_model_prediction(model, X[i])
         selected, cutoff_tie = _get_top_k_features(
             attr,
@@ -2657,7 +2689,7 @@ def compute_avg_sensitivity(
     rng = np.random.default_rng(seed)
 
     # Get original explanation
-    original_attr, explained_target = _get_explanation_vector_and_target(
+    original_attr, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer, instance, n_features, target_class=target_class
     )
     original_norm = _vector_norm(original_attr, norm_ord)
@@ -2685,6 +2717,7 @@ def compute_avg_sensitivity(
             n_features,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
         diff = _vector_norm(
             _vector_difference(original_attr, perturbed_attr, "explanation"), norm_ord
@@ -2833,7 +2866,7 @@ def compute_continuity(
         return float("nan")
 
     n_features = instance.size
-    original_attr, explained_target = _get_explanation_vector_and_target(
+    original_attr, explained_target, explained_features = _get_explanation_vector_and_target(
         explainer, instance, n_features, target_class=target_class
     )
     ratios = []
@@ -2844,6 +2877,7 @@ def compute_continuity(
             n_features,
             target_class=target_class,
             expected_target=explained_target,
+            expected_features=explained_features,
         )
         numerator = _vector_norm(
             _vector_difference(original_attr, neighbor_attr, "continuity attribution"),

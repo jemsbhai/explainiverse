@@ -515,9 +515,13 @@ def _stable_pearson_affine(
     ):
         raise ValueError("affine Pearson inputs must be paired finite vectors")
     anchor_decimal = Decimal.from_float(float(anchor))
-    differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
+    # Preserve the subtraction before the correlation routine establishes its
+    # own precision. The default Decimal context can erase distinct effects.
+    with localcontext() as context:
+        context.prec = 3000
+        differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
     if absolute:
-        differences = [abs(value) for value in differences]
+        differences = [value.copy_abs() for value in differences]
     return _pearson_from_decimal(
         [Decimal.from_float(float(value)) for value in left_values], differences
     )
@@ -538,7 +542,9 @@ def _stable_pearson_decimal_affine(
     ):
         raise ValueError("decimal affine Pearson inputs must be paired and finite")
     anchor_decimal = Decimal.from_float(float(anchor))
-    differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
+    with localcontext() as context:
+        context.prec = 3000
+        differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
     return _pearson_from_decimal(list(left), differences)
 
 
@@ -594,9 +600,11 @@ def _stable_spearman_affine(
     ):
         raise ValueError("affine Spearman inputs must be paired finite vectors")
     anchor_decimal = Decimal.from_float(float(anchor))
-    differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
+    with localcontext() as context:
+        context.prec = 3000
+        differences = [anchor_decimal - Decimal.from_float(float(value)) for value in right_values]
     if absolute:
-        differences = [abs(value) for value in differences]
+        differences = [value.copy_abs() for value in differences]
     return _stable_pearson(
         _decimal_ranks([Decimal.from_float(float(value)) for value in left_values]),
         _decimal_ranks(differences),

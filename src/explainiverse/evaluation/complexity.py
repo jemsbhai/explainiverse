@@ -33,6 +33,7 @@ References:
 import math
 import warnings
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from typing import Dict, Optional
 
 import numpy as np
@@ -457,8 +458,10 @@ def compute_attribution_threshold_count(
         if max_attr == 0.0:
             # All attributions are exactly zero.
             return 0.0
-        exact_threshold = Decimal.from_float(float(threshold)) * Decimal.from_float(max_attr)
-        count = sum(Decimal.from_float(float(value)) > exact_threshold for value in abs_attr)
+        # Preserve the strict cutoff without rounding the product or depending
+        # on the caller's Decimal precision and traps.
+        exact_threshold = Fraction.from_float(float(threshold)) * Fraction.from_float(max_attr)
+        count = sum(Fraction.from_float(float(value)) > exact_threshold for value in abs_attr)
     else:
         count = int(np.sum(abs_attr > float(threshold)))
 

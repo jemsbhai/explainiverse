@@ -20,6 +20,12 @@ ambiguous or fabricated results; they are not compatibility shims that preserve 
   preserve bfloat16. Returned tensors are detached owned clones on the adapter device; DLPack
   capsules own an equivalent clone and may be consumed once. Caller inputs remain isolated
   from in-place models.
+- `predict_with_gradients`, `get_layer_gradients`, and `get_layer_gradients_with_trace`
+  enable autograd inside a caller's `torch.no_grad()` context and restore the caller's
+  gradient mode on success or failure. Calls inside `torch.inference_mode()` are rejected
+  before model execution; move the gradient call outside that context or use
+  `torch.no_grad()` instead. Models must still expose a differentiable path to the requested
+  input or layer; this does not override gradient disabling inside a model's own forward.
 - Meta-device models and `adapter.to("meta")` are rejected before mutation because adapter
   computation endpoints cannot materialize discarded weights. A failed fully inherited
   `nn.Module.to()` remains recoverable only when its inherited rollback succeeds. If a custom

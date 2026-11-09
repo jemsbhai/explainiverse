@@ -1,5 +1,7 @@
 """Primary-formula and failure-contract tests for complexity metrics."""
 
+from decimal import Inexact, Rounded, localcontext
+
 import numpy as np
 import pytest
 from scipy.stats import entropy as scipy_entropy
@@ -130,4 +132,64 @@ def test_threshold_count_rejects_invalid_threshold(threshold):
     with pytest.raises(ValueError, match="finite non-negative"):
         compute_attribution_threshold_count(
             FixedExplainer([1.0, 2.0]), np.zeros(2), threshold=threshold
+        )
+
+
+@pytest.mark.parametrize("threshold,expected", [(0.5, 1.0), (1.0, 0.0)])
+def test_relative_threshold_excludes_values_exactly_at_the_cutoff(threshold, expected):
+    # Multiplication by one half is exact in binary64: 0.05 == 0.5 * 0.1.
+    assert (
+        compute_attribution_threshold_count(
+            FixedExplainer([0.1, 0.05]),
+            np.zeros(2),
+            threshold=threshold,
+            threshold_type="relative",
+        )
+        == expected
+    )
+
+
+def test_relative_threshold_distinguishes_adjacent_values_around_an_exact_cutoff():
+    values = [0.1, np.nextafter(0.05, 0.0), 0.05, np.nextafter(0.05, 1.0)]
+
+    assert (
+        compute_attribution_threshold_count(
+            FixedExplainer(values), np.zeros(4), threshold=0.5, threshold_type="relative"
+        )
+        == 2.0
+    )
+
+
+@pytest.mark.parametrize(
+    "values,threshold,expected",
+    [
+        ([np.finfo(np.float64).max, 1.0], 2.0, 0.0),
+        ([np.nextafter(0.0, 1.0), 0.0], 0.5, 1.0),
+        ([np.nextafter(0.0, 1.0), 0.0], 1.0, 0.0),
+    ],
+)
+def test_relative_threshold_handles_products_outside_binary64(values, threshold, expected):
+    assert (
+        compute_attribution_threshold_count(
+            FixedExplainer(values), np.zeros(2), threshold=threshold, threshold_type="relative"
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("precision", [2, 28, 80])
+def test_relative_threshold_is_independent_of_decimal_precision_and_traps(precision):
+    with localcontext() as context:
+        context.prec = precision
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
+
+        assert (
+            compute_attribution_threshold_count(
+                FixedExplainer([0.1, 0.05]),
+                np.zeros(2),
+                threshold=0.5,
+                threshold_type="relative",
+            )
+            == 1.0
         )

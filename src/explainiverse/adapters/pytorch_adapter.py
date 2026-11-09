@@ -61,6 +61,24 @@ def _serialized_model_operation(method: _Method) -> _Method:
     return cast(_Method, synchronized)
 
 
+def _gradient_model_operation(method: _Method) -> _Method:
+    """Enable autograd at call time without changing the caller's gradient mode."""
+
+    @wraps(method)
+    def with_gradients(self, *args, **kwargs):
+        if torch.is_inference_mode_enabled():
+            raise RuntimeError(
+                "PyTorchAdapter gradient methods do not support torch.inference_mode(). "
+                "Call them outside inference_mode, or use torch.no_grad() instead."
+            )
+        # Tensor preparation and differentiable clones must also track gradients.
+        # Resolve torch at runtime so importing the adapter still works without it.
+        with torch.enable_grad():
+            return method(self, *args, **kwargs)
+
+    return cast(_Method, with_gradients)
+
+
 def _is_exact_bound_method(owner: object, name: str, canonical: Callable) -> bool:
     """Reject callable objects that spoof ``__func__`` / ``__self__``."""
 
@@ -566,6 +584,10 @@ class PyTorchAdapter(BaseModelAdapter):
         can otherwise alias a CPU NumPy array, allowing an in-place model
         operation to mutate the caller's input as an undocumented side effect.
         """
+        if isinstance(data, np.ndarray) and any(stride < 0 for stride in data.strides):
+            # Torch cannot wrap reversed NumPy views, including singleton
+            # dimensions that NumPy still considers contiguous.
+            data = data.copy()
         tensor = (
             data.to(self.device)
             if isinstance(data, torch.Tensor)
@@ -860,6 +882,7 @@ class PyTorchAdapter(BaseModelAdapter):
         return self._select_target_scores(score_output, target_class)
 
     @_serialized_model_operation
+    @_gradient_model_operation
     def predict_with_gradients(
         self,
         data: np.ndarray,
@@ -872,6 +895,11 @@ class PyTorchAdapter(BaseModelAdapter):
 
         This is essential for gradient-based attribution methods like
         Integrated Gradients, GradCAM, and Saliency Maps.
+
+        Enables autograd inside a caller's ``torch.no_grad()`` context and
+        restores the caller's gradient mode on success or failure.
+        ``torch.inference_mode()`` is unsupported; call outside that context
+        or use ``torch.no_grad()`` instead.
 
         Args:
             data: Input data as numpy array.
@@ -1023,7 +1051,11 @@ class PyTorchAdapter(BaseModelAdapter):
         *,
         result_format: str = "numpy",
     ):
-        """Return target-layer activations/gradients while serializing hooks."""
+        """Return target-layer activations/gradients while serializing hooks.
+
+        Works inside ``torch.no_grad()`` and restores the caller's gradient mode.
+        Call outside ``torch.inference_mode()``, which is unsupported.
+        """
         activations, gradients, _ = self.get_layer_gradients_with_trace(
             data,
             layer_name,
@@ -1043,7 +1075,11 @@ class PyTorchAdapter(BaseModelAdapter):
         *,
         result_format: str = "numpy",
     ):
-        """Return activations/gradients and their immutable locked-call trace."""
+        """Return activations/gradients and their immutable locked-call trace.
+
+        Works inside ``torch.no_grad()`` and restores the caller's gradient mode.
+        Call outside ``torch.inference_mode()``, which is unsupported.
+        """
 
         from explainiverse.explainers.gradient._model_state import adapter_model_operation_lock
 
@@ -1059,6 +1095,7 @@ class PyTorchAdapter(BaseModelAdapter):
             trace,
         )
 
+    @_gradient_model_operation
     def _get_layer_gradients_unlocked(
         self,
         data: np.ndarray,

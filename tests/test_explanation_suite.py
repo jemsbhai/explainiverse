@@ -123,5 +123,74 @@ def test_suite_roar_surfaces_explanation_failures_instead_of_returning_zero():
         suite.evaluate_roar(X_train, y_train, X_test, y_test, n_repeats=1)
 
 
+class _RecordingFeatureExplainer(_CountingFeatureExplainer):
+    def __init__(self, *, mutate=False, fail_on_call=None):
+        super().__init__()
+        self.mutate = mutate
+        self.fail_on_call = fail_on_call
+        self.seen = []
+
+    def explain(self, row):
+        self.seen.append(row.copy())
+        if self.mutate:
+            row[:] = 0.0
+        if len(self.seen) == self.fail_on_call:
+            raise RuntimeError("explanation generation failed after modifying input")
+        return super().explain(row)
+
+
+class _NamedRegistry:
+    def __init__(self, explainers):
+        self.explainers = explainers
+
+    def create(self, name, **kwargs):
+        return self.explainers[name]
+
+
+def _roar_data():
+    X_train = np.array([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]])
+    y_train = np.array([0, 0, 1, 1])
+    X_test = np.array([[0.0, 0.5], [1.0, 0.5]])
+    y_test = np.array([0, 1])
+    return X_train, y_train, X_test, y_test
+
+
+def test_suite_roar_isolates_data_from_explainers_before_retraining():
+    X_train, y_train, X_test, y_test = _roar_data()
+    original_train, original_test = X_train.copy(), X_test.copy()
+    mutating = _RecordingFeatureExplainer(mutate=True)
+    observing = _RecordingFeatureExplainer()
+    estimator = DecisionTreeClassifier(random_state=0).fit(X_train, y_train)
+    suite = ExplanationSuite(estimator, [("mutating", {}), ("observing", {})])
+    suite._registry = _NamedRegistry({"mutating": mutating, "observing": observing})
+
+    scores = suite.evaluate_roar(X_train, y_train, X_test, y_test, top_k=1, n_repeats=1)
+
+    np.testing.assert_array_equal(X_train, original_train)
+    np.testing.assert_array_equal(X_test, original_test)
+    expected_rows = np.concatenate((original_train, original_test))
+    np.testing.assert_array_equal(mutating.seen, expected_rows)
+    np.testing.assert_array_equal(observing.seen, expected_rows)
+    # Removing f0 drops accuracy from 1.0 to 0.5. If explanation generation
+    # corrupts the clean datasets, both fits instead see zeros and report 0.0.
+    assert scores == {"mutating": 0.5, "observing": 0.5}
+
+
+@pytest.mark.parametrize("fail_on_call", [2, 5], ids=["training-row", "test-row"])
+def test_suite_roar_preserves_inputs_when_mutating_explainer_fails(fail_on_call):
+    X_train, y_train, X_test, y_test = _roar_data()
+    original_train, original_test = X_train.copy(), X_test.copy()
+    explainer = _RecordingFeatureExplainer(mutate=True, fail_on_call=fail_on_call)
+    estimator = DecisionTreeClassifier(random_state=0).fit(X_train, y_train)
+    suite = ExplanationSuite(estimator, [("mutating", {})])
+    suite._registry = _FixedRegistry(explainer)
+
+    with pytest.raises(RuntimeError, match="failed after modifying input"):
+        suite.evaluate_roar(X_train, y_train, X_test, y_test, top_k=1, n_repeats=1)
+
+    np.testing.assert_array_equal(X_train, original_train)
+    np.testing.assert_array_equal(X_test, original_test)
+
+
 if __name__ == "__main__":
     test_explanation_suite_lime_vs_shap()

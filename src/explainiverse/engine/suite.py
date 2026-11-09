@@ -588,11 +588,11 @@ class ExplanationSuite:
             explainer = self._create_configured_explainer(registry, name, params)
             call_kwargs = self._merged_call_kwargs(name)
             train_explanations = [
-                self._explain_instance(explainer, name, row, dict(call_kwargs))
+                self._explain_instance(explainer, name, row.copy(), dict(call_kwargs))
                 for row in np.asarray(X_train)
             ]
             test_explanations = [
-                self._explain_instance(explainer, name, row, dict(call_kwargs))
+                self._explain_instance(explainer, name, row.copy(), dict(call_kwargs))
                 for row in np.asarray(X_test)
             ]
             result = compute_roar(
