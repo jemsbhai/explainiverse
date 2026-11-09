@@ -12,6 +12,7 @@ Reference:
     1059-1086.
 """
 
+from fractions import Fraction
 from numbers import Integral
 from typing import List, Optional, Tuple, Union
 
@@ -197,7 +198,14 @@ class ALEExplainer(BaseExplainer):
         effects_at_bin_centers = (accumulated_at_edges[:-1] + accumulated_at_edges[1:]) / 2.0
         centering_constant = float(np.average(effects_at_bin_centers, weights=bin_counts))
         centered_at_edges = accumulated_at_edges - centering_constant
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        # Round the exact midpoint once: adding large endpoints can overflow,
+        # while halving each endpoint first can erase subnormal coordinates.
+        bin_centers = np.asarray(
+            [
+                float((Fraction.from_float(float(left)) + Fraction.from_float(float(right))) / 2)
+                for left, right in zip(bin_edges[:-1], bin_edges[1:])
+            ]
+        )
 
         return (
             bin_edges,
