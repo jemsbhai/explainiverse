@@ -201,14 +201,26 @@ def _notebook_source_digest(notebook: NotebookNode) -> str:
 
 
 def _published_outputs_payload(notebook: NotebookNode) -> list[dict[str, Any]]:
-    return [
-        {
-            "execution_count": cell.execution_count,
-            "outputs": copy.deepcopy(cell.outputs),
-        }
-        for cell in notebook.cells
-        if cell.cell_type == "code"
-    ]
+    """Ignore transport chunking while preserving output text and ordering."""
+    payload = []
+    for cell in notebook.cells:
+        if cell.cell_type != "code":
+            continue
+        outputs: list[dict[str, Any]] = []
+        for output in copy.deepcopy(cell.outputs):
+            if (
+                output.get("output_type") == "stream"
+                and isinstance(output.get("text"), str)
+                and outputs
+                and isinstance(outputs[-1].get("text"), str)
+                and {key: value for key, value in output.items() if key != "text"}
+                == {key: value for key, value in outputs[-1].items() if key != "text"}
+            ):
+                outputs[-1]["text"] += output["text"]
+            else:
+                outputs.append(output)
+        payload.append({"execution_count": cell.execution_count, "outputs": outputs})
+    return payload
 
 
 def _published_outputs_digest(notebook: NotebookNode) -> str:
