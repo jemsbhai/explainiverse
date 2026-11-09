@@ -14,7 +14,8 @@ may produce conflicting explanations for the same model prediction.
 
 Both metrics are computed per-instance and operate on the top-k features
 by absolute attribution value. Higher values indicate stronger agreement
-(range [0, 1]).
+(range [0, 1]). Attribution values must be finite and real; complex values
+are rejected before conversion rather than reduced to their real parts.
 
 Note:
     Unlike most other evaluation metrics in Explainiverse, these are
@@ -78,16 +79,22 @@ def _extract_attribution_array(
             values = [attr_dict[name] for name in feature_names]
         else:
             values = list(attr_dict.values())
-        result = np.asarray(values, dtype=np.float64)
+        result = np.asarray(values)
 
     elif isinstance(attributions, np.ndarray):
         if attributions.ndim != 1:
             raise ValueError(f"Attributions must be 1-D arrays, got shape {attributions.shape}.")
-        result = attributions.astype(np.float64)
+        result = attributions
 
     else:
         raise TypeError(f"Expected np.ndarray or Explanation, got {type(attributions).__name__}")
 
+    if np.iscomplexobj(result) or (
+        result.dtype == object
+        and any(isinstance(value, (complex, np.complexfloating)) for value in result.flat)
+    ):
+        raise ValueError("Attribution vectors must not contain complex values.")
+    result = result.astype(np.float64)
     if result.ndim != 1 or result.size == 0:
         raise ValueError("Attribution vectors must be non-empty and one-dimensional.")
     if not np.all(np.isfinite(result)):
