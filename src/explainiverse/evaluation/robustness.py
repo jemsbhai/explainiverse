@@ -893,7 +893,7 @@ def _evaluate_single_vector_fn(
     *,
     name: str,
 ) -> np.ndarray:
-    """Evaluate a representation/logit callable for exactly one instance."""
+    """Evaluate and snapshot a representation/logit callable for one instance."""
     result = np.asarray(function(instance), dtype=np.float64)
     if result.ndim >= 2:
         if result.shape[0] != 1:
@@ -904,7 +904,8 @@ def _evaluate_single_vector_fn(
         raise ValueError(f"{name} must return a non-empty vector.")
     if not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must return only finite values.")
-    return result
+    # Later callback evaluations may reuse the same output storage.
+    return result.copy()
 
 
 def _class_from_single_prediction(output, *, probabilistic: bool):
@@ -1082,7 +1083,8 @@ def compute_relative_input_stability(
         representation_fn: Optional callable mapping input → hidden
             representation. If provided and return_details=True, the
             sampled right-hand-side estimate for Equation 4 is included. It
-            is not a certified theoretical bound.
+            is not a certified theoretical bound. Results are copied before
+            subsequent evaluations, so the callable may reuse its output array.
         target_class: Optional fixed output-column index.
 
     Returns:
@@ -1407,6 +1409,8 @@ def compute_relative_representation_stability(
         representation_fn: Callable receiving one 1D input and returning an
             internal representation as either a 1D vector or one-row 2D
             array. E.g., the pre-ReLU output of the first hidden layer.
+            Results are copied before subsequent evaluations, so the callable
+            may reuse its output array.
         n_perturbations: Number of perturbations. Default: 50.
         noise_scale: Gaussian noise standard deviation in the supplied feature
             space. It is unbounded; no data-bound clipping is applied.
@@ -1669,6 +1673,8 @@ def compute_relative_output_stability(
         instance: Input instance (1D array).
         logit_fn: Callable receiving one 1D input and returning logits as a
             1D vector or one-row 2D array. E.g., a pre-softmax layer output.
+            Results are copied before subsequent evaluations, so the callable
+            may reuse its output array.
         n_perturbations: Number of perturbations. Default: 50.
         noise_scale: Gaussian noise standard deviation in the supplied feature
             space. It is unbounded; no data-bound clipping is applied.
@@ -1914,8 +1920,11 @@ def compute_relative_stability(
         model: Model adapter.
         instance: Input instance (1D array).
         representation_fn: Optional callable for RRS. Maps input → hidden
-            representation.
+            representation. Results are copied before subsequent evaluations,
+            so the callable may reuse its output array.
         logit_fn: Optional callable for ROS. Maps input → output logits.
+            Results are copied before subsequent evaluations, so the callable
+            may reuse its output array.
         n_perturbations: Number of perturbations. Default: 50.
         noise_scale: Unbounded Gaussian noise standard deviation in the
             supplied feature space. No data-bound clipping is applied.
