@@ -621,7 +621,8 @@ def _explanation_result(
     expected_length: int,
     label: str,
 ) -> np.ndarray:
-    return _as_finite_vector(explain_func(instance), label, expected_length=expected_length)
+    # Callbacks may reuse their output storage on subsequent evaluations.
+    return _as_finite_vector(explain_func(instance), label, expected_length=expected_length).copy()
 
 
 def _assert_deterministic(first: np.ndarray, second: np.ndarray, label: str) -> None:
@@ -689,6 +690,9 @@ def compute_input_invariance(
     this function does **not** test Kindermans et al.'s Input Invariance axiom:
     the model prediction itself may have changed.  A warning is emitted on each
     direct call to prevent the proxy from being reported as the canonical test.
+
+    Callback attribution results are copied before subsequent evaluations, so
+    callbacks may reuse their output arrays without altering earlier results.
     """
     warnings.warn(
         "compute_input_invariance is an uncompensated translation-sensitivity "
@@ -707,7 +711,10 @@ def _torch_attributions(
     n_features: int,
     label: str,
 ) -> np.ndarray:
-    return _as_finite_vector(explain_func(model, instance), label, expected_length=n_features)
+    # Snapshot even when conversion shares memory with a callback-owned tensor.
+    return _as_finite_vector(
+        explain_func(model, instance), label, expected_length=n_features
+    ).copy()
 
 
 def compute_input_invariance_pytorch(
@@ -729,6 +736,9 @@ def compute_input_invariance_pytorch(
 
     A zero result is evidence only for this transformation and tested input.  It
     does not establish global Input Invariance or Implementation Invariance.
+
+    Each callback attribution result is copied before the next evaluation,
+    including results backed by reusable NumPy or CPU tensor storage.
     """
     verify_determinism = _validate_bool(verify_determinism, "verify_determinism")
     try:
