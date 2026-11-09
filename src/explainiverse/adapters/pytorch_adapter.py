@@ -824,6 +824,9 @@ class PyTorchAdapter(BaseModelAdapter):
                 raise TypeError("target_class array must contain integer indices")
             if target_class.ndim > 1:
                 raise ValueError("target_class array must be scalar or one-dimensional")
+            # Torch rejects negative strides, even on contiguous singleton views.
+            if any(stride < 0 for stride in target_class.strides):
+                target_class = target_class.copy()
             indices = torch.as_tensor(target_class, device=self.device, dtype=torch.long).reshape(
                 -1
             )
