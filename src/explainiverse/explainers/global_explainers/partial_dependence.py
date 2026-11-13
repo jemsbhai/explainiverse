@@ -450,7 +450,7 @@ class PartialDependenceExplainer(BaseExplainer):
                 "output_space": output_space,
                 "prediction_output": "model.predict",
                 "averaging": "empirical_reference_mean",
-                "percentile_range": self.percentile_range,
+                "percentile_range": list(self.percentile_range),
                 "grid_resolution": self.grid_resolution,
             },
         )

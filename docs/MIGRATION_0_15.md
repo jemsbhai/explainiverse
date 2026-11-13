@@ -203,6 +203,9 @@ unrepresentable objective raises `ValueError` instead of placing `NaN` or infini
   require a non-empty string target and apply JavaScript's safe-integer boundary to both integer
   and integer-valued-float producers. Shared fixtures plus a real Python-to-Node-to-Python
   subprocess bridge own the producer/consumer contract.
+- Partial dependence results now store `metadata["percentile_range"]` as a two-element
+  list so results with wire-compatible values can be exported directly. Code that uses
+  the bounds as a dictionary key can convert the list to a tuple.
 
 ## Release operations
 
