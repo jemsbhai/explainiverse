@@ -111,8 +111,15 @@ class ALEExplainer(BaseExplainer):
 
     def _compute_quantile_bins(self, values: np.ndarray) -> np.ndarray:
         """Return ALEPlot-compatible inverse-ECDF quantile edges."""
-        percentiles = np.linspace(0.0, 100.0, self.n_bins + 1)
-        return np.unique(np.percentile(values, percentiles, method="inverted_cdf"))
+        n_rows = len(values)
+        if self.n_bins >= n_rows:
+            # Every order statistic occurs at least once on this grid.
+            return np.unique(values)
+
+        # At k / n_bins the one-based rank is ceil(k * n_rows / n_bins).
+        # Compute its zero-based index exactly, with the minimum at k = 0.
+        indices = [0] + [(k * n_rows - 1) // self.n_bins for k in range(1, self.n_bins + 1)]
+        return np.unique(np.partition(values, indices)[indices])
 
     def _selected_predictions(
         self,
