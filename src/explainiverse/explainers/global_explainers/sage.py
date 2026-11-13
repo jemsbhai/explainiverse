@@ -14,6 +14,7 @@ Reference:
 """
 
 from fractions import Fraction
+from math import isfinite
 from numbers import Integral
 from typing import Callable, List, Literal, Optional, TypeAlias
 
@@ -33,6 +34,60 @@ from explainiverse.explainers._validation import (
 SAGETask: TypeAlias = Literal["classification", "regression"]
 LossValue: TypeAlias = float | np.ndarray
 LossFunction: TypeAlias = Callable[[np.ndarray, np.ndarray], LossValue]
+
+
+def _floating_donor_mean(column: np.ndarray) -> float:
+    """Round the empirical expectation directly to the model's floating dtype."""
+    if not np.isfinite(column).all():
+        # A custom loss may handle a missing response itself.
+        return np.mean(column)
+    exact = sum((Fraction.from_float(float(x)) for x in column), Fraction(0)) / len(column)
+    candidate = column.dtype.type(float(exact))
+    candidate_value = Fraction.from_float(float(candidate))
+    if exact != candidate_value and column.dtype.itemsize < 8:
+        # Passing through binary64 can land on a float16/32 midpoint. The
+        # adjacent value towards the exact mean may then be strictly closer.
+        direction = column.dtype.type(np.inf if exact > candidate_value else -np.inf)
+        with np.errstate(under="ignore"):
+            neighbor = np.nextafter(candidate, direction)
+        if abs(exact - Fraction.from_float(float(neighbor))) < abs(exact - candidate_value):
+            candidate = neighbor
+    if candidate == 0 and exact:
+        raise FloatingPointError("SAGE donor mean is not representable")
+    return candidate
+
+
+def _donor_mean(predictions: np.ndarray, axis: int) -> np.ndarray:
+    """Average each model output over donors, preserving its trailing axes."""
+    if predictions.size == 0:
+        return np.mean(predictions, axis=axis)
+    if predictions.dtype.kind in "biu":
+        # Python integers retain all input bits, including those beyond 2**53.
+        totals = predictions.astype(object).sum(axis=axis)
+        return np.asarray(totals / predictions.shape[axis], dtype=float)
+    if predictions.dtype.kind == "c" and predictions.dtype.itemsize <= 16:
+        if not np.isfinite(predictions).all():
+            return np.mean(predictions, axis=axis)
+        real = _donor_mean(predictions.real, axis)
+        mean = np.empty(real.shape, dtype=predictions.dtype)
+        mean.real = real
+        mean.imag = _donor_mean(predictions.imag, axis)
+        return mean
+    if predictions.dtype == object:
+        # Preserve object arithmetic (e.g. Decimal) and the callback's dtype.
+        def object_mean(column: np.ndarray) -> np.ndarray:
+            if all(type(x) in (int, bool) or (type(x) is float and isfinite(x)) for x in column):
+                total = sum((Fraction(x) for x in column), Fraction(0))
+                result = representable_float(total / len(column), "SAGE donor mean")
+                return np.asarray(result, dtype=object)
+            return np.mean(column, keepdims=True).reshape(())
+
+        return np.apply_along_axis(object_mean, axis, predictions)
+    if predictions.dtype.kind != "f" or predictions.dtype.itemsize > 8:
+        return np.mean(predictions, axis=axis)
+    if predictions.dtype.itemsize == 8 and np.isfinite(predictions).all():
+        return _stable_mean(predictions, axis=axis)
+    return np.apply_along_axis(_floating_donor_mean, axis, predictions)
 
 
 class SAGEExplainer(BaseExplainer):
@@ -295,8 +350,10 @@ class SAGEExplainer(BaseExplainer):
 
         if not np.any(mask):
             background_predictions = np.asarray(self.model.predict(self.background_data))
-            mean_prediction = np.mean(background_predictions, axis=0, keepdims=True)
-            return np.repeat(mean_prediction, n_samples, axis=0)
+            if background_predictions.ndim == 0 or background_predictions.shape[0] != n_background:
+                raise ValueError("model.predict must return one prediction row per input row")
+            mean_prediction = _donor_mean(background_predictions, axis=0)
+            return np.repeat(np.expand_dims(mean_prediction, axis=0), n_samples, axis=0)
 
         # Preserve both observed and donor values when their dtypes differ.
         completed_dtype = np.result_type(self.X.dtype, self.background_data.dtype)
@@ -321,7 +378,7 @@ class SAGEExplainer(BaseExplainer):
 
         output_shape = predictions.shape[1:]
         reshaped = predictions.reshape(n_samples, n_background, *output_shape)
-        return np.mean(reshaped, axis=1)
+        return _donor_mean(reshaped, axis=1)
 
     def _compute_coalition_loss(self, feature_mask: np.ndarray) -> float:
         """Compute the SAGE loss for one feature coalition."""
