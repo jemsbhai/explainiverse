@@ -37,8 +37,8 @@ from explainiverse.explainers.global_explainers.partial_dependence import (
 Feature = Union[int, str]
 
 
-def _subnormal_units(value: float) -> int:
-    """Express a finite binary64 response in integer multiples of 2**-1074."""
+def _subnormal_units(value: int | float) -> int:
+    """Express an integer or finite binary64 response in units of 2**-1074."""
     numerator, denominator = value.as_integer_ratio()
     denominator_exponent = denominator.bit_length() - 1
     return numerator << (1074 - denominator_exponent)
@@ -51,8 +51,12 @@ def _ale_effects(
     # Even an individual response difference can overflow before cancellation
     # within its bin. Accumulate in a common exact unit once per row.
     sums = [0] * len(bin_counts)
+    # Each prediction call can return a different dtype. Convert integer
+    # scalars directly to Python integers before taking their differences.
+    upper_scalar = int if upper.dtype.kind in "iu" else float
+    lower_scalar = int if lower.dtype.kind in "iu" else float
     for index, high, low in zip(bin_indices, upper, lower):
-        sums[index] += _subnormal_units(float(high)) - _subnormal_units(float(low))
+        sums[index] += _subnormal_units(upper_scalar(high)) - _subnormal_units(lower_scalar(low))
 
     counts = bin_counts.tolist()
     local = [Fraction(total, count << 1074) for total, count in zip(sums, counts)]
