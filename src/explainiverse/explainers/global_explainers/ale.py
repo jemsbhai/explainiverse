@@ -177,11 +177,13 @@ class ALEExplainer(BaseExplainer):
         X_lower[:, feature_idx] = bin_edges[bin_indices]
         X_upper[:, feature_idx] = bin_edges[bin_indices + 1]
 
+        # A model may reuse its output buffer for the lower-edge prediction.
         prediction_differences = self._selected_predictions(
-            X_upper,
-            output_index,
-            expected_n_outputs,
-        ) - self._selected_predictions(X_lower, output_index, expected_n_outputs)
+            X_upper, output_index, expected_n_outputs
+        ).copy()
+        prediction_differences -= self._selected_predictions(
+            X_lower, output_index, expected_n_outputs
+        )
         local_effects = (
             np.bincount(bin_indices, weights=prediction_differences, minlength=n_intervals)
             / bin_counts
