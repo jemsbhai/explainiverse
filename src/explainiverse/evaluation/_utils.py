@@ -352,20 +352,25 @@ def _stable_dot(left: np.ndarray, right: np.ndarray) -> float:
     return result
 
 
-def _stable_mean_square(values: np.ndarray) -> float:
-    """Compute a mean square when the mean is finite but a square may not be."""
-    array = np.asarray(values, dtype=np.float64).reshape(-1)
+def _stable_mean_square(values: np.ndarray, reference: Optional[np.ndarray] = None) -> float:
+    """Compute a mean square, optionally subtracting paired reference values exactly."""
+    array = np.asarray(values, dtype=np.float64)
     if array.size == 0 or not np.all(np.isfinite(array)):
         raise ValueError("mean-square inputs must be non-empty and finite")
     with localcontext() as context:
         context.prec = 3000 + len(str(array.size))
-        exact = sum(
-            (
-                Decimal.from_float(float(value)) * Decimal.from_float(float(value))
-                for value in array
-            ),
-            start=Decimal(0),
-        ) / Decimal(array.size)
+        operands = (Decimal.from_float(float(value)) for value in array.flat)
+        if reference is None:
+            residuals = operands
+        else:
+            paired = np.asarray(reference, dtype=np.float64)
+            if paired.shape != array.shape or not np.all(np.isfinite(paired)):
+                raise ValueError("mean-square reference must be finite and match the input shape")
+            residuals = (
+                value - Decimal.from_float(float(other))
+                for value, other in zip(operands, paired.flat)
+            )
+        exact = sum((value * value for value in residuals), start=Decimal(0)) / Decimal(array.size)
         result = float(exact)
     if not np.isfinite(result) or (result == 0.0 and exact != 0):
         raise FloatingPointError("mean square is not representable")

@@ -18,11 +18,11 @@ from numbers import Integral
 from typing import Callable, List, Literal, Optional, TypeAlias
 
 import numpy as np
-from sklearn.metrics import accuracy_score, mean_squared_error
+from sklearn.metrics import accuracy_score
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
-from explainiverse.evaluation._utils import _stable_mean
+from explainiverse.evaluation._utils import _stable_mean, _stable_mean_square
 from explainiverse.explainers._validation import (
     as_real_array,
     get_prediction_output_kind,
@@ -255,9 +255,14 @@ class SAGEExplainer(BaseExplainer):
             dtype=float,
             require_finite=True,
         )
-        if targets.ndim == 1 and predictions.ndim == 2 and predictions.shape[1] == 1:
-            predictions = predictions[:, 0]
-        return float(mean_squared_error(targets, predictions))
+        if targets.ndim == 1:
+            targets = targets[:, None]
+        if predictions.ndim == 1:
+            predictions = predictions[:, None]
+        if targets.ndim != 2 or targets.shape != predictions.shape:
+            raise ValueError("regression targets and predictions must match in rows and outputs")
+        # Uniform multi-output MSE weights every row/output pair equally.
+        return _stable_mean_square(targets, predictions)
 
     def _loss_from_predictions(self, predictions: np.ndarray) -> float:
         """Evaluate and scalarize the configured loss."""
