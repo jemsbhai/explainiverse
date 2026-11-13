@@ -18,6 +18,7 @@ from sklearn.metrics import accuracy_score, r2_score
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import _stable_mean, _stable_std
 from explainiverse.explainers._validation import (
     as_real_array,
     get_prediction_output_kind,
@@ -277,11 +278,16 @@ class PermutationImportanceExplainer(BaseExplainer):
                 feature_rng.shuffle(row_indices)
                 X_permuted[:, idx] = X_permuted[row_indices, idx]
                 score = self._score_predictions(self.model.predict(X_permuted))
-                score_drops.append(baseline_score - score)
+                drop = baseline_score - score
+                if not np.isfinite(drop):
+                    raise FloatingPointError(
+                        f"Permutation score drop for {feature_name!r} is not representable"
+                    )
+                score_drops.append(drop)
 
             score_drops_array = np.asarray(score_drops, dtype=float)
-            importances[feature_name] = float(np.mean(score_drops_array))
-            stds[feature_name] = float(np.std(score_drops_array))
+            importances[feature_name] = float(_stable_mean(score_drops_array))
+            stds[feature_name] = float(_stable_std(score_drops_array))
             raw_importances[feature_name] = score_drops_array.tolist()
 
         return Explanation(
