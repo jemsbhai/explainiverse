@@ -10,6 +10,8 @@ Reference:
     machine. Annals of Statistics, 29(5), 1189-1232.
 """
 
+from fractions import Fraction
+from math import isfinite
 from numbers import Integral
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -17,7 +19,7 @@ import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
-from explainiverse.evaluation._utils import _stable_mean
+from explainiverse.evaluation._utils import _exact_percentile, _stable_mean
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
 
 Feature = Union[int, str]
@@ -272,6 +274,20 @@ class PartialDependenceExplainer(BaseExplainer):
         unique_values = np.unique(observed)
         if len(unique_values) <= self.grid_resolution:
             return unique_values
+
+        if not isfinite(float(unique_values[-1]) - float(unique_values[0])):
+            # Both percentile interpolation and linspace normally subtract
+            # endpoints. Keep that difference exact when the span exceeds
+            # binary64, then round each finite intervention coordinate once.
+            lower_exact, upper_exact = (
+                Fraction(_exact_percentile(numeric_values, p)) for p in self.percentile_range
+            )
+            step = (upper_exact - lower_exact) / (self.grid_resolution - 1)
+            return np.fromiter(
+                (float(lower_exact + i * step) for i in range(self.grid_resolution)),
+                dtype=float,
+                count=self.grid_resolution,
+            )
 
         percentile_values = np.asarray(
             np.percentile(numeric_values, self.percentile_range),
