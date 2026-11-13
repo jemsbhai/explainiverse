@@ -320,13 +320,13 @@ class SAGEExplainer(BaseExplainer):
     def _loss_from_predictions(self, predictions: np.ndarray) -> float:
         """Evaluate and scalarize the configured loss."""
         loss = self.loss_fn(self.y, predictions)
-        loss_array = as_real_array(
-            loss,
-            name="loss_fn result",
-            dtype=float,
-            require_finite=True,
-        )
-        if loss_array.size == 0 or not np.all(np.isfinite(loss_array)):
+        loss_array = as_real_array(loss, name="loss_fn result")
+        # Keep integer losses exact until the empirical mean is rounded.
+        if loss_array.dtype.kind not in "biu":
+            loss_array = as_real_array(
+                loss_array, name="loss_fn result", dtype=float, require_finite=True
+            )
+        if loss_array.size == 0:
             raise ValueError("loss_fn must return finite values")
         return float(_stable_mean(loss_array.reshape(-1)))
 
