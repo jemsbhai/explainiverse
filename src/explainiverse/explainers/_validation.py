@@ -5,6 +5,7 @@ adapter.  Adapters retain their model-specific output contracts; explainers use
 the helpers to enforce the narrower contracts required by their algorithms.
 """
 
+from fractions import Fraction
 from typing import Any, Iterable, List, Optional, Sequence, cast
 
 import numpy as np
@@ -12,6 +13,17 @@ import numpy as np
 _PREDICTION_OUTPUT_KINDS = frozenset(
     {"probabilities", "class_labels", "scores", "regression_values"}
 )
+
+
+def representable_float(value: Fraction, field: str) -> float:
+    """Round an exact result once, detecting overflow and nonzero underflow."""
+    try:
+        rounded = float(value)
+    except OverflowError as exc:
+        raise FloatingPointError(f"{field} is not representable") from exc
+    if rounded == 0.0 and value:
+        raise FloatingPointError(f"{field} is not representable")
+    return rounded
 
 
 def _contains_complex_values(values: np.ndarray) -> bool:

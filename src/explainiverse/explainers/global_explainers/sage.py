@@ -26,23 +26,13 @@ from explainiverse.evaluation._utils import _stable_mean
 from explainiverse.explainers._validation import (
     as_real_array,
     get_prediction_output_kind,
+    representable_float,
     validate_name_sequence,
 )
 
 SAGETask: TypeAlias = Literal["classification", "regression"]
 LossValue: TypeAlias = float | np.ndarray
 LossFunction: TypeAlias = Callable[[np.ndarray, np.ndarray], LossValue]
-
-
-def _result_float(value: Fraction, field: str) -> float:
-    """Round a published SAGE result once, detecting overflow and underflow."""
-    try:
-        rounded = float(value)
-    except OverflowError as exc:
-        raise FloatingPointError(f"SAGE {field} is not representable") from exc
-    if rounded == 0.0 and value:
-        raise FloatingPointError(f"SAGE {field} is not representable")
-    return rounded
 
 
 class SAGEExplainer(BaseExplainer):
@@ -390,14 +380,16 @@ class SAGEExplainer(BaseExplainer):
                 previous_loss = current_loss
 
         attributions = {
-            name: _result_float(total / self.n_permutations, f"attribution for {name!r}")
+            name: representable_float(total / self.n_permutations, f"SAGE attribution for {name!r}")
             for name, total in zip(self.feature_names, marginal_sums)
         }
-        total_value = _result_float(exact_baseline - Fraction.from_float(full_loss), "total value")
+        total_value = representable_float(
+            exact_baseline - Fraction.from_float(full_loss), "SAGE total value"
+        )
         # Measure efficiency using the actual values returned to the caller.
         published_sum = sum(map(Fraction.from_float, attributions.values()), Fraction(0))
-        efficiency_error = _result_float(
-            published_sum - Fraction.from_float(total_value), "efficiency error"
+        efficiency_error = representable_float(
+            published_sum - Fraction.from_float(total_value), "SAGE efficiency error"
         )
 
         return Explanation(

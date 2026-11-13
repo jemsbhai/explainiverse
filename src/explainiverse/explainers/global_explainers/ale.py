@@ -13,6 +13,7 @@ Reference:
 """
 
 from fractions import Fraction
+from itertools import accumulate
 from numbers import Integral
 from typing import List, Optional, Tuple, Union
 
@@ -20,7 +21,11 @@ import numpy as np
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
-from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers._validation import (
+    as_real_array,
+    representable_float,
+    validate_name_sequence,
+)
 from explainiverse.explainers.global_explainers.partial_dependence import (
     _normalize_predictions,
     _preserve_integer_levels,
@@ -30,6 +35,38 @@ from explainiverse.explainers.global_explainers.partial_dependence import (
 )
 
 Feature = Union[int, str]
+
+
+def _subnormal_units(value: float) -> int:
+    """Express a finite binary64 response in integer multiples of 2**-1074."""
+    numerator, denominator = value.as_integer_ratio()
+    denominator_exponent = denominator.bit_length() - 1
+    return numerator << (1074 - denominator_exponent)
+
+
+def _ale_effects(
+    upper: np.ndarray, lower: np.ndarray, bin_indices: np.ndarray, bin_counts: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Average paired responses per bin and center their integrated curve."""
+    # Even an individual response difference can overflow before cancellation
+    # within its bin. Accumulate in a common exact unit once per row.
+    sums = [0] * len(bin_counts)
+    for index, high, low in zip(bin_indices, upper, lower):
+        sums[index] += _subnormal_units(float(high)) - _subnormal_units(float(low))
+
+    counts = bin_counts.tolist()
+    local = [Fraction(total, count << 1074) for total, count in zip(sums, counts)]
+    edges = list(accumulate(local, initial=Fraction(0)))
+    midpoints = [(left + right) / 2 for left, right in zip(edges, edges[1:])]
+    center = sum((m * n for m, n in zip(midpoints, counts)), Fraction(0)) / len(upper)
+
+    # Round each published result only after empirical trapezoid centering.
+    local_effects = np.array([representable_float(v, "ALE local effect") for v in local])
+    edge_effects = np.array([representable_float(v - center, "ALE edge effect") for v in edges])
+    midpoint_effects = np.array(
+        [representable_float(v - center, "ALE midpoint effect") for v in midpoints]
+    )
+    return edge_effects, midpoint_effects, local_effects
 
 
 class ALEExplainer(BaseExplainer):
@@ -140,8 +177,8 @@ class ALEExplainer(BaseExplainer):
         feature_idx: int,
         output_index: int,
         expected_n_outputs: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return edge grid, centered ALE, local effects, counts, and centers."""
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return the edge grid, centered edge/midpoint effects, local effects, counts and centers."""
         values = self._numeric_feature_values(feature_idx)
         bin_edges = self._compute_quantile_bins(values)
 
@@ -149,6 +186,7 @@ class ALEExplainer(BaseExplainer):
             # No finite difference can be defined for a constant feature.
             return (
                 bin_edges.copy(),
+                np.array([0.0]),
                 np.array([0.0]),
                 np.array([0.0]),
                 np.array([len(values)], dtype=int),
@@ -183,28 +221,11 @@ class ALEExplainer(BaseExplainer):
         X_upper[:, feature_idx] = bin_edges[bin_indices + 1]
 
         # A model may reuse its output buffer for the lower-edge prediction.
-        prediction_differences = self._selected_predictions(
-            X_upper, output_index, expected_n_outputs
-        ).copy()
-        prediction_differences -= self._selected_predictions(
-            X_lower, output_index, expected_n_outputs
+        upper = self._selected_predictions(X_upper, output_index, expected_n_outputs).copy()
+        lower = self._selected_predictions(X_lower, output_index, expected_n_outputs)
+        centered_at_edges, centered_at_midpoints, local_effects = _ale_effects(
+            upper, lower, bin_indices, bin_counts
         )
-        local_effects = (
-            np.bincount(bin_indices, weights=prediction_differences, minlength=n_intervals)
-            / bin_counts
-        )
-
-        # Effects and coordinates are both at bin edges. The prior
-        # implementation paired these upper-edge cumulative values with bin
-        # centers, shifting every plotted point by half a bin.
-        accumulated_at_edges = np.concatenate(([0.0], np.cumsum(local_effects)))
-
-        # Canonical ALEPlot centering: approximate the accumulated effect for
-        # each observation by the trapezoid midpoint of its bin, then take the
-        # empirical (bin-count-weighted) mean.
-        effects_at_bin_centers = (accumulated_at_edges[:-1] + accumulated_at_edges[1:]) / 2.0
-        centering_constant = float(np.average(effects_at_bin_centers, weights=bin_counts))
-        centered_at_edges = accumulated_at_edges - centering_constant
         # Round the exact midpoint once: adding large endpoints can overflow,
         # while halving each endpoint first can erase subnormal coordinates.
         edges = bin_edges.tolist()
@@ -215,6 +236,7 @@ class ALEExplainer(BaseExplainer):
         return (
             bin_edges,
             centered_at_edges,
+            centered_at_midpoints,
             local_effects,
             bin_counts,
             bin_centers,
@@ -228,7 +250,7 @@ class ALEExplainer(BaseExplainer):
         """Backward-compatible private wrapper returning aligned edge values."""
         reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
         output_index = _resolve_output_index(reference, self.task, target_class)
-        grid_values, ale_values, _, _, _ = self._compute_ale_details(
+        grid_values, ale_values, _, _, _, _ = self._compute_ale_details(
             feature_idx,
             output_index,
             int(reference.shape[1]),
@@ -252,6 +274,7 @@ class ALEExplainer(BaseExplainer):
         (
             grid_values,
             ale_values,
+            ale_at_bin_centers,
             local_effects,
             bin_counts,
             bin_centers,
@@ -261,10 +284,12 @@ class ALEExplainer(BaseExplainer):
             expected_n_outputs,
         )
 
-        if len(ale_values) == 1:
-            ale_at_bin_centers = np.array([0.0])
-        else:
-            ale_at_bin_centers = (ale_values[:-1] + ale_values[1:]) / 2.0
+        # The range describes the centered edge values actually returned.
+        curve_range = representable_float(
+            Fraction.from_float(float(ale_values.max()))
+            - Fraction.from_float(float(ale_values.min())),
+            "ALE curve range",
+        )
 
         feature_name = self.feature_names[feature_idx]
         target_name = (
@@ -286,7 +311,7 @@ class ALEExplainer(BaseExplainer):
                 "local_effects": local_effects.tolist(),
                 "bin_counts": bin_counts.tolist(),
                 "feature": feature_name,
-                "curve_range": float(np.ptp(ale_values)),
+                "curve_range": curve_range,
                 "curve_range_semantics": "max_minus_min_of_centered_ale_curve",
                 "task": self.task,
                 "output_index": output_index,
