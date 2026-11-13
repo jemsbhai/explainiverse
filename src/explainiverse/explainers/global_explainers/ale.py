@@ -23,6 +23,7 @@ from explainiverse.core.explanation import Explanation
 from explainiverse.explainers._validation import as_real_array, validate_name_sequence
 from explainiverse.explainers.global_explainers.partial_dependence import (
     _normalize_predictions,
+    _preserve_integer_levels,
     _resolve_output_index,
     _resolve_task,
     _select_prediction_output,
@@ -88,9 +89,10 @@ class ALEExplainer(BaseExplainer):
         return feature_idx
 
     def _numeric_feature_values(self, feature_idx: int) -> np.ndarray:
+        column = self.X[:, feature_idx]
         try:
             values = as_real_array(
-                self.X[:, feature_idx],
+                column,
                 name=f"Feature {self.feature_names[feature_idx]!r}",
                 dtype=float,
             )
@@ -105,7 +107,7 @@ class ALEExplainer(BaseExplainer):
             raise ValueError(
                 f"Feature {self.feature_names[feature_idx]!r} contains non-finite values"
             )
-        return values
+        return _preserve_integer_levels(column, values)
 
     def _compute_quantile_bins(self, values: np.ndarray) -> np.ndarray:
         """Return ALEPlot-compatible inverse-ECDF quantile edges."""
@@ -166,14 +168,10 @@ class ALEExplainer(BaseExplainer):
             # into the following occupied interval.
             bin_edges = np.delete(bin_edges, int(empty_bins[0]) + 1)
 
-        # Use floating copies for numerical model evaluation so assigning a
-        # floating boundary never truncates through the reference array dtype.
-        if np.issubdtype(self.X.dtype, np.integer):
-            X_lower: np.ndarray = self.X.astype(float, copy=True)
-            X_upper: np.ndarray = self.X.astype(float, copy=True)
-        else:
-            X_lower = self.X.copy()
-            X_upper = self.X.copy()
+        # Inverse-ECDF edges are observed levels, so integer reference rows
+        # can be perturbed in their original dtype without rounding any column.
+        X_lower = self.X.copy()
+        X_upper = self.X.copy()
         X_lower[:, feature_idx] = bin_edges[bin_indices]
         X_upper[:, feature_idx] = bin_edges[bin_indices + 1]
 
@@ -202,11 +200,9 @@ class ALEExplainer(BaseExplainer):
         centered_at_edges = accumulated_at_edges - centering_constant
         # Round the exact midpoint once: adding large endpoints can overflow,
         # while halving each endpoint first can erase subnormal coordinates.
+        edges = bin_edges.tolist()
         bin_centers = np.asarray(
-            [
-                float((Fraction.from_float(float(left)) + Fraction.from_float(float(right))) / 2)
-                for left, right in zip(bin_edges[:-1], bin_edges[1:])
-            ]
+            [float((Fraction(left) + Fraction(right)) / 2) for left, right in zip(edges, edges[1:])]
         )
 
         return (

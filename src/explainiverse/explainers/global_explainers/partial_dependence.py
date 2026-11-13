@@ -25,6 +25,23 @@ FeatureSpec = Union[Feature, Tuple[Feature, Feature]]
 _VALID_TASKS = {"classification", "regression"}
 
 
+def _preserve_integer_levels(values: np.ndarray, numeric_values: np.ndarray) -> np.ndarray:
+    """Keep observed integers exact when ordering validated numeric feature values."""
+    if values.dtype.kind in "iu":
+        return values
+    if values.dtype == object and any(isinstance(value, Integral) for value in values):
+        # NumPy scalar comparisons can round an integer to the neighboring
+        # float. Mixed Python integers and floats compare at their true values.
+        return np.array(
+            [
+                int(value) if isinstance(value, Integral) else float(number)
+                for value, number in zip(values, numeric_values)
+            ],
+            dtype=object,
+        )
+    return numeric_values
+
+
 def _resolve_task(model, task: Optional[str]) -> str:
     """Resolve a declared task without guessing from prediction shape."""
     if task is not None and task not in _VALID_TASKS:
@@ -248,20 +265,10 @@ class PartialDependenceExplainer(BaseExplainer):
             )
 
         # Count observed levels before a float conversion can merge distinct integers.
-        if values.dtype.kind in "biu" or values.dtype.type in (np.float16, np.float32):
+        if values.dtype.kind == "b" or values.dtype.type in (np.float16, np.float32):
             observed = values
-        elif values.dtype == object and any(isinstance(value, Integral) for value in values):
-            # Compare mixed integers and floats as Python numbers. NumPy scalar
-            # comparisons can round an integer to the neighboring float.
-            observed = np.array(
-                [
-                    int(value) if isinstance(value, Integral) else float(number)
-                    for value, number in zip(values, numeric_values)
-                ],
-                dtype=object,
-            )
         else:
-            observed = numeric_values
+            observed = _preserve_integer_levels(values, numeric_values)
         unique_values = np.unique(observed)
         if len(unique_values) <= self.grid_resolution:
             return unique_values
