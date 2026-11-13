@@ -13,6 +13,7 @@ Reference:
     Contributions with Additive Importance Measures. NeurIPS 2020.
 """
 
+from fractions import Fraction
 from numbers import Integral
 from typing import Callable, List, Literal, Optional, TypeAlias
 
@@ -31,6 +32,17 @@ from explainiverse.explainers._validation import (
 SAGETask: TypeAlias = Literal["classification", "regression"]
 LossValue: TypeAlias = float | np.ndarray
 LossFunction: TypeAlias = Callable[[np.ndarray, np.ndarray], LossValue]
+
+
+def _result_float(value: Fraction, field: str) -> float:
+    """Round a published SAGE result once, detecting overflow and underflow."""
+    try:
+        rounded = float(value)
+    except OverflowError as exc:
+        raise FloatingPointError(f"SAGE {field} is not representable") from exc
+    if rounded == 0.0 and value:
+        raise FloatingPointError(f"SAGE {field} is not representable")
+    return rounded
 
 
 class SAGEExplainer(BaseExplainer):
@@ -353,12 +365,13 @@ class SAGEExplainer(BaseExplainer):
             raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
 
         n_features = self.X.shape[1]
-        sage_values = np.zeros(n_features)
+        marginal_sums = [Fraction(0)] * n_features
 
         baseline_mask = np.zeros(n_features, dtype=bool)
         full_mask = np.ones(n_features, dtype=bool)
         baseline_loss = self._compute_coalition_loss(baseline_mask)
         full_loss = self._compute_coalition_loss(full_mask)
+        exact_baseline = Fraction.from_float(baseline_loss)
 
         # Reset for reproducible repeated calls.
         rng = np.random.RandomState(self.random_state)
@@ -366,20 +379,26 @@ class SAGEExplainer(BaseExplainer):
         for _ in range(self.n_permutations):
             order = rng.permutation(n_features)
             mask = np.zeros(n_features, dtype=bool)
-            previous_loss = baseline_loss
+            previous_loss = exact_baseline
 
             for feature_idx in order:
                 mask[feature_idx] = True
-                current_loss = self._compute_coalition_loss(mask)
-                sage_values[feature_idx] += previous_loss - current_loss
+                current_loss = Fraction.from_float(self._compute_coalition_loss(mask))
+                # An individual difference or its running sum can exceed
+                # binary64 even when the mean over permutations fits.
+                marginal_sums[feature_idx] += previous_loss - current_loss
                 previous_loss = current_loss
 
-        sage_values /= self.n_permutations
-
-        attributions = {fname: float(sage_values[i]) for i, fname in enumerate(self.feature_names)}
-
-        total_value = baseline_loss - full_loss
-        efficiency_error = float(np.sum(sage_values) - total_value)
+        attributions = {
+            name: _result_float(total / self.n_permutations, f"attribution for {name!r}")
+            for name, total in zip(self.feature_names, marginal_sums)
+        }
+        total_value = _result_float(exact_baseline - Fraction.from_float(full_loss), "total value")
+        # Measure efficiency using the actual values returned to the caller.
+        published_sum = sum(map(Fraction.from_float, attributions.values()), Fraction(0))
+        efficiency_error = _result_float(
+            published_sum - Fraction.from_float(total_value), "efficiency error"
+        )
 
         return Explanation(
             explainer_name="SAGE",
