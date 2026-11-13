@@ -21,6 +21,7 @@ from sklearn.metrics import accuracy_score, mean_squared_error
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
+from explainiverse.evaluation._utils import _stable_mean
 from explainiverse.explainers._validation import (
     as_real_array,
     get_prediction_output_kind,
@@ -267,7 +268,7 @@ class SAGEExplainer(BaseExplainer):
         )
         if loss_array.size == 0 or not np.all(np.isfinite(loss_array)):
             raise ValueError("loss_fn must return finite values")
-        return float(np.mean(loss_array))
+        return float(_stable_mean(loss_array.reshape(-1)))
 
     def _predict_restricted(self, feature_mask: np.ndarray) -> np.ndarray:
         """Evaluate ``E[f(X) | X_S]`` using the empirical marginal imputer.
