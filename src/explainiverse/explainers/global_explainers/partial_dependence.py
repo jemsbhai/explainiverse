@@ -149,6 +149,9 @@ def _select_prediction_output(
 
     if output_index >= predictions.shape[1]:
         raise ValueError("model.predict changed its number of output columns during explanation")
+    if predictions.dtype.kind in "iu":
+        # The empirical mean needs every bit of the selected model responses.
+        return predictions[:, output_index]
     selected = as_real_array(
         predictions[:, output_index],
         name="selected model output",

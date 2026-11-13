@@ -62,9 +62,7 @@ def _donor_mean(predictions: np.ndarray, axis: int) -> np.ndarray:
     if predictions.size == 0:
         return np.mean(predictions, axis=axis)
     if predictions.dtype.kind in "biu":
-        # Python integers retain all input bits, including those beyond 2**53.
-        totals = predictions.astype(object).sum(axis=axis)
-        return np.asarray(totals / predictions.shape[axis], dtype=float)
+        return _stable_mean(predictions, axis=axis)
     if predictions.dtype.kind == "c" and predictions.dtype.itemsize <= 16:
         if not np.isfinite(predictions).all():
             return np.mean(predictions, axis=axis)

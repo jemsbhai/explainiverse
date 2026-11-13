@@ -203,6 +203,9 @@ def _stable_sum(values: np.ndarray, axis: int = 0) -> np.ndarray:
 def _stable_mean(values: np.ndarray, axis: int = 0) -> np.ndarray:
     """Compute an order-independent mean without erasing finite residuals.
 
+    Integer totals use Python integers so wide responses round only after
+    division by the count.
+
     ``math.fsum`` preserves compensated cancellation such as
     ``[1e308, 1, -1e308]``. If its internal finite accumulator overflows before
     later cancellation, an exact float-to-Decimal fallback evaluates that rare
@@ -210,7 +213,10 @@ def _stable_mean(values: np.ndarray, axis: int = 0) -> np.ndarray:
     happens before conversion back to float, so a representable mean of an
     otherwise unrepresentable sum remains available.
     """
-    array = np.asarray(values, dtype=np.float64)
+    array = np.asarray(values)
+    if array.dtype.kind in "biu" and array.shape[axis]:
+        totals = array.astype(object).sum(axis=axis)
+        return np.asarray(totals / array.shape[axis], dtype=np.float64)
     return _stable_reduction(array, axis=axis, divisor=array.shape[axis])
 
 
