@@ -247,7 +247,22 @@ class PartialDependenceExplainer(BaseExplainer):
                 f"Feature {self.feature_names[feature_idx]!r} contains non-finite values"
             )
 
-        unique_values = np.unique(numeric_values)
+        # Count observed levels before a float conversion can merge distinct integers.
+        if values.dtype.kind in "biu" or values.dtype.type in (np.float16, np.float32):
+            observed = values
+        elif values.dtype == object and any(isinstance(value, Integral) for value in values):
+            # Compare mixed integers and floats as Python numbers. NumPy scalar
+            # comparisons can round an integer to the neighboring float.
+            observed = np.array(
+                [
+                    int(value) if isinstance(value, Integral) else float(number)
+                    for value, number in zip(values, numeric_values)
+                ],
+                dtype=object,
+            )
+        else:
+            observed = numeric_values
+        unique_values = np.unique(observed)
         if len(unique_values) <= self.grid_resolution:
             return unique_values
 
@@ -272,14 +287,23 @@ class PartialDependenceExplainer(BaseExplainer):
             expected_n_outputs=expected_n_outputs,
         )
 
-    def _grid_copy(self, feature_indices: Tuple[int, ...]) -> np.ndarray:
-        """Copy X without truncating continuous grid values into integer columns."""
-        has_continuous_feature = any(
-            feature_idx not in self.categorical_features for feature_idx in feature_indices
-        )
-        if has_continuous_feature and np.issubdtype(self.X.dtype, np.integer):
-            return self.X.astype(float, copy=True)
-        return self.X.copy()
+    def _grid_dtype(self, axes: Tuple[Tuple[int, np.ndarray], ...]) -> np.dtype:
+        """Choose storage that preserves both reference rows and grid coordinates."""
+        if self.X.dtype.kind not in "biuf":
+            return self.X.dtype
+        dtype = np.result_type(self.X.dtype, *(grid.dtype for _, grid in axes))
+        if self.X.dtype.kind in "iu" and dtype.kind == "f" and self.X.dtype.itemsize >= 8:
+            # Interpolated columns are overwritten. Every other integer column
+            # keeps its original values or a grid sampled from those values.
+            interpolated = {index for index, grid in axes if grid.dtype.kind == "f"}
+            for index, values in enumerate(self.X.T):
+                if index in interpolated or (
+                    int(values.min()) >= -(2**53) and int(values.max()) <= 2**53
+                ):
+                    continue
+                if any(int(float(v)) != int(v) for v in values):
+                    return np.dtype(object)
+        return dtype
 
     def _compute_pdp_1d(
         self,
@@ -289,10 +313,11 @@ class PartialDependenceExplainer(BaseExplainer):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute one-dimensional partial dependence."""
         grid = self._create_grid(feature_idx)
+        dtype = self._grid_dtype(((feature_idx, grid),))
         pdp_values: np.ndarray = np.empty(len(grid), dtype=float)
 
         for grid_idx, value in enumerate(grid):
-            X_temp = self._grid_copy((feature_idx,))
+            X_temp = self.X.astype(dtype, copy=True)
             X_temp[:, feature_idx] = value
             pdp_values[grid_idx] = _stable_mean(
                 self._selected_predictions(X_temp, output_index, expected_n_outputs)
@@ -311,11 +336,12 @@ class PartialDependenceExplainer(BaseExplainer):
             raise ValueError("A PDP interaction requires two distinct features")
         grid1 = self._create_grid(feature_idx1)
         grid2 = self._create_grid(feature_idx2)
+        dtype = self._grid_dtype(((feature_idx1, grid1), (feature_idx2, grid2)))
         pdp_values: np.ndarray = np.empty((len(grid1), len(grid2)), dtype=float)
 
         for i, value1 in enumerate(grid1):
             for j, value2 in enumerate(grid2):
-                X_temp = self._grid_copy((feature_idx1, feature_idx2))
+                X_temp = self.X.astype(dtype, copy=True)
                 X_temp[:, feature_idx1] = value1
                 X_temp[:, feature_idx2] = value2
                 pdp_values[i, j] = _stable_mean(
