@@ -103,7 +103,7 @@ class ProtoDashExplainer(BaseExplainer):
             kernel: Kernel function type:
                 - "rbf": Radial Basis Function (Gaussian) kernel
                 - "linear": Linear kernel (dot product)
-                - "cosine": Cosine similarity kernel
+                - "cosine": Cosine similarity kernel (zero rows have zero similarity)
             kernel_width: Width (sigma) for RBF kernel. If None, uses
                          median heuristic based on pairwise distances.
             epsilon: Small constant for numerical stability (default: 1e-10).
@@ -222,10 +222,18 @@ class ProtoDashExplainer(BaseExplainer):
             K = X @ Y.T
 
         elif self.kernel == "cosine":
-            # K(x, y) = (x · y) / (||x|| * ||y||)
-            X_norm = X / (np.linalg.norm(X, axis=1, keepdims=True) + self.epsilon)
-            Y_norm = Y / (np.linalg.norm(Y, axis=1, keepdims=True) + self.epsilon)
-            K = X_norm @ Y_norm.T
+
+            def unit_rows(rows: np.ndarray) -> np.ndarray:
+                # Scale before squaring so even subnormal or near-maximum rows
+                # retain their direction. A zero row stays zero in both divisions.
+                scale = np.max(np.abs(rows), axis=1, keepdims=True, initial=0.0)
+                scaled = rows / np.where(scale == 0, 1.0, scale)
+                norm = np.linalg.norm(scaled, axis=1, keepdims=True)
+                return scaled / np.where(norm == 0, 1.0, norm)
+
+            X_norm = unit_rows(X)
+            Y_norm = X_norm if Y is X else unit_rows(Y)
+            K = np.clip(X_norm @ Y_norm.T, -1.0, 1.0)
 
         else:
             raise ValueError(f"Unknown kernel: {self.kernel}")
