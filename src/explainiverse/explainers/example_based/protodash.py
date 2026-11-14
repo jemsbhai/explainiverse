@@ -34,6 +34,7 @@ Example:
 """
 
 from fractions import Fraction
+from math import frexp
 from numbers import Integral, Real
 from typing import Dict, List, Optional, Tuple
 
@@ -48,6 +49,25 @@ from explainiverse.explainers._validation import (
     validate_name_sequence,
     validate_single_tabular_instance,
 )
+
+
+def _scaled_squared_distances(X: np.ndarray, Y: np.ndarray, shift: int) -> np.ndarray:
+    """Squared Euclidean distances in coordinates multiplied by 2**shift."""
+    if shift == 0:
+        return cdist(X, Y, metric="sqeuclidean")
+    with np.errstate(over="ignore", under="ignore"):
+        scaled_x = np.ldexp(X, shift)
+        scaled_y = scaled_x if X is Y else np.ldexp(Y, shift)
+        if np.isfinite(scaled_x).all() and np.isfinite(scaled_y).all():
+            return cdist(scaled_x, scaled_y, metric="sqeuclidean")
+
+        # Scaling up can overflow a shared coordinate even when its difference
+        # is zero. Subtract first, keeping the temporary to one row of pairs.
+        distances = np.empty((len(X), len(Y)))
+        for i, row in enumerate(X):
+            delta = np.ldexp(row - Y, shift)
+            distances[i] = np.einsum("ij,ij->i", delta, delta)
+        return distances
 
 
 class ProtoDashExplainer(BaseExplainer):
@@ -178,17 +198,43 @@ class ProtoDashExplainer(BaseExplainer):
         else:
             X_sample = X
 
-        # Compute pairwise distances
-        distances = cdist(X_sample, X_sample, metric="euclidean")
+        # Count actual duplicate pairs before squaring can erase a distance.
+        _, counts = np.unique(X_sample, axis=0, return_counts=True)
+        zero_pairs = int(counts @ counts)
+        total_pairs = len(X_sample) ** 2
+        if zero_pairs == total_pairs:
+            return max(1.0, self.epsilon)
 
-        # Get median of non-zero distances
-        mask = distances > 0
-        if np.any(mask):
-            median_dist = float(np.median(distances[mask]))
-        else:
-            median_dist = 1.0
+        # Each nonzero unordered pair occurs twice. Select the two central
+        # entries among those ordered pairs, skipping the true zero prefix.
+        middle = (total_pairs + zero_pairs) // 2
 
-        return float(max(median_dist, self.epsilon))
+        def central_squares(shift: int) -> np.ndarray:
+            squares = _scaled_squared_distances(X_sample, X_sample, shift).ravel()
+            squares.partition((middle - 1, middle))
+            return squares[middle - 1 : middle + 1].copy()
+
+        central = central_squares(0)
+        shift = 0
+        if np.isinf(central[1]):
+            shift = -600
+        elif central[0] < np.finfo(float).tiny * X_sample.shape[1]:
+            shift = 600
+        if shift:
+            # A 600-bit shift brings even the smallest binary64 displacement
+            # or the largest finite-coordinate norm into safe squaring range.
+            scaled = central_squares(shift)
+            if shift > 0 and np.isinf(scaled[1]):
+                # The upper middle distance dwarfs the lower one. Its
+                # unscaled square already has full relative precision.
+                shift = 0
+            else:
+                central = scaled
+        with np.errstate(over="ignore", under="ignore"):
+            width = float(np.ldexp(np.sqrt(central).mean(), -shift))
+        if not np.isfinite(width):
+            raise FloatingPointError("Automatic RBF kernel width exceeds the finite float range")
+        return max(width, self.epsilon)
 
     def _compute_kernel(
         self, X: np.ndarray, Y: Optional[np.ndarray] = None, kernel_width: Optional[float] = None
@@ -213,9 +259,12 @@ class ProtoDashExplainer(BaseExplainer):
             if sigma is None:
                 sigma = self._compute_kernel_width(X)
 
-            # K(x, y) = exp(-||x - y||^2 / (2 * sigma^2))
-            sq_dists = cdist(X, Y, metric="sqeuclidean")
-            K = np.exp(-sq_dists / (2 * sigma**2))
+            # Express coordinates and sigma in the same power-of-two units
+            # before squaring. The normalized bandwidth is always in [0.5, 1).
+            mantissa, exponent = frexp(sigma)
+            sq_dists = _scaled_squared_distances(X, Y, -exponent)
+            with np.errstate(over="ignore", under="ignore"):
+                K = np.exp(-sq_dists / (2 * mantissa**2))
 
         elif self.kernel == "linear":
             # K(x, y) = x · y
