@@ -927,11 +927,14 @@ class ProtoDashExplainer(BaseExplainer):
                 name="model predictions",
                 require_finite=True,
             ).tolist()
-            explanation_data["prototype_predictions"] = as_real_array(
-                self.model.predict(X_reference[prototype_indices]),
-                name="model predictions",
-                require_finite=True,
-            ).tolist()
+            if prototype_indices:
+                explanation_data["prototype_predictions"] = as_real_array(
+                    self.model.predict(X_reference[prototype_indices]),
+                    name="model predictions",
+                    require_finite=True,
+                ).tolist()
+            else:
+                explanation_data["prototype_predictions"] = []
 
         return Explanation(
             explainer_name="ProtoDash",
