@@ -173,6 +173,7 @@ class ALEExplainer(BaseExplainer):
             predictions,
             self.task,
             output_index,
+            model=self.model,
             expected_n_outputs=expected_n_outputs,
         )
 
@@ -253,7 +254,7 @@ class ALEExplainer(BaseExplainer):
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Backward-compatible private wrapper returning aligned edge values."""
         reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
-        output_index = _resolve_output_index(reference, self.task, target_class)
+        output_index = _resolve_output_index(reference, self.task, target_class, self.model)
         grid_values, ale_values, _, _, _, _ = self._compute_ale_details(
             feature_idx,
             output_index,
@@ -273,7 +274,7 @@ class ALEExplainer(BaseExplainer):
             raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
         feature_idx = self._get_feature_idx(feature)
         reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
-        output_index = _resolve_output_index(reference, self.task, target_class)
+        output_index = _resolve_output_index(reference, self.task, target_class, self.model)
         expected_n_outputs = int(reference.shape[1])
         (
             grid_values,

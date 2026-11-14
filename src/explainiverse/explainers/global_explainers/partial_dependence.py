@@ -20,7 +20,11 @@ import numpy as np
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
 from explainiverse.evaluation._utils import _exact_percentile, _stable_mean
-from explainiverse.explainers._validation import as_real_array, validate_name_sequence
+from explainiverse.explainers._validation import (
+    _model_class_labels,
+    as_real_array,
+    validate_name_sequence,
+)
 
 Feature = Union[int, str]
 FeatureSpec = Union[Feature, Tuple[Feature, Feature]]
@@ -93,12 +97,22 @@ def _validate_output_index(output_index: Optional[int], n_outputs: int) -> int:
     return output_index
 
 
-def _resolve_output_index(predictions: np.ndarray, task: str, target_class: Optional[int]) -> int:
+def _is_compact_binary(model, task: str, n_outputs: int) -> bool:
+    """A single column denotes P(class 1) unless it covers the sole fitted class."""
+    if task != "classification" or n_outputs != 1:
+        return False
+    labels = _model_class_labels(model)
+    return labels is None or labels.size != 1
+
+
+def _resolve_output_index(
+    predictions: np.ndarray, task: str, target_class: Optional[int], model
+) -> int:
     """Resolve the class/output column under the declared task."""
     n_outputs = predictions.shape[1]
     if task == "classification":
-        # A one-column classifier is the documented P(class 1) convention.
-        if n_outputs == 1:
+        # A compact binary classifier supplies P(class 1).
+        if _is_compact_binary(model, task, n_outputs):
             target = 1 if target_class is None else target_class
             if not isinstance(target, Integral) or isinstance(target, bool):
                 raise TypeError("target_class must be an integer or None")
@@ -109,7 +123,7 @@ def _resolve_output_index(predictions: np.ndarray, task: str, target_class: Opti
 
         # Preserve the documented positive/second-class default while making
         # the selected output explicit in the returned metadata.
-        target = 1 if target_class is None else target_class
+        target = min(1, n_outputs - 1) if target_class is None else target_class
         return _validate_output_index(target, n_outputs)
 
     # Regression: a single response needs no explicit index; a multi-output
@@ -126,6 +140,7 @@ def _select_prediction_output(
     task: str,
     output_index: int,
     *,
+    model,
     expected_n_outputs: Optional[int] = None,
 ) -> np.ndarray:
     """Select a response/class score with one-column binary semantics."""
@@ -134,7 +149,7 @@ def _select_prediction_output(
             "model.predict changed its number of output columns during explanation: "
             f"expected {expected_n_outputs}, got {predictions.shape[1]}"
         )
-    if task == "classification" and predictions.shape[1] == 1:
+    if _is_compact_binary(model, task, predictions.shape[1]):
         positive_probability = as_real_array(
             predictions[:, 0],
             name="one-column classification output",
@@ -310,6 +325,7 @@ class PartialDependenceExplainer(BaseExplainer):
             predictions,
             self.task,
             output_index,
+            model=self.model,
             expected_n_outputs=expected_n_outputs,
         )
 
@@ -415,7 +431,7 @@ class PartialDependenceExplainer(BaseExplainer):
             resolved_features.append((key, indices))
 
         reference = _normalize_predictions(self.model.predict(self.X[:1]), 1)
-        output_index = _resolve_output_index(reference, self.task, target_class)
+        output_index = _resolve_output_index(reference, self.task, target_class, self.model)
         expected_n_outputs = int(reference.shape[1])
         pdp_results: dict[str, object] = {}
         grid_results: dict[str, object] = {}
