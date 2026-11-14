@@ -19,7 +19,7 @@ from numbers import Integral
 from typing import Callable, List, Literal, Optional, TypeAlias
 
 import numpy as np
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import zero_one_loss
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
@@ -299,7 +299,9 @@ class SAGEExplainer(BaseExplainer):
                 if not np.allclose(predictions.sum(axis=1), 1.0, atol=1e-6, rtol=1e-6):
                     raise ValueError("declared classification probability rows must sum to 1")
             labels = class_labels[np.argmax(predictions, axis=1)]
-        return float(1.0 - accuracy_score(targets, labels))
+        # Normalize the error count directly so the loss is rounded only once.
+        errors = int(zero_one_loss(targets, labels, normalize=False))
+        return errors / len(targets)
 
     @staticmethod
     def _mean_squared_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
