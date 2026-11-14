@@ -36,6 +36,14 @@ LossValue: TypeAlias = float | np.ndarray
 LossFunction: TypeAlias = Callable[[np.ndarray, np.ndarray], LossValue]
 
 
+def _loss_values(values, name: str) -> np.ndarray:
+    """Keep native integers exact and convert other loss operands to finite floats."""
+    array = as_real_array(values, name=name)
+    if array.dtype.kind in "biu":
+        return array
+    return as_real_array(array, name=name, dtype=float, require_finite=True)
+
+
 def _floating_donor_mean(column: np.ndarray) -> float:
     """Round the empirical expectation directly to the model's floating dtype."""
     if not np.isfinite(column).all():
@@ -296,18 +304,8 @@ class SAGEExplainer(BaseExplainer):
     @staticmethod
     def _mean_squared_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
         """Return MSE while accepting the standard ``(n, 1)`` adapter shape."""
-        targets = as_real_array(
-            y_true,
-            name="regression targets",
-            dtype=float,
-            require_finite=True,
-        )
-        predictions = as_real_array(
-            y_pred,
-            name="regression predictions",
-            dtype=float,
-            require_finite=True,
-        )
+        targets = _loss_values(y_true, "regression targets")
+        predictions = _loss_values(y_pred, "regression predictions")
         if targets.ndim == 1:
             targets = targets[:, None]
         if predictions.ndim == 1:
@@ -320,12 +318,7 @@ class SAGEExplainer(BaseExplainer):
     def _loss_from_predictions(self, predictions: np.ndarray) -> float:
         """Evaluate and scalarize the configured loss."""
         loss = self.loss_fn(self.y, predictions)
-        loss_array = as_real_array(loss, name="loss_fn result")
-        # Keep integer losses exact until the empirical mean is rounded.
-        if loss_array.dtype.kind not in "biu":
-            loss_array = as_real_array(
-                loss_array, name="loss_fn result", dtype=float, require_finite=True
-            )
+        loss_array = _loss_values(loss, "loss_fn result")
         if loss_array.size == 0:
             raise ValueError("loss_fn must return finite values")
         return float(_stable_mean(loss_array.reshape(-1)))

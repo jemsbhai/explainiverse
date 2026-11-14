@@ -360,20 +360,22 @@ def _stable_dot(left: np.ndarray, right: np.ndarray) -> float:
 
 def _stable_mean_square(values: np.ndarray, reference: Optional[np.ndarray] = None) -> float:
     """Compute a mean square, optionally subtracting paired reference values exactly."""
-    array = np.asarray(values, dtype=np.float64)
+    array = np.asarray(values)
     if array.size == 0 or not np.all(np.isfinite(array)):
         raise ValueError("mean-square inputs must be non-empty and finite")
     with localcontext() as context:
         context.prec = 3000 + len(str(array.size))
-        operands = (Decimal.from_float(float(value)) for value in array.flat)
+        # The operands can have different dtypes. item() supplies the exact
+        # Python integer or binary float to Decimal before subtraction.
+        operands = (Decimal.from_float(value.item()) for value in array.flat)
         if reference is None:
             residuals = operands
         else:
-            paired = np.asarray(reference, dtype=np.float64)
+            paired = np.asarray(reference)
             if paired.shape != array.shape or not np.all(np.isfinite(paired)):
                 raise ValueError("mean-square reference must be finite and match the input shape")
             residuals = (
-                value - Decimal.from_float(float(other))
+                value - Decimal.from_float(other.item())
                 for value, other in zip(operands, paired.flat)
             )
         exact = sum((value * value for value in residuals), start=Decimal(0)) / Decimal(array.size)
