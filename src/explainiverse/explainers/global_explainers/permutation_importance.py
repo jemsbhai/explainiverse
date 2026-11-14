@@ -122,13 +122,17 @@ class PermutationImportanceExplainer(BaseExplainer):
             else ("class_labels" if self.task == "classification" else "regression_response")
         )
 
-    def _class_values(self, n_classes: int) -> np.ndarray:
-        """Return the labels corresponding to prediction columns."""
+    def _class_values(self, n_columns: int) -> np.ndarray:
+        """Map a full class matrix or compact binary column to class labels."""
         candidates = (
             getattr(self.model, "classes_", None),
             getattr(getattr(self.model, "model", None), "classes_", None),
         )
         classes = next((value for value in candidates if value is not None), None)
+        # A single observed evaluation label cannot establish that the fitted
+        # model has one class. Only explicit class metadata resolves this case.
+        single_class = classes is not None and np.shape(classes) == (1,)
+        n_classes = 2 if n_columns == 1 and not single_class else n_columns
         if classes is None:
             classes = np.unique(self.y)
         classes = np.asarray(classes)
@@ -175,7 +179,8 @@ class PermutationImportanceExplainer(BaseExplainer):
                 "(n_samples,), (n_samples, 1), or (n_samples, n_classes)"
             )
 
-        if predictions.shape[1] == 1:
+        classes = self._class_values(predictions.shape[1])
+        if predictions.shape[1] == 1 and len(classes) == 2:
             probabilities = as_real_array(
                 predictions[:, 0],
                 name="one-column classification output",
@@ -186,12 +191,10 @@ class PermutationImportanceExplainer(BaseExplainer):
                 raise ValueError(
                     "A one-column classification output must contain P(class 1) " "values in [0, 1]"
                 )
-            classes = self._class_values(2)
             # Match argmax([1 - p, p]): an exact tie selects the first class.
             return classes[(probabilities > 0.5).astype(int)]
 
-        classes = self._class_values(predictions.shape[1])
-        if output_kind == "probabilities":
+        if output_kind == "probabilities" or (len(classes) == 1 and output_kind is None):
             if np.any((predictions < 0.0) | (predictions > 1.0)):
                 raise ValueError("Declared classification probabilities must lie in [0, 1]")
             if not np.allclose(predictions.sum(axis=1), 1.0, atol=1e-6, rtol=1e-6):
