@@ -811,13 +811,14 @@ class ProtoDashExplainer(BaseExplainer):
 
         # If using predictions and model is available, augment features
         if use_predictions and self.model is not None:
-            # Get predictions for instance and reference
             instance_pred = as_real_array(
                 self.model.predict(instance.reshape(1, -1)),
                 name="model predictions",
                 dtype=float,
                 require_finite=True,
-            ).reshape(1, -1)
+            )
+            # Capture the target before the reference prediction can reuse its buffer.
+            instance_aug = np.concatenate([instance, instance_pred.reshape(-1)])
             ref_preds = as_real_array(
                 self.model.predict(X_reference),
                 name="model predictions",
@@ -828,8 +829,6 @@ class ProtoDashExplainer(BaseExplainer):
                 ref_preds = ref_preds.reshape(-1, 1)
             if ref_preds.ndim != 2 or ref_preds.shape[0] != n_ref:
                 raise ValueError("model.predict returned predictions with invalid shape")
-            # Augment features with predictions
-            instance_aug = np.concatenate([instance, instance_pred.reshape(-1)])
             X_ref_aug = np.hstack([X_reference, ref_preds])
             similarity_space = "input_plus_model_prediction"
         else:
@@ -915,19 +914,16 @@ class ProtoDashExplainer(BaseExplainer):
 
         # Add model predictions if available
         if self.model is not None:
-            instance_pred = as_real_array(
+            explanation_data["instance_prediction"] = as_real_array(
                 self.model.predict(instance.reshape(1, -1)),
                 name="model predictions",
                 require_finite=True,
-            )
-            proto_preds = as_real_array(
+            ).tolist()
+            explanation_data["prototype_predictions"] = as_real_array(
                 self.model.predict(X_reference[prototype_indices]),
                 name="model predictions",
                 require_finite=True,
-            )
-
-            explanation_data["instance_prediction"] = instance_pred.tolist()
-            explanation_data["prototype_predictions"] = proto_preds.tolist()
+            ).tolist()
 
         return Explanation(
             explainer_name="ProtoDash",
