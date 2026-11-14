@@ -284,7 +284,10 @@ class SAGEExplainer(BaseExplainer):
         except ValueError as exc:
             raise ValueError("classification predictions must be finite real numbers") from exc
 
-        if predictions.shape[1] == 1:
+        # A fitted one-class model has a full class matrix of width one.
+        # Only use the compact binary convention when metadata permits it.
+        one_class = self.class_labels is not None and self.class_labels.size == 1
+        if predictions.shape[1] == 1 and not one_class:
             class_labels = self._labels_for_probability_width(2)
             positive = predictions[:, 0]
             if np.any((positive < 0.0) | (positive > 1.0)):
@@ -293,7 +296,7 @@ class SAGEExplainer(BaseExplainer):
             labels = class_labels[(positive > 0.5).astype(int)]
         else:
             class_labels = self._labels_for_probability_width(predictions.shape[1])
-            if output_kind == "probabilities":
+            if output_kind == "probabilities" or (one_class and output_kind is None):
                 if np.any((predictions < 0.0) | (predictions > 1.0)):
                     raise ValueError("declared classification probabilities must lie in [0, 1]")
                 if not np.allclose(predictions.sum(axis=1), 1.0, atol=1e-6, rtol=1e-6):
