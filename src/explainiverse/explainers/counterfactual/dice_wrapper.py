@@ -381,16 +381,16 @@ class CounterfactualExplainer(BaseExplainer):
     def _perturb_exemplar(self, seed: np.ndarray, rng: np.random.Generator) -> None:
         """Perturb continuous coordinates by 15% of their range per standard deviation."""
         indices = self._continuous_indices
-        with np.errstate(under="ignore"):
+        draws = rng.standard_normal(len(indices))
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
             deviations = 0.15 * self.scales[indices]
-        needs_exact_span = np.isinf(deviations) | (deviations <= np.finfo(float).tiny)
-        deviations[needs_exact_span] = 1.0
-        draws = rng.normal(0.0, deviations)
-        seed[indices[~needs_exact_span]] += draws[~needs_exact_span]
+            proposed = seed[indices] + deviations * draws
+        needs_exact = ~np.isfinite(proposed) | (deviations <= np.finfo(float).tiny)
+        seed[indices[~needs_exact]] = proposed[~needs_exact]
 
-        # A subnormal deviation can lose the whole step, and a wide offset can
-        # overflow. Apply the unit-normal draw to the exact span before rounding.
-        for index, draw in zip(indices[needs_exact_span], draws[needs_exact_span]):
+        # A tiny deviation can lose the step. Large spans, offsets, or sums can
+        # overflow even when the projected coordinate is representable.
+        for index, draw in zip(indices[needs_exact], draws[needs_exact]):
             lower, upper = self.feature_ranges[self.feature_names[int(index)]]
             span = Fraction(upper) - Fraction(lower)
             value = Fraction(float(seed[index])) + Fraction(0.15) * span * Fraction(float(draw))
