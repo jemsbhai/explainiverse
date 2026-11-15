@@ -41,21 +41,45 @@ def _integer_units(column: np.ndarray) -> tuple[list[int], int]:
 
 
 def _regression_r2(targets: np.ndarray, predictions: np.ndarray) -> float:
-    """Preserve native integer differences in the default regression score."""
+    """Compute uniform-average R² while preserving each output's variation."""
     n = len(targets)
-    if (
-        n < 2
-        or predictions.dtype.kind not in "biuf"
-        or (targets.dtype.kind not in "biu" and predictions.dtype.kind not in "biu")
-    ):
+    if n < 2 or predictions.dtype.kind not in "biuf":
         return r2_score(targets, predictions)
 
     targets = check_array(
-        targets, dtype=None if targets.dtype.kind in "biuf" else np.float64, ensure_2d=False
+        targets,
+        dtype=None if targets.dtype.kind in "biuf" else np.float64,
+        ensure_2d=False,
+        ensure_all_finite=False,
     )
+    if not np.all(np.isfinite(targets)):
+        raise ValueError("Regression targets must contain only finite values")
+    targets = targets.reshape(n, -1)
+    predictions = predictions.reshape(n, -1)
+    if targets.dtype.kind == predictions.dtype.kind == "f":
+        dtype = np.result_type(targets, predictions, np.float64)
+        actual = targets.astype(dtype, copy=False)
+        predicted = predictions.astype(dtype, copy=False)
+        try:
+            with np.errstate(all="raise"):
+                # Center offsets so a large common origin cannot round away the mean.
+                offsets = actual - actual[0]
+                variation = np.sum((offsets - offsets.mean(axis=0)) ** 2, axis=0)
+                residual = np.sum((actual - predicted) ** 2, axis=0)
+                varying = variation != 0
+                scores = (residual == 0).astype(dtype)
+                scores[varying] = (variation[varying] - residual[varying]) / variation[varying]
+                score = float(np.mean(scores))
+                # Near zero, subtracting the squares or averaging signed scores
+                # can cancel more than half the working precision.
+                if abs(score) > np.sqrt(np.finfo(dtype).eps) or not np.any(varying):
+                    return score
+        except FloatingPointError:
+            # The final coefficient can be finite even when its squares overflow or underflow.
+            pass
+
     total = Fraction(0)
-    target_columns = targets.reshape(n, -1).T
-    for target, prediction in zip(target_columns, predictions.reshape(n, -1).T):
+    for target, prediction in zip(targets.T, predictions.T):
         ys, y_scale = _integer_units(target)
         ps, p_scale = _integer_units(prediction)
         # n*SST = n*sum(y²) - sum(y)². Express both sums of squares
@@ -67,7 +91,7 @@ def _regression_r2(targets: np.ndarray, predictions: np.ndarray) -> float:
         else:
             total += int(residual == 0)
     try:
-        return float(total / len(target_columns))
+        return float(total / targets.shape[1])
     except OverflowError as exc:
         raise ValueError("scoring function result must contain only finite values") from exc
 
