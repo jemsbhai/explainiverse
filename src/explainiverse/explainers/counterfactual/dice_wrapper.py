@@ -293,7 +293,17 @@ class CounterfactualExplainer(BaseExplainer):
             projected[index] = np.clip(projected[index], lower, upper)
         for index in self._categorical_indices:
             allowed = self._categorical_values[int(index)]
-            projected[index] = allowed[np.argmin(np.abs(allowed - projected[index]))]
+            value = float(projected[index])
+            position = int(allowed.searchsorted(value))
+            if position == len(allowed):
+                position -= 1
+            elif position > 0 and value != allowed[position]:
+                # Only the two bracketing codes can be nearest. Keep the lower one on ties.
+                lower_gap = value - float(allowed[position - 1])
+                upper_gap = float(allowed[position]) - value
+                if lower_gap <= upper_gap:
+                    position -= 1
+            projected[index] = allowed[position]
         if self._fixed_indices.size:
             projected[self._fixed_indices] = original[self._fixed_indices]
         return projected
