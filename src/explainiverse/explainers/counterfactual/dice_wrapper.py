@@ -465,12 +465,11 @@ class CounterfactualExplainer(BaseExplainer):
         for candidate in counterfactuals:
             changes = {}
             for index, name in enumerate(self.feature_names):
-                difference = candidate[index] - query[index]
-                if abs(difference) > 1e-7:
+                if candidate[index] != query[index]:
                     changes[name] = {
                         "original": float(query[index]),
                         "counterfactual": float(candidate[index]),
-                        "change": float(difference),
+                        "change": float(candidate[index] - query[index]),
                     }
             all_changes.append(changes)
             probabilities = self._predict_probabilities(candidate.reshape(1, -1))[0]
