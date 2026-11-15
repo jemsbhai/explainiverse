@@ -407,7 +407,16 @@ class CounterfactualExplainer(BaseExplainer):
             valid = self._refine_toward_original(valid, instance, target_class)
             if not self._is_target(valid, target_class):
                 continue
-            if any(np.allclose(valid, prior, atol=1e-7, rtol=0.0) for prior in counterfactuals):
+            if any(
+                np.array_equal(valid[self._categorical_indices], prior[self._categorical_indices])
+                and np.allclose(
+                    valid[self._continuous_indices],
+                    prior[self._continuous_indices],
+                    atol=1e-7,
+                    rtol=0.0,
+                )
+                for prior in counterfactuals
+            ):
                 continue
             counterfactuals.append(valid)
             if len(counterfactuals) == num_counterfactuals:
