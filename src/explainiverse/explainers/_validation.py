@@ -266,11 +266,11 @@ def normalize_classifier_outputs(
 ) -> np.ndarray:
     """Normalize supported classifier outputs to ``(samples, classes)``.
 
-    One-column and one-dimensional numerical outputs use the documented binary
-    positive-class probability convention.  One-dimensional hard labels are
-    mapped through ``model.classes_`` when allowed.  Multi-column outputs may be
-    arbitrary finite class scores for rule precision, while probability-based
-    algorithms can request bounds and row-sum validation.
+    A single numeric column is the full output when the fitted model declares
+    one class. Otherwise it follows the binary positive-class probability
+    convention. When allowed, one-dimensional hard labels are mapped through
+    ``model.classes_``. Rule precision also accepts finite class scores, while
+    probability-based algorithms can request bounds and row-sum validation.
     """
 
     ensure_classification_task(model, context=context)
@@ -297,6 +297,7 @@ def normalize_classifier_outputs(
         raise ValueError(f"{context} model.predict returned the wrong number of rows")
 
     model_labels = _model_class_labels(model)
+    single_class = model_labels is not None and len(model_labels) == 1
     display_names = validate_name_sequence(
         class_names,
         name="class_names",
@@ -311,7 +312,7 @@ def normalize_classifier_outputs(
 
     normalized = None
     if raw.ndim == 1:
-        if output_kind == "scores":
+        if output_kind == "scores" and not single_class:
             raise ValueError(f"{context} class-score outputs must contain one column per class")
         if output_kind == "class_labels":
             if not allow_label_predictions:
@@ -370,7 +371,9 @@ def normalize_classifier_outputs(
                     "output contains endpoint probabilities or hard class labels. Declare "
                     "prediction_output_kind='probabilities' or 'class_labels'."
                 )
-            normalized = np.column_stack((1.0 - positive, positive))
+            normalized = (
+                positive[:, None] if single_class else np.column_stack((1.0 - positive, positive))
+            )
     elif raw.ndim == 2:
         if raw.shape[1] == 0:
             raise ValueError(f"{context} model.predict returned no output columns")
@@ -387,7 +390,7 @@ def normalize_classifier_outputs(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{context} classifier outputs must be numerical") from exc
         if numerical.shape[1] == 1:
-            if output_kind == "scores":
+            if output_kind == "scores" and not single_class:
                 raise ValueError(f"{context} class-score outputs must contain one column per class")
             positive = numerical[:, 0]
             if (
@@ -403,7 +406,7 @@ def normalize_classifier_outputs(
                     "prediction_output_kind='probabilities' or return a one-dimensional "
                     "prediction_output_kind='class_labels' output."
                 )
-            normalized = np.column_stack((1.0 - positive, positive))
+            normalized = numerical if single_class else np.column_stack((1.0 - positive, positive))
         else:
             normalized = numerical
     else:
@@ -424,12 +427,13 @@ def normalize_classifier_outputs(
             f"class metadata describes {expected_width} classes"
         )
 
-    # Binary vectors are always interpreted as probabilities, even for an
-    # algorithm that otherwise permits arbitrary multi-class scores.
-    binary_probability_input = raw.ndim == 1 or (raw.ndim == 2 and raw.shape[1] == 1)
+    # Compact binary outputs and undeclared single columns carry probabilities.
+    scalar_probability_input = output_kind != "scores" and (
+        raw.ndim == 1 or (raw.ndim == 2 and raw.shape[1] == 1)
+    )
     if require_probabilities and output_kind == "scores":
         raise ValueError(f"{context} requires probabilities, not arbitrary class scores")
-    if require_probabilities or output_kind == "probabilities" or binary_probability_input:
+    if require_probabilities or output_kind == "probabilities" or scalar_probability_input:
         if np.any(normalized < -1e-8) or np.any(normalized > 1.0 + 1e-8):
             raise ValueError(f"{context} requires probabilities in [0, 1]")
         if not np.allclose(normalized.sum(axis=1), 1.0, atol=1e-6, rtol=1e-6):

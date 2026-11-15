@@ -188,7 +188,7 @@ class CounterfactualExplainer(BaseExplainer):
         )
         if matrix.ndim == 1:
             matrix = matrix.reshape(1, -1)
-        return normalize_classifier_outputs(
+        probabilities = normalize_classifier_outputs(
             self.model,
             matrix,
             context="Counterfactual search",
@@ -196,6 +196,9 @@ class CounterfactualExplainer(BaseExplainer):
             require_probabilities=True,
             allow_label_predictions=False,
         )
+        if probabilities.shape[1] < 2:
+            raise ValueError("Counterfactual search requires at least two classes")
+        return probabilities
 
     def _get_target_class(self, instance: np.ndarray, desired_class: Optional[int] = None) -> int:
         """Resolve an output-column target from the original prediction."""
