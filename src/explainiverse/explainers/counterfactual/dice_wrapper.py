@@ -10,6 +10,7 @@ Counterfactual explanations answer: "Which feasible feature changes would
 change this classifier's prediction?"
 """
 
+from fractions import Fraction
 from numbers import Integral, Real
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,7 @@ class CounterfactualExplainer(BaseExplainer):
     _fixed_indices: np.ndarray
     _categorical_values: Dict[int, np.ndarray]
     scales: np.ndarray
+    _wide_spans: Dict[int, Fraction]
 
     def __init__(
         self,
@@ -172,10 +174,13 @@ class CounterfactualExplainer(BaseExplainer):
     def _compute_scales(self) -> None:
         """Compute non-zero range scales used by proximity and diversity."""
         scales = []
-        for name in self.feature_names:
+        self._wide_spans = {}
+        for index, name in enumerate(self.feature_names):
             lower, upper = self.feature_ranges[name]
             width = upper - lower
             scales.append(width if width > 0 else 1.0)
+            if not np.isfinite(width):
+                self._wide_spans[index] = Fraction(upper) - Fraction(lower)
         self.scales = np.asarray(scales, dtype=float)
 
     def _predict_probabilities(self, X: np.ndarray) -> np.ndarray:
@@ -219,8 +224,20 @@ class CounterfactualExplainer(BaseExplainer):
         order = np.argsort(probabilities, kind="stable")[::-1]
         return int(next(index for index in order if index != current_class))
 
+    def _normalized_difference(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        if not self._wide_spans:
+            return (left - right) / self.scales
+
+        # On wide columns even the numerator can overflow before division.
+        finite = np.isfinite(self.scales)
+        diff = np.empty_like(left)
+        diff[finite] = (left[finite] - right[finite]) / self.scales[finite]
+        for index, span in self._wide_spans.items():
+            diff[index] = (Fraction(float(left[index])) - Fraction(float(right[index]))) / span
+        return diff
+
     def _proximity_loss(self, candidate: np.ndarray, original: np.ndarray) -> float:
-        diff = (candidate - original) / self.scales
+        diff = self._normalized_difference(candidate, original)
         return float(np.sum(diff**2))
 
     def _validity_loss(self, candidate: np.ndarray, target_class: int) -> float:
@@ -234,8 +251,7 @@ class CounterfactualExplainer(BaseExplainer):
         distances = []
         for left in range(len(candidates)):
             for right in range(left + 1, len(candidates)):
-                diff = (candidates[left] - candidates[right]) / self.scales
-                distances.append(float(np.sum(diff**2)))
+                distances.append(self._proximity_loss(candidates[left], candidates[right]))
         return -float(np.mean(distances))
 
     def _project(self, candidate: np.ndarray, original: np.ndarray) -> np.ndarray:
@@ -364,8 +380,7 @@ class CounterfactualExplainer(BaseExplainer):
             if existing and self.diversity_weight:
                 distances = []
                 for prior in existing:
-                    diff = (candidate - prior) / self.scales
-                    distances.append(min(float(np.sum(diff**2)), 1.0))
+                    distances.append(min(self._proximity_loss(candidate, prior), 1.0))
                 loss -= self.diversity_weight * float(np.mean(distances))
             return float(loss)
 
@@ -487,13 +502,11 @@ class CounterfactualExplainer(BaseExplainer):
 
         action_magnitudes = None
         if counterfactuals:
-            action_magnitudes = {}
-            for index, name in enumerate(self.feature_names):
-                changes = [
-                    abs(candidate[index] - query[index]) / self.scales[index]
-                    for candidate in counterfactuals
-                ]
-                action_magnitudes[name] = float(np.mean(changes))
+            actions = np.abs([self._normalized_difference(row, query) for row in counterfactuals])
+            action_magnitudes = {
+                name: float(np.mean(actions[:, index]))
+                for index, name in enumerate(self.feature_names)
+            }
 
         failure_reason = None
         if not counterfactuals:
