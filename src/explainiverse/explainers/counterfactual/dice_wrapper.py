@@ -259,7 +259,7 @@ class CounterfactualExplainer(BaseExplainer):
                 raise ValueError(f"instance value for {name!r} is outside its feature range")
         for index in self._categorical_indices:
             allowed = self._categorical_values[int(index)]
-            if not np.any(np.isclose(query[index], allowed, atol=1e-12, rtol=0.0)):
+            if query[index] not in allowed:
                 name = self.feature_names[int(index)]
                 raise ValueError(
                     f"instance value for categorical feature {name!r} was not "
