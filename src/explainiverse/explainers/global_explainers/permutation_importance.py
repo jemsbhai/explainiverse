@@ -249,6 +249,10 @@ class PermutationImportanceExplainer(BaseExplainer):
 
         classes = self._class_values(predictions.shape[1])
         if predictions.shape[1] == 1 and len(classes) == 2:
+            if output_kind == "scores":
+                raise ValueError(
+                    "Permutation importance class-score outputs must contain one column per class"
+                )
             probabilities = as_real_array(
                 predictions[:, 0],
                 name="one-column classification output",
