@@ -26,6 +26,7 @@ from explainiverse.explainers._validation import (
     validate_name_sequence,
     validate_single_tabular_instance,
 )
+from explainiverse.explainers.rule_based._discretization import quantile_cuts
 
 
 class AnchorsExplainer(BaseExplainer):
@@ -161,14 +162,8 @@ class AnchorsExplainer(BaseExplainer):
         self.bins = {}
         self.bin_labels = {}
 
-        if self.discretizer == "quartile":
-            percentiles = [25, 50, 75]
-        elif self.discretizer == "decile":
-            percentiles = list(range(10, 100, 10))
         for idx in range(self.training_data.shape[1]):
-            values = self.training_data[:, idx]
-            bins = np.percentile(values, percentiles)
-            bins = np.unique(bins)  # Remove duplicates
+            bins = quantile_cuts(self.training_data[:, idx], self.discretizer)
             self.bins[idx] = bins
 
             self.bin_labels[idx] = [

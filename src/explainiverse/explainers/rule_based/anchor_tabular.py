@@ -47,6 +47,7 @@ from explainiverse.explainers.rule_based._anchor_bandit import (
     kl_lucb_top_m,
     kl_upper_bound,
 )
+from explainiverse.explainers.rule_based._discretization import quantile_cuts
 
 _Operator = Literal["leq", "gt"]
 _Rule = Tuple[int, ...]
@@ -233,11 +234,8 @@ class AnchorTabularExplainer(BaseExplainer):
         return int(value)
 
     def _compute_cuts(self) -> Dict[int, np.ndarray]:
-        percentiles = [25, 50, 75] if self.discretizer == "quartile" else list(range(10, 100, 10))
         return {
-            feature_index: np.unique(
-                np.percentile(self.background_data[:, feature_index], percentiles)
-            ).astype(float)
+            feature_index: quantile_cuts(self.background_data[:, feature_index], self.discretizer)
             for feature_index in range(self.background_data.shape[1])
         }
 
