@@ -657,8 +657,9 @@ class AnchorTabularExplainer(BaseExplainer):
             copy=True,
         )
         rng = np.random.default_rng(self.random_state)
-        query_scores = self._predict_class_scores(query.reshape(1, -1))
-        target_index = int(np.argmax(query_scores[0]))
+        # The model may reuse its score buffer for the perturbation batches.
+        query_prediction = self._predict_class_scores(query.reshape(1, -1))[0].copy()
+        target_index = int(np.argmax(query_prediction))
         target_name = self.class_names[target_index]
         predicates = self._generate_predicates(query)
         search = self._search(query, target_index, predicates, rng)
@@ -749,7 +750,7 @@ class AnchorTabularExplainer(BaseExplainer):
                 ),
                 "coverage_semantics": "exact_fraction_of_empirical_background_rows",
                 "target_output_index": int(target_index),
-                "model_prediction": query_scores[0].copy(),
+                "model_prediction": query_prediction,
                 "feature_attributions": {
                     name: float(index in anchor_feature_indices)
                     for index, name in enumerate(self.feature_names)
