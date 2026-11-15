@@ -320,6 +320,23 @@ class CounterfactualExplainer(BaseExplainer):
                 low = middle
         return high
 
+    def _perturb_exemplar(self, seed: np.ndarray, rng: np.random.Generator) -> None:
+        """Perturb continuous coordinates by 15% of their range per standard deviation."""
+        indices = self._continuous_indices
+        deviations = 0.15 * self.scales[indices]
+        wide = np.isinf(deviations)
+        deviations[wide] = 1.0
+        draws = rng.normal(0.0, deviations)
+        seed[indices[~wide]] += draws[~wide]
+
+        # A wide-range offset can overflow even when adding it to the exemplar
+        # lands inside the domain. Project the exact sum before rounding.
+        for index, draw in zip(indices[wide], draws[wide]):
+            span = self._wide_spans[int(index)]
+            lower, upper = self.feature_ranges[self.feature_names[int(index)]]
+            value = Fraction(float(seed[index])) + Fraction(0.15) * span * Fraction(float(draw))
+            seed[index] = float(min(upper, max(lower, value)))
+
     def _candidate_seeds(
         self,
         original: np.ndarray,
@@ -346,10 +363,7 @@ class CounterfactualExplainer(BaseExplainer):
             elif len(target_rows):
                 seed = target_rows[int(rng.integers(len(target_rows)))].copy()
                 if self._continuous_indices.size:
-                    seed[self._continuous_indices] += rng.normal(
-                        0.0,
-                        0.15 * self.scales[self._continuous_indices],
-                    )
+                    self._perturb_exemplar(seed, rng)
             else:
                 seed = original.copy()
                 for index in self._continuous_indices:
