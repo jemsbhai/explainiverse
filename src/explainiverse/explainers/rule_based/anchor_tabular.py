@@ -581,6 +581,8 @@ class AnchorTabularExplainer(BaseExplainer):
                 # the configured budget cannot support the next valid step.
                 budget_exhausted = True
                 beam_search_completed = False
+            # Check every selected rule even if the budget runs out: later
+            # rules can qualify using samples already drawn during KL-LUCB.
             for rule in beam:
                 statistics = candidate_statistics[rule]
                 status, lower, upper = self._certify_candidate(
@@ -607,7 +609,6 @@ class AnchorTabularExplainer(BaseExplainer):
                 if status == "budget_exhausted":
                     budget_exhausted = True
                     beam_search_completed = False
-                    break
             if budget_exhausted:
                 break
 
