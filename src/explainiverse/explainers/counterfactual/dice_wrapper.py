@@ -477,6 +477,19 @@ class CounterfactualExplainer(BaseExplainer):
         )
         return assemble(result.x)
 
+    def _are_duplicates(self, left: np.ndarray, right: np.ndarray) -> bool:
+        """Compare feasible rows with a continuous tolerance of one ten-millionth of each range."""
+        for index in np.flatnonzero(left != right):
+            if index in self._categorical_values:
+                return False
+            # Fixed coordinates match by construction. Compare continuous gaps
+            # exactly because normalizing can round a distinct pair onto the cutoff.
+            lower, upper = self.feature_ranges[self.feature_names[index]]
+            gap = abs(Fraction(float(left[index])) - Fraction(float(right[index])))
+            if gap * 10_000_000 > Fraction(upper) - Fraction(lower):
+                return False
+        return True
+
     def _generate_diverse_counterfactuals(
         self,
         instance: np.ndarray,
@@ -506,16 +519,7 @@ class CounterfactualExplainer(BaseExplainer):
             valid = self._refine_toward_original(valid, instance, target_class)
             if not self._is_target(valid, target_class):
                 continue
-            if any(
-                np.array_equal(valid[self._categorical_indices], prior[self._categorical_indices])
-                and np.allclose(
-                    valid[self._continuous_indices],
-                    prior[self._continuous_indices],
-                    atol=1e-7,
-                    rtol=0.0,
-                )
-                for prior in counterfactuals
-            ):
+            if any(self._are_duplicates(valid, prior) for prior in counterfactuals):
                 continue
             counterfactuals.append(valid)
             if len(counterfactuals) == num_counterfactuals:
