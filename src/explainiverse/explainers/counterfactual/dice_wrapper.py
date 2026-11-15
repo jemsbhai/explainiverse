@@ -348,7 +348,12 @@ class CounterfactualExplainer(BaseExplainer):
                 seed = original.copy()
                 for index in self._continuous_indices:
                     lower, upper = self.feature_ranges[self.feature_names[int(index)]]
-                    seed[index] = rng.uniform(lower, upper)
+                    wide_span = self._wide_spans.get(int(index))
+                    if wide_span is None:
+                        seed[index] = rng.uniform(lower, upper)
+                    else:
+                        # Uniform sampling needs one draw even when upper - lower overflows.
+                        seed[index] = float(Fraction(lower) + wide_span * Fraction(rng.random()))
                 for index in self._categorical_indices:
                     allowed = self._categorical_values[int(index)]
                     seed[index] = allowed[int(rng.integers(len(allowed)))]
