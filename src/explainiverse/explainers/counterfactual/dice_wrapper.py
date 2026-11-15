@@ -304,9 +304,15 @@ class CounterfactualExplainer(BaseExplainer):
 
         for _ in range(steps):
             middle = high.copy()
-            middle[self._continuous_indices] = (
-                low[self._continuous_indices] + high[self._continuous_indices]
-            ) / 2.0
+            left = low[self._continuous_indices]
+            right = high[self._continuous_indices]
+            with np.errstate(over="ignore"):
+                midpoint = (left + right) / 2.0
+            overflow = np.isinf(midpoint)
+            if np.any(overflow):
+                # Both endpoints are large enough to halve exactly on these coordinates.
+                midpoint[overflow] = left[overflow] / 2.0 + right[overflow] / 2.0
+            middle[self._continuous_indices] = midpoint
             middle = self._project(middle, original)
             if self._is_target(middle, target_class):
                 high = middle
