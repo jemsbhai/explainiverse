@@ -238,7 +238,12 @@ class CounterfactualExplainer(BaseExplainer):
 
     def _proximity_loss(self, candidate: np.ndarray, original: np.ndarray) -> float:
         diff = self._normalized_difference(candidate, original)
-        return float(np.sum(diff**2))
+        with np.errstate(under="ignore"):
+            squares = diff**2
+        if np.any((diff != 0) & (squares < np.finfo(float).tiny)):
+            # Round the sum once when individual squares can lose subnormal bits.
+            return float(sum(Fraction(float(value)) ** 2 for value in diff if value != 0))
+        return float(np.sum(squares))
 
     def _validity_loss(self, candidate: np.ndarray, target_class: int) -> float:
         probability = self._predict_probabilities(candidate.reshape(1, -1))[0, target_class]
