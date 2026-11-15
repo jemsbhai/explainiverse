@@ -594,12 +594,16 @@ class AnchorTabularExplainer(BaseExplainer):
                 )
                 certification_bounds[rule] = (lower, upper)
                 mean = statistics.mean
-                assert mean is not None
-                fallback = (rule, mean, candidate_coverage[rule])
-                if self._is_better_fallback(fallback, best_fallback):
-                    best_fallback = fallback
-                if status == "certified" and self._is_better_certified(fallback, best_certified):
-                    best_certified = fallback
+                # Selecting every arm needs no pulls. The budget can expire
+                # before a selected rule receives its first certification sample.
+                if mean is not None:
+                    fallback = (rule, mean, candidate_coverage[rule])
+                    if self._is_better_fallback(fallback, best_fallback):
+                        best_fallback = fallback
+                    if status == "certified" and self._is_better_certified(
+                        fallback, best_certified
+                    ):
+                        best_certified = fallback
                 if status == "budget_exhausted":
                     budget_exhausted = True
                     beam_search_completed = False
