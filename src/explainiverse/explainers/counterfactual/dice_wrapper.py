@@ -11,8 +11,9 @@ change this classifier's prediction?"
 """
 
 from fractions import Fraction
+from itertools import combinations
 from numbers import Integral, Real
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 from scipy.optimize import minimize
@@ -236,28 +237,53 @@ class CounterfactualExplainer(BaseExplainer):
             diff[index] = (Fraction(float(left[index])) - Fraction(float(right[index]))) / span
         return diff
 
+    @staticmethod
+    def _exact_squared_norm(diff: np.ndarray) -> Fraction:
+        return sum((Fraction(float(value)) ** 2 for value in diff if value != 0), Fraction(0))
+
     def _proximity_loss(self, candidate: np.ndarray, original: np.ndarray) -> float:
         diff = self._normalized_difference(candidate, original)
         with np.errstate(under="ignore"):
             squares = diff**2
         if np.any((diff != 0) & (squares < np.finfo(float).tiny)):
             # Round the sum once when individual squares can lose subnormal bits.
-            return float(sum(Fraction(float(value)) ** 2 for value in diff if value != 0))
+            return float(self._exact_squared_norm(diff))
         return float(np.sum(squares))
 
     def _validity_loss(self, candidate: np.ndarray, target_class: int) -> float:
         probability = self._predict_probabilities(candidate.reshape(1, -1))[0, target_class]
         return float(-np.log(max(float(probability), 1e-12)))
 
+    def _mean_squared_distance(
+        self,
+        pairs: Callable[[], Iterable[tuple[np.ndarray, np.ndarray]]],
+        *,
+        capped: bool = False,
+    ) -> float:
+        distances = []
+        has_tiny_pair = False
+        for left, right in pairs():
+            distance = self._proximity_loss(left, right)
+            distances.append(distance)
+            if distance <= np.finfo(float).tiny and not np.array_equal(left, right):
+                has_tiny_pair = True
+        if has_tiny_pair and len(distances) > 1:
+            # Rounding each subnormal pair distance before averaging can erase
+            # the entire mean. Apply the optimizer's per-pair cap before summing.
+            total = Fraction(0)
+            for left, right in pairs():
+                exact = self._exact_squared_norm(self._normalized_difference(left, right))
+                if capped and exact > 1:
+                    exact = Fraction(1)
+                total += exact
+            return float(total / len(distances))
+        return float(np.mean(np.minimum(distances, 1.0) if capped else distances))
+
     def _diversity_loss(self, candidates: List[np.ndarray]) -> float:
         """Negative mean pairwise normalized squared distance."""
         if len(candidates) < 2:
             return 0.0
-        distances = []
-        for left in range(len(candidates)):
-            for right in range(left + 1, len(candidates)):
-                distances.append(self._proximity_loss(candidates[left], candidates[right]))
-        return -float(np.mean(distances))
+        return -self._mean_squared_distance(lambda: combinations(candidates, 2))
 
     def _project(self, candidate: np.ndarray, original: np.ndarray) -> np.ndarray:
         """Project a candidate onto ranges, categories, and fixed features."""
@@ -408,10 +434,10 @@ class CounterfactualExplainer(BaseExplainer):
             loss = self._validity_loss(candidate, target_class)
             loss += self.proximity_weight * self._proximity_loss(candidate, original)
             if existing and self.diversity_weight:
-                distances = []
-                for prior in existing:
-                    distances.append(min(self._proximity_loss(candidate, prior), 1.0))
-                loss -= self.diversity_weight * float(np.mean(distances))
+                mean_distance = self._mean_squared_distance(
+                    lambda: ((candidate, prior) for prior in existing), capped=True
+                )
+                loss -= self.diversity_weight * mean_distance
             return float(loss)
 
         result = minimize(
