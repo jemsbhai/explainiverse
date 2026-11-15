@@ -468,13 +468,23 @@ class CounterfactualExplainer(BaseExplainer):
                 loss -= self.diversity_weight * mean_distance
             return float(loss)
 
-        result = minimize(
-            objective,
-            seed[indices],
-            method="L-BFGS-B",
-            bounds=bounds,
-            options={"maxiter": int(max_iter)},
-        )
+        solver_objective = objective
+        solver_errors = np.errstate()
+        half_max = np.finfo(float).max / 2
+        if any(lower < -half_max or upper > half_max for lower, upper in bounds):
+            # SciPy can overflow while checking a trial step against the bounds.
+            # An infinite trial compares outside and SciPy takes a feasible step.
+            # Evaluate the actual loss and model under the caller's overflow policy.
+            solver_objective = np.errstate(over=np.geterr()["over"])(objective)
+            solver_errors = np.errstate(over="ignore")
+        with solver_errors:
+            result = minimize(
+                solver_objective,
+                seed[indices],
+                method="L-BFGS-B",
+                bounds=bounds,
+                options={"maxiter": int(max_iter)},
+            )
         return assemble(result.x)
 
     def _are_duplicates(self, left: np.ndarray, right: np.ndarray) -> bool:
