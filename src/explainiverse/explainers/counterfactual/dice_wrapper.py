@@ -285,6 +285,23 @@ class CounterfactualExplainer(BaseExplainer):
             return 0.0
         return -self._mean_squared_distance(lambda: combinations(candidates, 2))
 
+    def _mean_absolute_actions(
+        self, candidates: List[np.ndarray], query: np.ndarray
+    ) -> Dict[str, float]:
+        """Average absolute changes over the returned rows, normalized by feature range."""
+        actions = {}
+        for index, name in enumerate(self.feature_names):
+            original = Fraction(float(query[index]))
+            # Normalizing each change first can round away a representable mean.
+            total = sum(
+                (abs(Fraction(float(row[index])) - original) for row in candidates),
+                Fraction(0),
+            )
+            lower, upper = self.feature_ranges[name]
+            span = Fraction(upper) - Fraction(lower) or 1
+            actions[name] = float(total / (span * len(candidates)))
+        return actions
+
     def _project(self, candidate: np.ndarray, original: np.ndarray) -> np.ndarray:
         """Project a candidate onto ranges, categories, and fixed features."""
         projected = np.asarray(candidate, dtype=float).copy()
@@ -566,14 +583,6 @@ class CounterfactualExplainer(BaseExplainer):
             predictions.append(probabilities.tolist())
             distances.append(self._proximity_loss(candidate, query))
 
-        action_magnitudes = None
-        if counterfactuals:
-            actions = np.abs([self._normalized_difference(row, query) for row in counterfactuals])
-            action_magnitudes = {
-                name: float(np.mean(actions[:, index]))
-                for index, name in enumerate(self.feature_names)
-            }
-
         failure_reason = None
         if not counterfactuals:
             failure_reason = (
@@ -608,10 +617,10 @@ class CounterfactualExplainer(BaseExplainer):
             "diversity_loss": self._diversity_loss(counterfactuals),
             "failure_reason": failure_reason,
         }
-        if action_magnitudes is not None:
+        if counterfactuals:
             explanation_data.update(
                 {
-                    "feature_attributions": action_magnitudes,
+                    "feature_attributions": self._mean_absolute_actions(counterfactuals, query),
                     "feature_attribution_semantics": (
                         "mean_absolute_normalized_counterfactual_action"
                     ),
