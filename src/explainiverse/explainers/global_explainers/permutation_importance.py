@@ -10,11 +10,13 @@ Reference:
     Breiman, L. (2001). Random Forests. Machine Learning, 45(1), 5-32.
 """
 
+from fractions import Fraction
 from numbers import Integral
 from typing import Callable, List, Optional
 
 import numpy as np
 from sklearn.metrics import accuracy_score, r2_score
+from sklearn.utils.validation import check_array
 
 from explainiverse.core.explainer import BaseExplainer
 from explainiverse.core.explanation import Explanation
@@ -26,6 +28,48 @@ from explainiverse.explainers._validation import (
 )
 
 _VALID_TASKS = {"classification", "regression"}
+
+
+def _integer_units(column: np.ndarray) -> tuple[list[int], int]:
+    """Express a finite numeric column as integers with a common denominator."""
+    if column.dtype.kind in "biu":
+        return column.tolist(), 1
+    ratios = [value.as_integer_ratio() for value in column.tolist()]
+    # All binary floating-point denominators are powers of two.
+    scale = max(denominator for _, denominator in ratios)
+    return [numerator * (scale // denominator) for numerator, denominator in ratios], scale
+
+
+def _regression_r2(targets: np.ndarray, predictions: np.ndarray) -> float:
+    """Preserve native integer differences in the default regression score."""
+    n = len(targets)
+    if (
+        n < 2
+        or predictions.dtype.kind not in "biuf"
+        or (targets.dtype.kind not in "biu" and predictions.dtype.kind not in "biu")
+    ):
+        return r2_score(targets, predictions)
+
+    targets = check_array(
+        targets, dtype=None if targets.dtype.kind in "biuf" else np.float64, ensure_2d=False
+    )
+    total = Fraction(0)
+    target_columns = targets.reshape(n, -1).T
+    for target, prediction in zip(target_columns, predictions.reshape(n, -1).T):
+        ys, y_scale = _integer_units(target)
+        ps, p_scale = _integer_units(prediction)
+        # n*SST = n*sum(y²) - sum(y)². Express both sums of squares
+        # in the same units before dividing, even for mixed numeric dtypes.
+        variation = (n * sum(y * y for y in ys) - sum(ys) ** 2) * p_scale**2
+        residual = sum((y * p_scale - p * y_scale) ** 2 for y, p in zip(ys, ps))
+        if variation:
+            total += Fraction(variation - n * residual, variation)
+        else:
+            total += int(residual == 0)
+    try:
+        return float(total / len(target_columns))
+    except OverflowError as exc:
+        raise ValueError("scoring function result must contain only finite values") from exc
 
 
 def _resolve_task(model, task: Optional[str]) -> str:
@@ -235,7 +279,7 @@ class PermutationImportanceExplainer(BaseExplainer):
             scorer = accuracy_score
         else:
             score_input = self._regression_values(predictions)
-            scorer = r2_score
+            scorer = _regression_r2
 
         raw_score = as_real_array(
             scorer(self.y, score_input),
