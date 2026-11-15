@@ -381,17 +381,18 @@ class CounterfactualExplainer(BaseExplainer):
     def _perturb_exemplar(self, seed: np.ndarray, rng: np.random.Generator) -> None:
         """Perturb continuous coordinates by 15% of their range per standard deviation."""
         indices = self._continuous_indices
-        deviations = 0.15 * self.scales[indices]
-        wide = np.isinf(deviations)
-        deviations[wide] = 1.0
+        with np.errstate(under="ignore"):
+            deviations = 0.15 * self.scales[indices]
+        needs_exact_span = np.isinf(deviations) | (deviations <= np.finfo(float).tiny)
+        deviations[needs_exact_span] = 1.0
         draws = rng.normal(0.0, deviations)
-        seed[indices[~wide]] += draws[~wide]
+        seed[indices[~needs_exact_span]] += draws[~needs_exact_span]
 
-        # A wide-range offset can overflow even when adding it to the exemplar
-        # lands inside the domain. Project the exact sum before rounding.
-        for index, draw in zip(indices[wide], draws[wide]):
-            span = self._wide_spans[int(index)]
+        # A subnormal deviation can lose the whole step, and a wide offset can
+        # overflow. Apply the unit-normal draw to the exact span before rounding.
+        for index, draw in zip(indices[needs_exact_span], draws[needs_exact_span]):
             lower, upper = self.feature_ranges[self.feature_names[int(index)]]
+            span = Fraction(upper) - Fraction(lower)
             value = Fraction(float(seed[index])) + Fraction(0.15) * span * Fraction(float(draw))
             seed[index] = float(min(upper, max(lower, value)))
 
